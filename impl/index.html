@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현 가이드 — C++ / OpenGL로 직접 만들기</title>
+<meta name="description" content="개념을 넘어 실제로 구현한다. 그래픽스 기능들을 C++와 모던 OpenGL로 직접 작성하는 실무자용 구현 가이드." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width: 940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">구현 가이드 (C++ / OpenGL)</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION GUIDE</span>
+  <h1 style="font-size:32px; margin:0 0 12px;">C++ / OpenGL로 직접 만들기</h1>
+  <p class="lead" style="font-size:16px;">
+    개념 가이드에서 <em>"무엇이 어떻게 동작하는가"</em>를 봤다면, 여기서는 <strong>"그것을 실제로 어떻게 코딩하는가"</strong>를 다룹니다.
+    모든 코드는 복사해 바로 컴파일할 수 있는 수준의 <strong>모던 OpenGL 3.3+ Core Profile</strong> 예제입니다.
+  </p>
+
+  <h2>이 가이드가 가정하는 것</h2>
+  <ul>
+    <li>C++ 기본 문법 (클래스, 포인터, 표준 라이브러리)</li>
+    <li>개념 가이드의 내용(벡터·행렬·파이프라인·셰이더 등)을 한 번 훑어봤을 것</li>
+    <li>OpenGL <strong>3.3 Core</strong> 이상 (컴퓨트 셰이더 등 일부는 4.3+)</li>
+  </ul>
+
+  <h2>개발 환경 (한 번만 세팅)</h2>
+  <p>모든 챕터 예제는 아래 3개 라이브러리를 씁니다. 표준 조합이라 자료도 가장 많습니다.</p>
+  <table class="impl">
+    <thead><tr><th>라이브러리</th><th>역할</th><th>대안</th></tr></thead>
+    <tbody>
+      <tr><td><strong>GLFW</strong></td><td>창 생성 · 입력 · OpenGL 컨텍스트</td><td>SDL2</td></tr>
+      <tr><td><strong>GLAD</strong></td><td>OpenGL 함수 포인터 로딩</td><td>GLEW</td></tr>
+      <tr><td><strong>GLM</strong></td><td>벡터/행렬 수학 (헤더 온리)</td><td>직접 구현(1장 참고)</td></tr>
+      <tr><td><strong>stb_image</strong></td><td>이미지 로딩 (헤더 온리)</td><td>SOIL2</td></tr>
+    </tbody>
+  </table>
+
+  <h3>CMake 프로젝트 골격</h3>
+  <div class="code">
+    <div class="code-head"><span>CMakeLists.txt</span><span class="lang">cmake</span></div>
+    <pre><code class="language-bash">cmake_minimum_required(VERSION 3.16)
+project(gfx_impl)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# GLFW: 서브디렉터리 또는 find_package(glfw3)
+find_package(glfw3 CONFIG REQUIRED)
+find_package(OpenGL REQUIRED)
+
+add_executable(app
+    src/main.cpp
+    src/glad.c          # GLAD 로더 (생성기에서 받은 파일)
+)
+target_include_directories(app PRIVATE include)   # glad/, GLFW/, glm/, stb_image.h
+target_link_libraries(app PRIVATE glfw OpenGL::GL)</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">TIP</span>
+    윈도우에서 가장 쉬운 길은 <strong>vcpkg</strong>입니다:
+    <code>vcpkg install glfw3 glm</code> 후 <code>-DCMAKE_TOOLCHAIN_FILE=.../vcpkg.cmake</code>.
+    GLAD는 <a href="https://glad.dav1d.de/" style="color:var(--accent)">glad.dav1d.de</a>에서
+    <em>gl 3.3 Core</em>로 생성해 <code>glad.c</code> / <code>glad/glad.h</code>를 프로젝트에 넣습니다.
+  </div>
+
+  <h3>최소 실행 코드: 창 띄우고 지우기</h3>
+  <p>모든 예제의 출발점입니다. GLFW로 창을 만들고, GLAD로 함수를 로드한 뒤, 렌더 루프를 돕니다.</p>
+  <div class="code">
+    <div class="code-head"><span>src/main.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;glad/glad.h&gt;
+#include &lt;GLFW/glfw3.h&gt;
+#include &lt;cstdio&gt;
+
+// 창 크기가 바뀌면 뷰포트도 맞춰준다
+static void onResize(GLFWwindow*, int w, int h) { glViewport(0, 0, w, h); }
+
+int main() {
+    if (!glfwInit()) { std::fprintf(stderr, "GLFW init 실패\n"); return -1; }
+
+    // OpenGL 3.3 Core Profile 요청
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef __APPLE__
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE); // macOS 필수
+#endif
+
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "OpenGL", nullptr, nullptr);
+    if (!window) { std::fprintf(stderr, "창 생성 실패\n"); glfwTerminate(); return -1; }
+    glfwMakeContextCurrent(window);
+    glfwSetFramebufferSizeCallback(window, onResize);
+
+    // GLAD: 컨텍스트를 만든 "후에" 로드해야 한다
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        std::fprintf(stderr, "GLAD 로드 실패\n"); return -1;
+    }
+
+    glfwSwapInterval(1); // V-Sync
+
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
+
+        glClearColor(0.06f, 0.07f, 0.10f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        // ── 여기서 그린다 ──
+
+        glfwSwapBuffers(window);
+    }
+
+    glfwTerminate();
+    return 0;
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>gladLoadGLLoader</code>는 반드시 <code>glfwMakeContextCurrent</code> <em>다음</em>에 호출해야 합니다.
+    순서가 바뀌면 모든 <code>gl*</code> 함수 포인터가 <code>null</code>이라 첫 호출에서 크래시합니다.
+  </div>
+
+  <h2 style="margin-top:48px;">구현 챕터</h2>
+  <p class="lead">개념 가이드와 같은 순서입니다. 각 챕터는 독립적으로 읽을 수 있지만, 1~3장이 나머지의 토대입니다.</p>
+
+  <div class="hub-grid">
+    <a class="hub-card" href="./01-math.html">
+      <div class="num">CHAPTER 1</div>
+      <h3>기초 수학</h3>
+      <p>벡터·행렬·변환을 C++로 직접 구현하고 GLM으로 넘어가기.</p>
+      <div class="topics">벡터 · 행렬 · 변환 · 내적/외적 · 삼각함수 · 기하 교차</div>
+    </a>
+    <a class="hub-card" href="./02-raster2d.html">
+      <div class="num">CHAPTER 2</div>
+      <h3>2D 그래픽스</h3>
+      <p>프레임버퍼에 직접 픽셀을 찍어 선·삼각형을 래스터화하기.</p>
+      <div class="topics">픽셀/색 · 래스터화 · 이미지 필터 · 알파 블렌딩 · 스프라이트</div>
+    </a>
+    <a class="hub-card" href="./03-opengl3d.html">
+      <div class="num">CHAPTER 3</div>
+      <h3>3D 그래픽스</h3>
+      <p>VAO/VBO부터 MVP·카메라·Z버퍼·퐁 조명·텍스처까지 실제 OpenGL로.</p>
+      <div class="topics">MVP · 카메라 · 메시 · 깊이버퍼 · 조명 · 텍스처</div>
+    </a>
+    <a class="hub-card" href="./04-shaders.html">
+      <div class="num">CHAPTER 4</div>
+      <h3>GPU · 셰이더</h3>
+      <p>셰이더 컴파일·링크, 버텍스/프래그먼트/컴퓨트 셰이더 작성.</p>
+      <div class="topics">셰이더 프로그램 · Vertex · Fragment · Compute · GLSL</div>
+    </a>
+    <a class="hub-card" href="./05-api.html">
+      <div class="num">CHAPTER 5</div>
+      <h3>그래픽스 API</h3>
+      <p>OpenGL 컨텍스트·상태 머신·렌더 루프의 실전, 그리고 타 API로의 개념 이식.</p>
+      <div class="topics">컨텍스트 · 상태관리 · 디버깅 · DX12/Vulkan/Metal/WebGPU 매핑</div>
+    </a>
+    <a class="hub-card" href="./06-advanced.html">
+      <div class="num">CHAPTER 6</div>
+      <h3>고급 렌더링</h3>
+      <p>PBR·HDR·섀도우맵·디퍼드·SSAO, 그리고 CPU 레이/패스 트레이서.</p>
+      <div class="topics">PBR · HDR · Shadow Map · Deferred · Screen-Space · Ray/Path Tracing · GI</div>
+    </a>
+    <a class="hub-card" href="./07-techniques.html">
+      <div class="num">CHAPTER 7</div>
+      <h3>실전 렌더링 기법</h3>
+      <p>안티앨리어싱·감마·밉맵·투명·AO·LOD/컬링의 실전 구현.</p>
+      <div class="topics">안티앨리어싱 · 감마 · 밉맵 · 투명 · AO · LOD/컬링</div>
+    </a>
+  </div>
+
+  <div class="footer">
+    🛠️ 구현 가이드 · 모든 코드는 학습용으로 새로 작성된 원본 예제입니다 · C++17 / OpenGL 3.3+ Core
+  </div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

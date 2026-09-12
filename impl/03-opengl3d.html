@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 3D 그래픽스 — C++/OpenGL</title>
+<meta name="description" content="VAO/VBO부터 MVP 변환, 카메라, 메시와 OBJ 로딩, 깊이 버퍼, 퐁 조명, 텍스처 매핑까지 실제 모던 OpenGL 3.3 Core로 직접 구현한다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width: 940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">3장. 3D 그래픽스</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION GUIDE · CHAPTER 3</span>
+  <h1 style="font-size:32px; margin:0 0 12px;">3D 그래픽스 — 모던 OpenGL로 직접</h1>
+  <p class="lead" style="font-size:16px;">
+    2장에서 CPU로 픽셀을 찍었다면, 이제 GPU에게 일을 맡깁니다.
+    정점을 <strong>VAO/VBO</strong>로 올리고, <strong>MVP 행렬</strong>로 3D 공간을 화면에 투영하고,
+    <strong>카메라 · 메시 · 깊이 버퍼 · 퐁 조명 · 텍스처</strong>까지 실제 <strong>OpenGL 3.3 Core Profile</strong>로 구현합니다.
+    창 생성·GLAD 로딩 보일러플레이트는 <a href="./index.html" style="color:var(--accent)">개발 환경</a>에서 만든 것을 그대로 씁니다.
+    셰이더 컴파일/링크의 전체 클래스는 <a href="./04-shaders.html" style="color:var(--accent)">4장</a>에서 다루므로,
+    여기서는 최소 인라인 버전으로 진행합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    이 장의 모든 코드는 <code>glBegin</code>/<code>glVertex</code> 같은 <strong>레거시 즉시 모드가 아닙니다.</strong>
+    Core Profile에서는 즉시 모드가 제거되어 있으므로, 반드시 버퍼 객체(VBO)와 셰이더를 써야 화면에 무언가 나옵니다.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="mvp">
+    <h2>1. Model → World → View → Projection</h2>
+    <p>
+      3D 점 하나가 화면 픽셀이 되기까지 세 번의 좌표계 변환을 거칩니다.
+      <strong>모델 행렬</strong>은 물체를 월드에 배치하고, <strong>뷰 행렬</strong>은 카메라 기준으로 세계를 옮기고,
+      <strong>투영 행렬</strong>은 원근을 만들어 클립 공간으로 보냅니다.
+      정점 셰이더에서 <code>projection * view * model * position</code> 순서로 곱하는 것이 핵심입니다(GLM은 열 우선이라 오른쪽부터 적용됨).
+    </p>
+    <ol class="steps">
+      <li>큐브 정점 데이터를 배열로 정의한다 (위치만, 36개 = 12삼각형).</li>
+      <li>VAO/VBO를 생성하고 정점 속성 포인터를 설정한다.</li>
+      <li>최소 정점/프래그먼트 셰이더를 컴파일해 프로그램을 만든다.</li>
+      <li>매 프레임 <code>model · view · projection</code>을 GLM으로 만들어 <code>glUniformMatrix4fv</code>로 업로드한다.</li>
+      <li><code>glDrawArrays</code>로 그린다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>src/cube.h — 큐브 정점 (위치 xyz)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#pragma once
+
+// 단위 큐브: 각 면 2삼각형 × 6면 = 36정점.
+// 인덱스를 쓰지 않는 간단 버전(중복 정점 허용).
+static const float kCubeVertices[] = {
+    // 뒷면 (z = -0.5)
+    -0.5f,-0.5f,-0.5f,  0.5f,-0.5f,-0.5f,  0.5f, 0.5f,-0.5f,
+     0.5f, 0.5f,-0.5f, -0.5f, 0.5f,-0.5f, -0.5f,-0.5f,-0.5f,
+    // 앞면 (z = +0.5)
+    -0.5f,-0.5f, 0.5f,  0.5f,-0.5f, 0.5f,  0.5f, 0.5f, 0.5f,
+     0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f,-0.5f, 0.5f,
+    // 왼쪽 면 (x = -0.5)
+    -0.5f, 0.5f, 0.5f, -0.5f, 0.5f,-0.5f, -0.5f,-0.5f,-0.5f,
+    -0.5f,-0.5f,-0.5f, -0.5f,-0.5f, 0.5f, -0.5f, 0.5f, 0.5f,
+    // 오른쪽 면 (x = +0.5)
+     0.5f, 0.5f, 0.5f,  0.5f, 0.5f,-0.5f,  0.5f,-0.5f,-0.5f,
+     0.5f,-0.5f,-0.5f,  0.5f,-0.5f, 0.5f,  0.5f, 0.5f, 0.5f,
+    // 아랫면 (y = -0.5)
+    -0.5f,-0.5f,-0.5f,  0.5f,-0.5f,-0.5f,  0.5f,-0.5f, 0.5f,
+     0.5f,-0.5f, 0.5f, -0.5f,-0.5f, 0.5f, -0.5f,-0.5f,-0.5f,
+    // 윗면 (y = +0.5)
+    -0.5f, 0.5f,-0.5f,  0.5f, 0.5f,-0.5f,  0.5f, 0.5f, 0.5f,
+     0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f,-0.5f,
+};</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>셰이더 (인라인 문자열) — 최소 MVP</span><span class="lang">glsl</span></div>
+      <pre><code class="language-glsl">// ── 정점 셰이더 ──
+#version 330 core
+layout(location = 0) in vec3 aPos;   // 로컬 좌표
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+
+void main() {
+    // 오른쪽부터 적용: 로컬 → 월드 → 뷰 → 클립
+    gl_Position = projection * view * model * vec4(aPos, 1.0);
+}
+
+// ── 프래그먼트 셰이더 ──
+#version 330 core
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(0.85, 0.55, 0.25, 1.0);  // 단색 주황
+}</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>src/main.cpp — 셋업 + 렌더 루프 (발췌)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;glad/glad.h&gt;
+#include &lt;GLFW/glfw3.h&gt;
+#include &lt;glm/glm.hpp&gt;
+#include &lt;glm/gtc/matrix_transform.hpp&gt;   // translate/rotate/perspective
+#include &lt;glm/gtc/type_ptr.hpp&gt;          // value_ptr
+
+// 최소 셰이더 컴파일 헬퍼 (전체 클래스는 4장 참고)
+GLuint makeProgram(const char* vsSrc, const char* fsSrc);
+
+int main() {
+    // ... GLFW 창 + GLAD 로딩(개발 환경 참고) ...
+    GLFWwindow* window = /* 1280x720 창 */ nullptr;
+
+    // 1) VAO/VBO 생성 후 정점 업로드
+    GLuint vao, vbo;
+    glGenVertexArrays(1, &amp;vao);
+    glGenBuffers(1, &amp;vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(kCubeVertices), kCubeVertices, GL_STATIC_DRAW);
+    // location 0 = vec3 위치, stride 3*float
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
+
+    GLuint prog = makeProgram(kVertSrc, kFragSrc);
+
+    // 유니폼 위치는 한 번만 조회해 캐시
+    GLint uModel = glGetUniformLocation(prog, "model");
+    GLint uView  = glGetUniformLocation(prog, "view");
+    GLint uProj  = glGetUniformLocation(prog, "projection");
+
+    glEnable(GL_DEPTH_TEST);  // 큐브가 앞뒤로 겹치므로 필요(§4)
+
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
+        glClearColor(0.06f, 0.07f, 0.10f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // 2) 매 프레임 세 행렬을 새로 만든다
+        float t = (float)glfwGetTime();
+        glm::mat4 model = glm::rotate(glm::mat4(1.0f), t, glm::vec3(0.4f, 1.0f, 0.2f));
+        // 카메라를 z축 +3만큼 뒤로 = 세계를 -3만큼 당김
+        glm::mat4 view  = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -3.0f));
+        glm::mat4 proj  = glm::perspective(glm::radians(45.0f),
+                                           1280.0f / 720.0f, 0.1f, 100.0f);
+
+        glUseProgram(prog);
+        // 3) 업로드: count=1, transpose=GL_FALSE(GLM은 이미 열 우선)
+        glUniformMatrix4fv(uModel, 1, GL_FALSE, glm::value_ptr(model));
+        glUniformMatrix4fv(uView,  1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(uProj,  1, GL_FALSE, glm::value_ptr(proj));
+
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLES, 0, 36);   // 4) 그리기
+
+        glfwSwapBuffers(window);
+    }
+    // ... 정리 ...
+}</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>glUniformMatrix4fv</code>의 <code>transpose</code> 인자는 <strong>반드시 <code>GL_FALSE</code></strong>여야 합니다.
+      GLM과 GLSL 모두 열 우선(column-major)이라 그대로 넘기면 맞습니다. 여기에 <code>GL_TRUE</code>를 넣으면 물체가 뒤집혀 보입니다.
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      유니폼은 <code>glUseProgram</code>으로 프로그램을 <em>먼저 바인딩한 뒤</em>에만 설정됩니다.
+      순서가 바뀌면 값이 조용히 무시되어 아무것도 안 보입니다.
+    </div>
+    <div class="callout perf">
+      <span class="tag">TIP</span>
+      <code>glGetUniformLocation</code>은 매 프레임 호출하지 말고 <strong>초기화 때 한 번만 조회해 캐시</strong>하세요.
+      이름 문자열 검색이라 프레임마다 부르면 낭비입니다.
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="camera">
+    <h2>2. 카메라</h2>
+    <p>
+      뷰 행렬은 사실 <strong>카메라 변환의 역행렬</strong>입니다. 카메라를 오른쪽으로 옮기는 것은 곧 세계 전체를 왼쪽으로 옮기는 것과 같죠.
+      GLM의 <code>glm::lookAt(eye, center, up)</code>이 이 역행렬을 대신 계산해 줍니다.
+      여기서는 위치·전방(front)·yaw/pitch를 들고 WASD 이동과 마우스 시점 회전을 처리하는 원본 <code>Camera</code> 클래스를 만듭니다.
+    </p>
+    <ol class="steps">
+      <li>위치·전방·업 벡터와 yaw/pitch 각도를 멤버로 둔다.</li>
+      <li>yaw/pitch로부터 전방 벡터를 삼각함수로 재계산한다.</li>
+      <li><code>viewMatrix()</code>는 <code>lookAt(pos, pos + front, up)</code>을 반환한다.</li>
+      <li>키 입력은 <strong>델타 타임</strong>을 곱해 프레임률과 무관하게 이동시킨다.</li>
+      <li>마우스 콜백에서 커서 이동량으로 yaw/pitch를 갱신하고 pitch를 ±89°로 클램프한다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>src/Camera.h — 원본 카메라 클래스</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#pragma once
+#include &lt;glm/glm.hpp&gt;
+#include &lt;glm/gtc/matrix_transform.hpp&gt;
+
+enum class Move { Forward, Back, Left, Right };
+
+class Camera {
+public:
+    glm::vec3 position{0.0f, 0.0f, 3.0f};
+    glm::vec3 front{0.0f, 0.0f, -1.0f};
+    glm::vec3 up{0.0f, 1.0f, 0.0f};
+    glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
+    float yaw   = -90.0f;   // -Z를 바라보도록 초기화
+    float pitch =  0.0f;
+    float speed = 3.0f;     // 초당 유닛
+    float sens  = 0.1f;     // 마우스 감도
+
+    Camera() { updateVectors(); }
+
+    // 뷰 행렬 = 카메라 변환의 역행렬 (lookAt이 대신 계산)
+    glm::mat4 viewMatrix() const {
+        return glm::lookAt(position, position + front, up);
+    }
+
+    // 델타 타임 기반 이동 → 프레임률과 무관
+    void processKey(Move dir, float dt) {
+        float v = speed * dt;
+        if (dir == Move::Forward) position += front * v;
+        if (dir == Move::Back)    position -= front * v;
+        // 오른쪽 벡터 = front × up (정규화)
+        glm::vec3 right = glm::normalize(glm::cross(front, up));
+        if (dir == Move::Left)    position -= right * v;
+        if (dir == Move::Right)   position += right * v;
+    }
+
+    // 마우스 이동량(픽셀) → yaw/pitch
+    void processMouse(float dx, float dy) {
+        yaw   += dx * sens;
+        pitch += dy * sens;
+        if (pitch >  89.0f) pitch =  89.0f;   // 짐벌 뒤집힘 방지
+        if (pitch &lt; -89.0f) pitch = -89.0f;
+        updateVectors();
+    }
+
+private:
+    void updateVectors() {
+        // 구면 좌표 → 방향 벡터
+        glm::vec3 f;
+        f.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
+        f.y = sin(glm::radians(pitch));
+        f.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+        front = glm::normalize(f);
+        // up을 매번 재직교화하면 롤이 안 생긴다
+        glm::vec3 right = glm::normalize(glm::cross(front, worldUp));
+        up = glm::normalize(glm::cross(right, front));
+    }
+};</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>src/main.cpp — GLFW 콜백 연결 + 루프 (발췌)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">Camera gCam;
+float  gLastX = 640, gLastY = 360;
+bool   gFirst = true;
+
+// 마우스가 움직일 때마다 호출된다
+void onMouse(GLFWwindow*, double x, double y) {
+    if (gFirst) { gLastX = (float)x; gLastY = (float)y; gFirst = false; }
+    float dx = (float)x - gLastX;
+    float dy = gLastY - (float)y;   // 화면 y는 아래로 증가 → 부호 반전
+    gLastX = (float)x; gLastY = (float)y;
+    gCam.processMouse(dx, dy);
+}
+
+void processInput(GLFWwindow* w, float dt) {
+    if (glfwGetKey(w, GLFW_KEY_W) == GLFW_PRESS) gCam.processKey(Move::Forward, dt);
+    if (glfwGetKey(w, GLFW_KEY_S) == GLFW_PRESS) gCam.processKey(Move::Back,    dt);
+    if (glfwGetKey(w, GLFW_KEY_A) == GLFW_PRESS) gCam.processKey(Move::Left,    dt);
+    if (glfwGetKey(w, GLFW_KEY_D) == GLFW_PRESS) gCam.processKey(Move::Right,   dt);
+}
+
+// main() 안에서:
+//   glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED); // 커서 잠금
+//   glfwSetCursorPosCallback(window, onMouse);
+//
+//   float last = 0.0f;
+//   while (...) {
+//       float now = (float)glfwGetTime();
+//       float dt  = now - last;  last = now;   // 이번 프레임 소요 시간
+//       processInput(window, dt);
+//       glm::mat4 view = gCam.viewMatrix();
+//       glUniformMatrix4fv(uView, 1, GL_FALSE, glm::value_ptr(view));
+//       ...
+//   }</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      첫 프레임의 마우스 좌표는 화면 어딘가에서 튀어들어오므로, <code>gFirst</code> 플래그로 첫 이동량을 버려야
+      시작하자마자 시점이 홱 돌아가는 현상을 막습니다.
+    </div>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      pitch를 ±89°로 클램프하는 이유: 정확히 ±90°가 되면 front가 worldUp과 평행해져
+      <code>cross</code>가 0 벡터가 되고 시점이 뒤집힙니다.
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="mesh">
+    <h2>3. 삼각형과 메시</h2>
+    <p>
+      실제 모델은 정점 배열만이 아니라 <strong>인덱스 버퍼(EBO)</strong>로 정점을 재사용합니다.
+      정점 하나에 위치·법선·UV를 함께 담는 <code>Vertex</code> 구조체를 정의하고,
+      VAO/VBO/EBO를 관리하는 <code>Mesh</code> 클래스, 그리고 <code>.obj</code> 파일을 읽는 최소 원본 로더를 만듭니다.
+    </p>
+    <ol class="steps">
+      <li><code>Vertex</code> = 위치(vec3) + 법선(vec3) + UV(vec2).</li>
+      <li><code>Mesh</code>가 VAO/VBO/EBO를 생성하고 <code>glVertexAttribPointer</code>로 3개 속성을 설정.</li>
+      <li><code>draw()</code>는 <code>glDrawElements</code>로 인덱스 기반 렌더.</li>
+      <li>OBJ 로더가 <code>v / vt / vn / f</code> 줄을 파싱하고 다각형을 삼각형으로 분할.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>src/Mesh.h — Vertex + Mesh</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#pragma once
+#include &lt;glad/glad.h&gt;
+#include &lt;glm/glm.hpp&gt;
+#include &lt;vector&gt;
+
+struct Vertex {
+    glm::vec3 pos;
+    glm::vec3 normal;
+    glm::vec2 uv;
+};
+
+class Mesh {
+public:
+    Mesh(const std::vector&lt;Vertex&gt;&amp; verts,
+         const std::vector&lt;unsigned int&gt;&amp; indices)
+        : count_((GLsizei)indices.size())
+    {
+        glGenVertexArrays(1, &amp;vao_);
+        glGenBuffers(1, &amp;vbo_);
+        glGenBuffers(1, &amp;ebo_);
+
+        glBindVertexArray(vao_);
+
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     verts.size() * sizeof(Vertex),
+                     verts.data(), GL_STATIC_DRAW);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                     indices.size() * sizeof(unsigned int),
+                     indices.data(), GL_STATIC_DRAW);
+
+        // 속성 0: 위치, offsetof로 구조체 내 위치 지정
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                              sizeof(Vertex), (void*)offsetof(Vertex, pos));
+        glEnableVertexAttribArray(0);
+        // 속성 1: 법선
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE,
+                              sizeof(Vertex), (void*)offsetof(Vertex, normal));
+        glEnableVertexAttribArray(1);
+        // 속성 2: UV
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE,
+                              sizeof(Vertex), (void*)offsetof(Vertex, uv));
+        glEnableVertexAttribArray(2);
+
+        glBindVertexArray(0);   // VAO가 EBO 바인딩까지 기억한다
+    }
+
+    void draw() const {
+        glBindVertexArray(vao_);
+        glDrawElements(GL_TRIANGLES, count_, GL_UNSIGNED_INT, 0);
+    }
+
+    ~Mesh() {
+        glDeleteVertexArrays(1, &amp;vao_);
+        glDeleteBuffers(1, &amp;vbo_);
+        glDeleteBuffers(1, &amp;ebo_);
+    }
+
+private:
+    GLuint  vao_ = 0, vbo_ = 0, ebo_ = 0;
+    GLsizei count_ = 0;
+};</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>src/ObjLoader.cpp — 최소 OBJ 로더</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include "Mesh.h"
+#include &lt;fstream&gt;
+#include &lt;sstream&gt;
+#include &lt;string&gt;
+#include &lt;vector&gt;
+
+// f 줄의 "v/vt/vn" 한 토큰을 파싱. 인덱스는 1-based, 음수 가능.
+// vt/vn은 생략될 수 있다("v//vn", "v/vt", "v").
+static void parseFaceVert(const std::string&amp; tok,
+                          int&amp; vi, int&amp; ti, int&amp; ni) {
+    vi = ti = ni = 0;
+    std::stringstream ss(tok);
+    std::string a, b, c;
+    std::getline(ss, a, '/');
+    std::getline(ss, b, '/');
+    std::getline(ss, c, '/');
+    if (!a.empty()) vi = std::stoi(a);
+    if (!b.empty()) ti = std::stoi(b);
+    if (!c.empty()) ni = std::stoi(c);
+}
+
+// 매우 단순한 로더: 중복 정점을 그대로 펼쳐 인덱스를 순차 발급.
+bool loadObj(const std::string&amp; path,
+             std::vector&lt;Vertex&gt;&amp; outVerts,
+             std::vector&lt;unsigned int&gt;&amp; outIndices) {
+    std::ifstream file(path);
+    if (!file) return false;
+
+    std::vector&lt;glm::vec3&gt; positions;
+    std::vector&lt;glm::vec2&gt; uvs;
+    std::vector&lt;glm::vec3&gt; normals;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        std::stringstream ss(line);
+        std::string tag;
+        ss &gt;&gt; tag;
+
+        if (tag == "v") {
+            glm::vec3 p; ss &gt;&gt; p.x &gt;&gt; p.y &gt;&gt; p.z; positions.push_back(p);
+        } else if (tag == "vt") {
+            glm::vec2 t; ss &gt;&gt; t.x &gt;&gt; t.y; uvs.push_back(t);
+        } else if (tag == "vn") {
+            glm::vec3 n; ss &gt;&gt; n.x &gt;&gt; n.y &gt;&gt; n.z; normals.push_back(n);
+        } else if (tag == "f") {
+            // 다각형의 모든 정점 토큰을 모은다
+            std::vector&lt;std::string&gt; toks;
+            std::string t;
+            while (ss &gt;&gt; t) toks.push_back(t);
+
+            // 팬(fan) 삼각화: (0, i, i+1)
+            for (size_t i = 1; i + 1 &lt; toks.size(); ++i) {
+                const std::string tri[3] = { toks[0], toks[i], toks[i + 1] };
+                for (const auto&amp; s : tri) {
+                    int vi, ti, ni; parseFaceVert(s, vi, ti, ni);
+                    Vertex vx{};
+                    // 음수 인덱스는 끝에서부터, 양수는 1-based
+                    vx.pos = positions[vi &gt; 0 ? vi - 1 : positions.size() + vi];
+                    if (ti != 0)
+                        vx.uv = uvs[ti &gt; 0 ? ti - 1 : uvs.size() + ti];
+                    if (ni != 0)
+                        vx.normal = normals[ni &gt; 0 ? ni - 1 : normals.size() + ni];
+                    outIndices.push_back((unsigned int)outVerts.size());
+                    outVerts.push_back(vx);
+                }
+            }
+        }
+        // 그 외 태그(#, o, g, s, mtllib 등)는 무시
+    }
+    return true;
+}</code></pre>
+    </div>
+
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      이 로더는 학습용 최소 버전입니다. 법선이 없는 OBJ라면 삼각형별로 법선을 계산해 채워야 하고,
+      대형 모델에서는 정점 중복 제거(해시맵 기반)를 넣어야 VBO 크기가 폭발하지 않습니다.
+      실무에서는 <code>tinyobjloader</code>나 <code>assimp</code>를 씁니다.
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      OBJ 인덱스는 <strong>1부터 시작</strong>합니다. <code>0-based</code> 배열로 접근할 때 <code>-1</code>을 잊으면
+      정점이 한 칸씩 밀려 메시가 어긋나거나, 첫 정점을 참조하려다 인덱스가 음수가 됩니다.
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="zbuffer">
+    <h2>4. 깊이 버퍼 (Z-Buffer)</h2>
+    <p>
+      3D에서는 가까운 픽셀이 먼 픽셀을 가려야 합니다. 그리는 순서에 의존하지 않고 이를 자동으로 해결하는 것이 <strong>깊이 버퍼</strong>입니다.
+      각 픽셀의 깊이를 저장해 두고, 새 프래그먼트가 더 가까울 때만 통과시킵니다.
+    </p>
+    <ol class="steps">
+      <li>컨텍스트 생성 시 깊이 버퍼 비트를 요청한다(GLFW 기본값은 24비트라 보통 자동).</li>
+      <li><code>glEnable(GL_DEPTH_TEST)</code>로 깊이 테스트를 켠다.</li>
+      <li><code>glDepthFunc(GL_LESS)</code>: 더 작은(가까운) 깊이만 통과.</li>
+      <li>매 프레임 <code>GL_DEPTH_BUFFER_BIT</code>도 함께 지운다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>src/main.cpp — 깊이 테스트 설정</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">// (선택) 깊이 비트 명시 요청 — GLFW는 기본 24로 잡아줌
+glfwWindowHint(GLFW_DEPTH_BITS, 24);
+
+// GLAD 로드 후 — 딱 한 번
+glEnable(GL_DEPTH_TEST);
+glDepthFunc(GL_LESS);   // 기본값이지만 명시하면 의도가 분명
+
+while (!glfwWindowShouldClose(window)) {
+    // 색 + 깊이 버퍼를 모두 지워야 한다.
+    // 깊이를 안 지우면 이전 프레임 깊이가 남아 물체가 사라진다.
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    // ... 그리기 ...
+    glfwSwapBuffers(window);
+}</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>GL_DEPTH_TEST</code>는 켰는데 매 프레임 <code>GL_DEPTH_BUFFER_BIT</code>를 <strong>안 지우면</strong>,
+      첫 프레임 이후 화면이 프리징된 것처럼 보이거나 물체가 아예 안 그려집니다. 색과 깊이는 항상 함께 지우세요.
+    </div>
+    <div class="callout perf">
+      <span class="tag">TIP · Z-파이팅</span>
+      깊이 버퍼는 비선형이라 <strong>near 평면 근처의 정밀도가 압도적으로 높고 far 쪽은 낮습니다.</strong>
+      <code>near</code>를 <code>0.001</code>처럼 너무 작게 잡으면 먼 물체 두 면이 번쩍이는 <em>z-파이팅</em>이 생깁니다.
+      해법: (1) <code>near</code>를 최대한 크게(예 <code>0.1</code>~<code>1.0</code>), <code>far</code>를 필요 최소로,
+      (2) 겹치는 표면은 <code>glPolygonOffset(1.0f, 1.0f)</code> + <code>glEnable(GL_POLYGON_OFFSET_FILL)</code>로 살짝 밀기,
+      (3) 정밀도가 더 필요하면 리버스드-Z 기법.
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="lighting">
+    <h2>5. 조명과 그림자 (퐁 셰이딩)</h2>
+    <p>
+      가장 고전적인 조명 모델은 <strong>퐁(Phong)</strong>입니다: <strong>ambient(주변) + diffuse(난반사) + specular(정반사)</strong>의 합.
+      diffuse는 <code>max(dot(N, L), 0)</code>, specular는 반사 벡터(또는 하프웨이 벡터)와 시선의 각도로 계산합니다.
+      핵심 함정은 <strong>법선 변환</strong>입니다. 비균등 스케일이 있으면 법선을 그냥 model로 곱하면 안 되고
+      <strong>법선 행렬 <code>transpose(inverse(model))</code></strong>을 써야 합니다.
+    </p>
+    <ol class="steps">
+      <li>정점 셰이더에서 월드 위치와 법선 행렬로 변환한 법선을 프래그먼트로 넘긴다.</li>
+      <li>프래그먼트에서 ambient + diffuse + specular를 합산.</li>
+      <li>C++에서 광원 위치/색, 카메라 위치, 물체 색 유니폼을 설정.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>셰이더 — 퐁 라이팅</span><span class="lang">glsl</span></div>
+      <pre><code class="language-glsl">// ── 정점 셰이더 ──
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+uniform mat3 normalMatrix;   // = transpose(inverse(mat3(model)))
+
+out vec3 FragPos;   // 월드 공간 위치
+out vec3 Normal;    // 월드 공간 법선
+
+void main() {
+    vec4 world = model * vec4(aPos, 1.0);
+    FragPos = world.xyz;
+    Normal  = normalize(normalMatrix * aNormal);
+    gl_Position = projection * view * world;
+}
+
+// ── 프래그먼트 셰이더 ──
+#version 330 core
+in vec3 FragPos;
+in vec3 Normal;
+out vec4 FragColor;
+
+uniform vec3 lightPos;
+uniform vec3 lightColor;
+uniform vec3 viewPos;      // 카메라 위치
+uniform vec3 objectColor;
+
+void main() {
+    // 1) ambient — 항상 존재하는 최소 밝기
+    vec3 ambient = 0.12 * lightColor;
+
+    // 2) diffuse — 표면과 빛 방향의 각도
+    vec3 N = normalize(Normal);
+    vec3 L = normalize(lightPos - FragPos);
+    float diff = max(dot(N, L), 0.0);
+    vec3 diffuse = diff * lightColor;
+
+    // 3) specular — 하프웨이 벡터 방식(블린-퐁)
+    vec3 V = normalize(viewPos - FragPos);
+    vec3 H = normalize(L + V);
+    float spec = pow(max(dot(N, H), 0.0), 64.0);   // 64 = 광택
+    vec3 specular = 0.5 * spec * lightColor;
+
+    // (전통 퐁이라면 reflect 사용:)
+    // vec3 R = reflect(-L, N);
+    // float spec = pow(max(dot(V, R), 0.0), 32.0);
+
+    vec3 result = (ambient + diffuse + specular) * objectColor;
+    FragColor = vec4(result, 1.0);
+}</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>src/main.cpp — 조명 유니폼 설정</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">glUseProgram(prog);
+
+// 법선 행렬: 비균등 스케일에서도 법선을 올바르게 변환
+glm::mat3 normalMat = glm::transpose(glm::inverse(glm::mat3(model)));
+glUniformMatrix3fv(glGetUniformLocation(prog, "normalMatrix"),
+                   1, GL_FALSE, glm::value_ptr(normalMat));
+
+glUniform3f(glGetUniformLocation(prog, "lightPos"),   1.2f, 1.5f, 2.0f);
+glUniform3f(glGetUniformLocation(prog, "lightColor"), 1.0f, 1.0f, 1.0f);
+glUniform3fv(glGetUniformLocation(prog, "viewPos"),
+             1, glm::value_ptr(gCam.position));
+glUniform3f(glGetUniformLocation(prog, "objectColor"), 0.85f, 0.55f, 0.25f);
+
+// (유니폼 위치는 실제로는 초기화 때 캐시하세요)</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      법선을 <code>model</code>로 그냥 곱하면, 물체를 비균등하게 스케일했을 때 법선이 표면에 수직이 아니게 틀어져
+      조명이 이상해집니다. 반드시 <strong><code>transpose(inverse(model))</code></strong>을 쓰세요.
+      균등 스케일만 쓴다면 model의 3×3 부분으로 충분하지만, 습관적으로 법선 행렬을 쓰는 게 안전합니다.
+    </div>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      여기서 계산하는 것은 <strong>직접 조명뿐이고 그림자는 없습니다.</strong> 실제 그림자(섀도우 맵)는
+      깊이 텍스처를 광원 시점에서 렌더하는 별도 패스가 필요합니다 →
+      <a href="./06-advanced.html#shadowmap" style="color:var(--accent)">6장 섀도우 맵</a>.
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="texmap">
+    <h2>6. 텍스처 매핑</h2>
+    <p>
+      메시 표면에 이미지를 입히려면 <strong>텍스처 객체</strong>를 만들어 GPU에 올리고, 정점의 <strong>UV 좌표</strong>로 샘플링합니다.
+      이미지 디코딩은 헤더 온리 라이브러리 <code>stb_image</code>로 처리합니다.
+    </p>
+    <ol class="steps">
+      <li><code>stbi_set_flip_vertically_on_load(true)</code>로 V축을 뒤집는다.</li>
+      <li><code>stbi_load</code>로 픽셀을 읽는다(채널 수 확인).</li>
+      <li><code>glGenTextures</code>/<code>glBindTexture</code> 후 <code>glTexImage2D</code>로 업로드.</li>
+      <li>래핑·필터링을 설정하고 <code>glGenerateMipmap</code>.</li>
+      <li>텍스처 유닛에 바인딩하고 <code>sampler2D</code> 유니폼에 유닛 번호를 알려준다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>src/texture.cpp — stb_image 로딩</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">// .cpp 하나에서만 구현부 포함
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#include &lt;glad/glad.h&gt;
+
+GLuint loadTexture(const char* path) {
+    // OpenGL의 UV 원점은 좌하단이라 이미지 세로를 뒤집어야 정상 표시
+    stbi_set_flip_vertically_on_load(true);
+
+    int w, h, channels;
+    unsigned char* data = stbi_load(path, &amp;w, &amp;h, &amp;channels, 0);
+    if (!data) { return 0; }   // 로드 실패
+
+    // 채널 수에 맞는 포맷 선택
+    GLenum format = GL_RGB;
+    if (channels == 1) format = GL_RED;
+    else if (channels == 4) format = GL_RGBA;
+
+    GLuint tex;
+    glGenTextures(1, &amp;tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    // 픽셀 업로드 (내부 포맷, 크기, 소스 포맷, 타입)
+    glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0,
+                 format, GL_UNSIGNED_BYTE, data);
+    glGenerateMipmap(GL_TEXTURE_2D);   // 밉맵 자동 생성
+
+    // 래핑: UV가 [0,1] 밖일 때 반복
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    // 필터: 축소 시 밉맵 삼선형, 확대 시 이중선형
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    stbi_image_free(data);   // CPU 메모리는 이제 필요 없음
+    return tex;
+}</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>셰이더 — UV 샘플링</span><span class="lang">glsl</span></div>
+      <pre><code class="language-glsl">// ── 정점 셰이더 (발췌) ──
+layout(location = 2) in vec2 aUV;
+out vec2 TexCoord;
+void main() {
+    TexCoord = aUV;
+    // ... gl_Position = ... ;
+}
+
+// ── 프래그먼트 셰이더 ──
+#version 330 core
+in vec2 TexCoord;
+out vec4 FragColor;
+uniform sampler2D uTexture;   // 텍스처 유닛에 대응
+void main() {
+    FragColor = texture(uTexture, TexCoord);
+}</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>src/main.cpp — 유닛 바인딩 후 그리기</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">GLuint tex = loadTexture("assets/wood.png");
+
+// 렌더 루프 안:
+glUseProgram(prog);
+// sampler2D uTexture 가 텍스처 유닛 0을 쓰도록 알려준다
+glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
+
+glActiveTexture(GL_TEXTURE0);          // 0번 유닛 활성화
+glBindTexture(GL_TEXTURE_2D, tex);     // 그 유닛에 텍스처 바인딩
+
+mesh.draw();</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      이미지가 <strong>위아래로 뒤집혀</strong> 나온다면 <code>stbi_set_flip_vertically_on_load(true)</code>를 빠뜨린 것입니다.
+      대부분의 이미지 포맷은 좌상단이 (0,0)이지만 OpenGL 텍스처 좌표의 원점은 좌하단이라, 로드 시 V를 뒤집어야 맞습니다.
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>glUniform1i(sampler, N)</code>에 넘기는 값은 <strong>텍스처 유닛 번호(N)</strong>이지 텍스처 ID가 아닙니다.
+      실수로 텍스처 객체 핸들을 넣으면 검은 화면이 나옵니다.
+    </div>
+    <div class="callout perf">
+      <span class="tag">TIP</span>
+      밉맵(<code>glGenerateMipmap</code>)은 <strong>축소 렌더링의 캐시 효율과 화질을 동시에</strong> 올립니다.
+      <code>GL_LINEAR_MIPMAP_LINEAR</code>(삼선형)를 쓰면 멀리 있는 텍스처의 반짝임(에일리어싱)이 크게 줄어듭니다.
+      밉맵은 <a href="./07-techniques.html" style="color:var(--accent)">7장</a>에서 더 깊이 다룹니다.
+    </div>
+  </section>
+
+  <div class="callout" style="margin-top:40px;">
+    <span class="tag warn">다음</span>
+    셰이더 컴파일/링크와 유니폼을 캡슐화한 재사용 가능한 <code>Shader</code> 클래스는
+    <a href="./04-shaders.html" style="color:var(--accent)">4장 GPU · 셰이더</a>에서 완성합니다.
+    이 장의 인라인 셰이더들을 거기로 옮기면 코드가 훨씬 깔끔해집니다.
+  </div>
+
+  <div class="footer">
+    🛠️ 구현 가이드 · CHAPTER 3 · 모든 코드는 학습용으로 새로 작성된 원본 예제입니다 · C++17 / OpenGL 3.3 Core
+  </div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

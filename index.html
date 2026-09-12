@@ -6,6 +6,7 @@
 <title>그래픽스 프로그래밍 비주얼 가이드</title>
 <meta name="description" content="벡터부터 텍스처 매핑까지, 그래픽스 프로그래밍의 기초를 그림과 인터랙티브 데모로 하나하나 설명하는 가이드" />
 <link rel="stylesheet" href="css/style.css" />
+<link rel="stylesheet" href="impl/impl.css" />
 </head>
 <body>
 <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰ 목차</button>
@@ -83,6 +84,8 @@
       <p>수식만 보면 어렵지만, 눈으로 보면 쉽습니다. 이 가이드의 모든 개념에는
         <strong>직접 만져보는 인터랙티브 데모</strong>가 있습니다. 슬라이더를 움직이고,
         점을 드래그하면서 "아 이게 이런 거였구나"를 느껴보세요.</p>
+      <p style="margin:16px 0 0;">개념을 넘어 <strong>직접 코드로 구현</strong>하고 싶다면 →
+        <a class="impl-link" href="impl/index.html">C++ / OpenGL 구현 가이드</a></p>
     </div>
 
     <!-- ========================================================= -->
@@ -92,6 +95,7 @@
     <section id="vector">
       <h2>벡터 (Vector)</h2>
       <p class="lead">그래픽스의 알파벳. 위치, 방향, 속도, 색깔까지 전부 벡터로 표현합니다.</p>
+      <a class="impl-link" href="impl/01-math.html">이 챕터를 C++로 직접 구현하기</a>
 
       <p>벡터는 그냥 <strong>숫자 묶음</strong>이에요. 2D에서는 <code>(x, y)</code> 두 개,
         3D에서는 <code>(x, y, z)</code> 세 개죠. 이걸 두 가지로 볼 수 있어요:</p>
@@ -237,6 +241,7 @@
     <section id="pixel">
       <h2>픽셀과 색상</h2>
       <p class="lead">화면은 작은 빛 점들의 격자. 각 점은 빨강·초록·파랑의 밝기로 색을 만듭니다.</p>
+      <a class="impl-link" href="impl/02-raster2d.html">이 챕터를 C++로 직접 구현하기</a>
 
       <p>모니터의 모든 색은 <strong>RGB</strong> — 빨강(R), 초록(G), 파랑(B) 세 빛을 섞어 만듭니다.
         각 채널은 0~255. <code>(255,0,0)</code>은 순수 빨강, <code>(255,255,255)</code>는 하양,
@@ -335,6 +340,7 @@
     <section id="mvp">
       <h2>Model → World → View → Projection 변환</h2>
       <p class="lead">3D 점이 화면의 2D 픽셀이 되기까지 거치는 4단계 여행.</p>
+      <a class="impl-link" href="impl/03-opengl3d.html">이 챕터를 C++/OpenGL로 직접 구현하기</a>
 
       <p>3D 물체 하나가 화면에 그려지려면 네 개의 좌표계를 거칩니다. 이걸 <strong>파이프라인</strong>이라 해요:</p>
       <ul>
@@ -462,6 +468,7 @@
     <section id="gpu-intro">
       <h2>GPU 병렬 처리</h2>
       <p class="lead">CPU는 몇 명의 천재, GPU는 수천 명의 일꾼. 그래픽스는 "수천 명의 일꾼"이 유리합니다.</p>
+      <a class="impl-link" href="impl/04-shaders.html">이 챕터를 C++/OpenGL로 직접 구현하기</a>
 
       <p>화면의 픽셀은 수백만 개. 각 픽셀 계산은 <strong>서로 독립적</strong>이라 동시에 처리해도 됩니다.
         <strong>CPU</strong>는 코어가 몇 개뿐이라 순서대로(직렬) 빠르게 처리하고,
@@ -602,6 +609,7 @@ fn main(
     <section id="api-overview">
       <h2>그래픽스 API 지형도</h2>
       <p class="lead">GPU에게 명령을 내리는 통로. "쉽고 자동" ↔ "어렵지만 완전 제어"의 스펙트럼.</p>
+      <a class="impl-link" href="impl/05-api.html">OpenGL 실전 + 타 API 매핑 구현 가이드</a>
 
       <p>그래픽스 API는 내 코드와 GPU 드라이버 사이의 <strong>약속(인터페이스)</strong>입니다.
         고수준 API는 많은 걸 알아서 해줘 배우기 쉽지만 세밀한 제어가 어렵고,
@@ -678,6 +686,7 @@ fn main(
     <section id="pbr">
       <h2>Physically Based Rendering (PBR)</h2>
       <p class="lead">"대충 예뻐 보이게"가 아니라 <strong>실제 빛의 물리 법칙</strong>대로 표면을 계산하기.</p>
+      <a class="impl-link" href="impl/06-advanced.html">이 챕터를 C++/OpenGL로 직접 구현하기</a>
 
       <p>PBR은 재질을 몇 개의 물리적 파라미터로 표현합니다. 핵심은 두 개:</p>
       <ul>
@@ -842,6 +851,7 @@ fn main(
     <section id="antialiasing">
       <h2>안티앨리어싱 (Antialiasing)</h2>
       <p class="lead">비스듬한 선의 "계단(지글지글)"을 부드럽게. 픽셀 하나를 여러 번 샘플링해 평균 내기.</p>
+      <a class="impl-link" href="impl/07-techniques.html">이 챕터를 C++/OpenGL로 직접 구현하기</a>
 
       <p>픽셀은 네모난데 도형의 경계는 매끈합니다. 그래서 경계가 <strong>계단(재기, jaggies)</strong>처럼
         보이죠. 이건 앞서 본 <a href="#raster">래스터라이제이션</a>의 숙명입니다. 해법의 핵심은

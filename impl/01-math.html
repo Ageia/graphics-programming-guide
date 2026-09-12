@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 기초 수학 — C++/OpenGL</title>
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">1장. 기초 수학</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION</span>
+  <h1>기초 수학 — 직접 구현</h1>
+  <p class="lead">
+    그래픽스의 모든 것은 벡터와 행렬 위에 서 있습니다. 여기서는 <strong>Vec3·Mat4를 C++로 직접 구현</strong>해
+    내부 동작을 손으로 확인한 다음, 실무 표준인 <strong>GLM</strong>으로 넘어갑니다.
+    직접 구현은 이해를 위한 것이고, 실제 프로젝트에서는 검증된 GLM을 쓰는 것이 정답입니다.
+    창 생성·컨텍스트 세팅 등 공통 골격은 <a href="./index.html">개발 환경</a>을 참고하세요.
+  </p>
+
+  <!-- ============================================================ 1. 벡터 -->
+  <section id="vector">
+    <h2>1. 벡터 — Vec3</h2>
+    <p><strong>무엇을 만드나:</strong> 위치·방향·색을 담는 3차원 벡터 구조체를 직접 만들고, 더하기·빼기·스칼라 곱·내적·외적·길이·정규화를 구현합니다. 그다음 동일한 연산을 GLM으로 대체합니다.</p>
+    <ol class="steps">
+      <li>x, y, z 세 float을 가지는 POD 구조체를 정의한다.</li>
+      <li>연산자 오버로딩으로 +, -, 스칼라 * 를 자연스러운 문법으로 만든다.</li>
+      <li>dot(내적), cross(외적), length, normalize를 자유 함수로 추가한다.</li>
+      <li>정규화 시 길이가 0인 경우를 방어한다.</li>
+      <li>실무에서는 이 모든 것을 대체하는 GLM으로 전환한다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>math/Vec3.h — 원본 구현</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#pragma once
+#include &lt;cmath&gt;
+
+// 3차원 벡터. 위치·방향·색(RGB) 등 무엇이든 담는다.
+struct Vec3 {
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+
+    Vec3() = default;
+    Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+
+    // 성분별 덧셈/뺄셈
+    Vec3 operator+(const Vec3&amp; b) const { return { x + b.x, y + b.y, z + b.z }; }
+    Vec3 operator-(const Vec3&amp; b) const { return { x - b.x, y - b.y, z - b.z }; }
+
+    // 스칼라 곱 (v * s)
+    Vec3 operator*(float s) const { return { x * s, y * s, z * s }; }
+
+    // 부호 반전
+    Vec3 operator-() const { return { -x, -y, -z }; }
+};
+
+// s * v 도 되게 좌측 스칼라 곱 제공
+inline Vec3 operator*(float s, const Vec3&amp; v) { return v * s; }
+
+// 내적: 두 벡터의 정렬 정도. 스칼라를 반환한다.
+inline float dot(const Vec3&amp; a, const Vec3&amp; b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+// 외적: 두 벡터에 모두 수직인 벡터. 오른손 좌표계 기준.
+inline Vec3 cross(const Vec3&amp; a, const Vec3&amp; b) {
+    return {
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    };
+}
+
+// 길이(크기) = sqrt(v·v)
+inline float length(const Vec3&amp; v) { return std::sqrt(dot(v, v)); }
+
+// 정규화: 길이를 1로. 0 벡터는 그대로 반환해 NaN을 피한다.
+inline Vec3 normalize(const Vec3&amp; v) {
+    float len = length(v);
+    if (len &lt; 1e-8f) return { 0.0f, 0.0f, 0.0f };
+    float inv = 1.0f / len;
+    return v * inv;
+}</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>사용 예</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">Vec3 a{ 1.0f, 2.0f, 3.0f };
+Vec3 b{ 4.0f, 0.0f, 0.0f };
+
+Vec3 sum   = a + b;              // (5, 2, 3)
+Vec3 dir   = normalize(b);       // (1, 0, 0)
+float d    = dot(a, b);          // 4.0
+Vec3 n     = cross(a, b);        // a, b 에 수직인 벡터
+float lenA = length(a);          // sqrt(14) ≈ 3.742</code></pre>
+    </div>
+
+    <p>같은 일을 실무에서는 이렇게 합니다. GLM은 헤더 온리라 <code>#include</code> 하나면 끝입니다.</p>
+    <div class="code">
+      <div class="code-head"><span>GLM 버전 — 실무는 이걸 쓴다</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;glm/glm.hpp&gt;
+
+glm::vec3 a{ 1.0f, 2.0f, 3.0f };
+glm::vec3 b{ 4.0f, 0.0f, 0.0f };
+
+glm::vec3 sum = a + b;
+glm::vec3 dir = glm::normalize(b);
+float     d   = glm::dot(a, b);
+glm::vec3 n   = glm::cross(a, b);
+float     len = glm::length(a);</code></pre>
+    </div>
+
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      그래픽스에서는 <strong>열벡터(column-vector) 규약</strong>을 씁니다. 즉 벡터를 세로로 보고 변환을
+      <code>v' = M * v</code> 처럼 행렬을 왼쪽에 곱합니다. OpenGL·GLM이 모두 이 규약이라 이 가이드도 통일합니다.
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      <code>normalize</code>는 내부에서 <code>sqrt</code>를 호출합니다. 방향을 자주 정규화한다면 값 자체가 아니라
+      <em>정규화가 정말 필요한지</em>를 먼저 의심하세요. 예를 들어 "가장 가까운 물체"를 고를 때는 거리 대신
+      거리의 제곱(<code>dot(v,v)</code>)을 비교하면 sqrt를 통째로 생략할 수 있습니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ 2. 행렬 -->
+  <section id="matrix">
+    <h2>2. 행렬 — Mat4</h2>
+    <p><strong>무엇을 만드나:</strong> 4×4 행렬을 <strong>열 우선(column-major)</strong>으로 저장하는 구조체를 만들고 항등행렬과 곱셈을 구현합니다. 열 우선은 OpenGL·GLM과 메모리 배치를 맞추기 위한 것이며, 이 덕분에 <code>glUniformMatrix4fv</code>에 그대로 넘길 수 있습니다.</p>
+    <ol class="steps">
+      <li><code>float m[16]</code> 한 배열에 4개의 열을 이어붙여 저장한다(열 우선).</li>
+      <li>(행 r, 열 c) 원소를 <code>m[c*4 + r]</code>로 접근하는 규칙을 정한다.</li>
+      <li>identity()로 대각선만 1인 행렬을 만든다.</li>
+      <li>곱셈은 표준 정의대로 (행 × 열)을 구현한다.</li>
+      <li>GL에 넘길 때 transpose 인자는 GL_FALSE로 둔다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>math/Mat4.h — 원본 구현 (열 우선)</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#pragma once
+
+// 4x4 행렬. OpenGL/GLM과 동일하게 "열 우선"으로 저장한다.
+// 메모리 순서: [col0 (4개), col1 (4개), col2 (4개), col3 (4개)]
+// 따라서 (행 r, 열 c) 원소는 m[c*4 + r] 위치에 있다.
+struct Mat4 {
+    float m[16] = { 0 };
+
+    // (r, c) 원소 접근 헬퍼 — 읽기/쓰기 모두 지원
+    float&amp;       at(int r, int c)       { return m[c * 4 + r]; }
+    const float&amp; at(int r, int c) const { return m[c * 4 + r]; }
+
+    // 항등행렬: 대각선만 1
+    static Mat4 identity() {
+        Mat4 r;
+        r.at(0,0) = 1.0f; r.at(1,1) = 1.0f;
+        r.at(2,2) = 1.0f; r.at(3,3) = 1.0f;
+        return r;
+    }
+};
+
+// 행렬 곱 C = A * B (열벡터 규약). 표준 정의: C(r,c) = Σ A(r,k)·B(k,c)
+inline Mat4 operator*(const Mat4&amp; A, const Mat4&amp; B) {
+    Mat4 C; // 0으로 초기화됨
+    for (int c = 0; c &lt; 4; ++c)
+        for (int r = 0; r &lt; 4; ++r) {
+            float sum = 0.0f;
+            for (int k = 0; k &lt; 4; ++k)
+                sum += A.at(r, k) * B.at(k, c);
+            C.at(r, c) = sum;
+        }
+    return C;
+}</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>셰이더에 업로드</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">Mat4 mvp = /* ... 계산 ... */;
+
+// m[16]이 이미 열 우선이므로 transpose 없이 그대로 넘긴다.
+// 두 번째 인자 count=1, 세 번째 GL_FALSE = "전치하지 마라".
+glUniformMatrix4fv(mvpLocation, 1, GL_FALSE, mvp.m);</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      만약 행 우선(row-major)으로 저장했다면 <code>glUniformMatrix4fv</code>의 세 번째 인자를 <code>GL_TRUE</code>로 줘야
+      합니다. 저장 방식과 transpose 인자가 어긋나면 <strong>컴파일 에러 없이</strong> 모델이 엉뚱하게 뒤틀립니다.
+      "메모리 배치를 GL에 맞춰 열 우선으로 저장 + GL_FALSE"가 가장 헷갈리지 않습니다.
+    </div>
+
+    <p>GLM의 <code>glm::mat4</code>도 내부적으로 열 우선입니다. 따라서 <code>glm::value_ptr</code>로 얻은 포인터를 GL_FALSE로 넘기면 됩니다.</p>
+    <div class="code">
+      <div class="code-head"><span>GLM 버전</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;glm/glm.hpp&gt;
+#include &lt;glm/gtc/type_ptr.hpp&gt;
+
+glm::mat4 mvp = glm::mat4(1.0f);        // 항등행렬 생성 인자에 주의
+// ... mvp 조립 ...
+glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(mvp));</code></pre>
+    </div>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      <code>glm::mat4()</code>는 <strong>0행렬이 아니라 값에 따라 다릅니다.</strong> 항등행렬을 원하면 반드시
+      <code>glm::mat4(1.0f)</code>처럼 대각 값을 넘겨야 합니다. 이걸 빼먹으면 모든 변환이 사라져 화면이 검게 나옵니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ 3. 좌표계와 변환 -->
+  <section id="coord">
+    <h2>3. 좌표계와 변환</h2>
+    <p><strong>무엇을 만드나:</strong> 이동(translate)·크기(scale)·회전(rotate) 행렬을 직접 만들고, 곱하는 <strong>순서가 결과를 바꾼다</strong>는 것을 확인합니다. 그리고 동차좌표(w=1은 점, w=0은 방향)의 의미를 짚습니다.</p>
+    <ol class="steps">
+      <li>이동·크기 행렬을 항등행렬에서 몇 칸만 바꿔 만든다.</li>
+      <li>임의 축 회전 행렬(Rodrigues)을 구현한다.</li>
+      <li>T*R 과 R*T 가 다른 결과임을 확인한다.</li>
+      <li>점(w=1)과 방향(w=0)이 이동에 어떻게 다르게 반응하는지 본다.</li>
+      <li>실무 조립 순서 model = T * R * S 를 익힌다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>math/Transform.h — 원본 구현</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#pragma once
+#include "Mat4.h"
+#include "Vec3.h"
+#include &lt;cmath&gt;
+
+// 이동 행렬: 마지막 열(3번 열)에 이동량이 들어간다.
+inline Mat4 makeTranslate(const Vec3&amp; t) {
+    Mat4 r = Mat4::identity();
+    r.at(0,3) = t.x;
+    r.at(1,3) = t.y;
+    r.at(2,3) = t.z;
+    return r;
+}
+
+// 크기 행렬: 대각선에 축별 배율.
+inline Mat4 makeScale(const Vec3&amp; s) {
+    Mat4 r = Mat4::identity();
+    r.at(0,0) = s.x;
+    r.at(1,1) = s.y;
+    r.at(2,2) = s.z;
+    return r;
+}
+
+// 임의 축(axis) 기준 angle(라디안) 회전 — 로드리게스 회전 공식.
+inline Mat4 makeRotate(const Vec3&amp; axis, float angle) {
+    Vec3 a = normalize(axis);
+    float c = std::cos(angle);
+    float s = std::sin(angle);
+    float t = 1.0f - c;
+
+    Mat4 r = Mat4::identity();
+    r.at(0,0) = t*a.x*a.x + c;
+    r.at(1,0) = t*a.x*a.y + s*a.z;
+    r.at(2,0) = t*a.x*a.z - s*a.y;
+
+    r.at(0,1) = t*a.x*a.y - s*a.z;
+    r.at(1,1) = t*a.y*a.y + c;
+    r.at(2,1) = t*a.y*a.z + s*a.x;
+
+    r.at(0,2) = t*a.x*a.z + s*a.y;
+    r.at(1,2) = t*a.y*a.z - s*a.x;
+    r.at(2,2) = t*a.z*a.z + c;
+    return r;
+}</code></pre>
+    </div>
+
+    <p>이제 순서가 중요하다는 것을 봅니다. 열벡터 규약에서는 <code>v' = M * v</code>이므로 <strong>가장 오른쪽 행렬이 먼저 적용</strong>됩니다.</p>
+    <div class="code">
+      <div class="code-head"><span>순서가 결과를 바꾼다</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">Mat4 T = makeTranslate({ 5.0f, 0.0f, 0.0f });        // +x로 5 이동
+Mat4 R = makeRotate({ 0.0f, 0.0f, 1.0f }, 1.5708f);  // z축 90도 회전
+
+// (1) T * R : 먼저 회전, 그다음 이동  → 제자리에서 돌고 옆으로 감
+Mat4 rotateThenMove = T * R;
+
+// (2) R * T : 먼저 이동, 그다음 회전  → 원점을 중심으로 궤도를 그림
+Mat4 moveThenRotate = R * T;
+
+// 두 결과는 전혀 다르다. 캐릭터를 "제자리 회전 후 배치"할 땐 (1),
+// 어떤 점을 "축으로 공전"시킬 땐 (2)를 쓴다.</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>동차좌표: 점(w=1) vs 방향(w=0)</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include "Mat4.h"
+
+struct Vec4 { float x, y, z, w; };
+
+inline Vec4 mul(const Mat4&amp; M, const Vec4&amp; v) {
+    return {
+        M.at(0,0)*v.x + M.at(0,1)*v.y + M.at(0,2)*v.z + M.at(0,3)*v.w,
+        M.at(1,0)*v.x + M.at(1,1)*v.y + M.at(1,2)*v.z + M.at(1,3)*v.w,
+        M.at(2,0)*v.x + M.at(2,1)*v.y + M.at(2,2)*v.z + M.at(2,3)*v.w,
+        M.at(3,0)*v.x + M.at(3,1)*v.y + M.at(3,2)*v.z + M.at(3,3)*v.w
+    };
+}
+
+Mat4 T = makeTranslate({ 10.0f, 0.0f, 0.0f });
+
+Vec4 point{ 1, 2, 3, 1 };   // w=1 → "위치". 이동의 영향을 받는다.
+Vec4 dir  { 1, 0, 0, 0 };   // w=0 → "방향". 이동해도 그대로다.
+
+Vec4 p2 = mul(T, point);    // (11, 2, 3, 1)  ← +10 이동됨
+Vec4 d2 = mul(T, dir);      // (1, 0, 0, 0)   ← 변화 없음</code></pre>
+    </div>
+
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      법선(normal)·시선 방향 같은 <strong>방향 벡터는 반드시 w=0</strong>으로 다루세요. 실수로 w=1로 두면
+      이동이 방향에까지 더해져 조명이 화면 위치에 따라 이상하게 흔들립니다.
+    </div>
+
+    <p>GLM에서는 검증된 함수를 조합합니다. 관례상 <strong>model = T * R * S</strong> 순서로 조립합니다(크기 → 회전 → 이동 순으로 적용됨).</p>
+    <div class="code">
+      <div class="code-head"><span>GLM 버전 — 표준 조립</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;glm/glm.hpp&gt;
+#include &lt;glm/gtc/matrix_transform.hpp&gt;
+
+glm::mat4 T = glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, 0.0f, 0.0f));
+glm::mat4 R = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                          glm::vec3(0.0f, 0.0f, 1.0f));
+glm::mat4 S = glm::scale(glm::mat4(1.0f), glm::vec3(2.0f));
+
+// 크기 → 회전 → 이동 순으로 적용된다.
+glm::mat4 model = T * R * S;</code></pre>
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>glm::translate/rotate/scale</code>은 <em>새 행렬을 만드는 게 아니라 첫 인자에 곱해</em> 돌려줍니다.
+      그래서 <code>glm::translate(mat, v)</code> 는 <code>mat * translate(v)</code>와 같습니다. 항등행렬에서
+      시작하지 않으면 의도치 않게 이전 변환이 누적됩니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ 4. 내적·외적 -->
+  <section id="dotcross">
+    <h2>4. 내적 · 외적의 실전 활용</h2>
+    <p><strong>무엇을 만드나:</strong> 내적과 외적이 실제로 어디에 쓰이는지를 코드로 확인합니다. 사잇각, 투영, 삼각형 법선, 2D 감김(winding) 부호를 계산합니다.</p>
+    <ol class="steps">
+      <li>내적으로 두 벡터의 사잇각을 구한다.</li>
+      <li>내적으로 한 벡터를 다른 벡터에 투영한다.</li>
+      <li>외적으로 삼각형의 법선을 구한다.</li>
+      <li>2D 외적 부호로 회전 방향(감김)을 판정한다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>내적·외적 활용</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include "Vec3.h"
+#include &lt;cmath&gt;
+#include &lt;algorithm&gt;
+
+// 두 벡터의 사잇각(라디안). cos θ = (a·b)/(|a||b|)
+inline float angleBetween(const Vec3&amp; a, const Vec3&amp; b) {
+    float denom = length(a) * length(b);
+    if (denom &lt; 1e-8f) return 0.0f;
+    float c = dot(a, b) / denom;
+    c = std::clamp(c, -1.0f, 1.0f);   // 부동소수 오차로 |c|&gt;1 되는 것 방지
+    return std::acos(c);
+}
+
+// a 를 b 방향으로 투영한 벡터. (b·a / b·b) * b
+inline Vec3 projectOnto(const Vec3&amp; a, const Vec3&amp; b) {
+    float bb = dot(b, b);
+    if (bb &lt; 1e-8f) return { 0, 0, 0 };
+    return b * (dot(a, b) / bb);
+}
+
+// 삼각형(p0,p1,p2)의 법선. 두 모서리의 외적을 정규화.
+inline Vec3 triangleNormal(const Vec3&amp; p0, const Vec3&amp; p1, const Vec3&amp; p2) {
+    Vec3 e1 = p1 - p0;
+    Vec3 e2 = p2 - p0;
+    return normalize(cross(e1, e2));  // 정점 순서(CCW/CW)가 법선 방향을 정함
+}
+
+// 2D 외적의 부호(스칼라). &gt;0 이면 반시계, &lt;0 이면 시계 방향 감김.
+inline float cross2D(float ax, float ay, float bx, float by) {
+    return ax * by - ay * bx;
+}</code></pre>
+    </div>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      "앞을 보고 있나?" 같은 판정에는 각도(<code>acos</code>)까지 구할 필요가 없습니다. 정규화된 두 벡터의
+      <strong>내적 부호</strong>만 보면 됩니다. 내적 &gt; 0 이면 예각(같은 방향), &lt; 0 이면 둔각(반대 방향).
+      <code>acos</code>는 비싸니 꼭 필요할 때만 쓰세요.
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>acos</code>의 입력이 부동소수 오차로 아주 살짝 1을 넘으면(<code>1.0000001</code>) 결과가 <code>NaN</code>이
+      됩니다. 위 코드처럼 <code>std::clamp(c, -1, 1)</code>로 반드시 범위를 잘라주세요.
+    </div>
+  </section>
+
+  <!-- ============================================================ 5. 삼각함수 -->
+  <section id="trig">
+    <h2>5. 삼각함수</h2>
+    <p><strong>무엇을 만드나:</strong> 도(degree)와 라디안(radian)을 오가고, sin/cos로 2D 회전과 한 점을 중심으로 한 공전(orbit)을 구현합니다.</p>
+    <ol class="steps">
+      <li>도 ↔ 라디안 변환 함수를 만든다.</li>
+      <li>sin/cos로 2D 회전을 직접 계산한다.</li>
+      <li>중심점 주위를 도는 궤도 위치를 매 프레임 갱신한다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>삼각함수 활용</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include "Vec3.h"
+#include &lt;cmath&gt;
+
+constexpr float PI = 3.14159265358979323846f;
+
+inline float toRadians(float deg) { return deg * (PI / 180.0f); }
+inline float toDegrees(float rad) { return rad * (180.0f / PI); }
+
+// 2D 점 (x, y)를 원점 기준 angle(라디안)만큼 회전.
+inline void rotate2D(float&amp; x, float&amp; y, float angle) {
+    float s = std::sin(angle);
+    float c = std::cos(angle);
+    float nx = x * c - y * s;   // 표준 2D 회전 공식
+    float ny = x * s + y * c;
+    x = nx; y = ny;
+}
+
+// center를 중심으로 반지름 radius, 각도 angle 위치의 점(XZ 평면 공전).
+inline Vec3 orbitPosition(const Vec3&amp; center, float radius, float angle) {
+    return {
+        center.x + radius * std::cos(angle),
+        center.y,
+        center.z + radius * std::sin(angle)
+    };
+}</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>렌더 루프에서 공전시키기</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">float angle = 0.0f;
+// 루프 안:
+angle += 1.0f * deltaTime;        // 초당 1 라디안 (약 57도/초)
+Vec3 sunPos = { 0, 0, 0 };
+Vec3 planetPos = orbitPosition(sunPos, 8.0f, angle);
+// planetPos 로 모델의 이동 행렬을 만든다.</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>std::sin/cos</code>는 <strong>라디안</strong>을 받습니다. 도(90도 같은)를 그대로 넣으면 완전히 엉뚱한
+      값이 나옵니다. GLM도 마찬가지라 <code>glm::rotate</code>에는 항상 <code>glm::radians(deg)</code>로 변환해 넘기세요.
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      매 프레임 같은 각도에 대해 sin과 cos를 여러 번 부른다면, 한 번 계산해 변수에 담아 재사용하세요.
+      또한 회전 애니메이션은 <code>angle += speed * deltaTime</code>처럼 <strong>프레임 시간(deltaTime)</strong>에
+      비례시켜야 프레임레이트와 무관하게 같은 속도로 돕니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ 6. 선형대수와 기하학 -->
+  <section id="linalg">
+    <h2>6. 선형대수와 기하학</h2>
+    <p><strong>무엇을 만드나:</strong> 피킹(picking)·충돌의 핵심 도구인 세 가지 기하 판정을 직접 구현합니다: 무게중심 좌표를 이용한 <strong>점-삼각형 내부 판정</strong>, <strong>레이-평면 교차</strong>, 이차방정식으로 푸는 <strong>레이-구 교차</strong>.</p>
+    <ol class="steps">
+      <li>무게중심 좌표(barycentric)로 점이 삼각형 안에 있는지 판정한다.</li>
+      <li>레이가 평면과 만나는 지점의 t를 구한다.</li>
+      <li>레이-구 교차를 이차방정식으로 푼다.</li>
+      <li>모든 판정에 엡실론을 넣어 수치적으로 견고하게 만든다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>geo/Intersect.h — 원본 구현</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#pragma once
+#include "Vec3.h"
+#include &lt;cmath&gt;
+
+// 레이: origin 에서 dir(정규화 가정) 방향으로 나아간다. P(t) = origin + t*dir
+struct Ray { Vec3 origin; Vec3 dir; };
+
+// ── 점-삼각형 내부 판정 (무게중심 좌표) ─────────────────────
+// 점 p 가 삼각형(a,b,c) 평면 위에 있고 내부에 있으면 true.
+inline bool pointInTriangle(const Vec3&amp; p, const Vec3&amp; a,
+                            const Vec3&amp; b, const Vec3&amp; c) {
+    Vec3 v0 = c - a, v1 = b - a, v2 = p - a;
+    float d00 = dot(v0, v0);
+    float d01 = dot(v0, v1);
+    float d11 = dot(v1, v1);
+    float d20 = dot(v2, v0);
+    float d21 = dot(v2, v1);
+
+    float denom = d00 * d11 - d01 * d01;
+    if (std::fabs(denom) &lt; 1e-8f) return false;  // 퇴화된(직선) 삼각형
+
+    float inv = 1.0f / denom;
+    float u = (d11 * d20 - d01 * d21) * inv;
+    float v = (d00 * d21 - d01 * d20) * inv;
+
+    // 약간의 엡실론으로 모서리 위의 점도 포함
+    const float eps = 1e-5f;
+    return (u &gt;= -eps) &amp;&amp; (v &gt;= -eps) &amp;&amp; (u + v &lt;= 1.0f + eps);
+}
+
+// ── 레이-평면 교차 ──────────────────────────────────────────
+// 평면: 법선 n, 평면 위 한 점 p0. 교차하면 t를 out에 넣고 true.
+inline bool rayPlane(const Ray&amp; ray, const Vec3&amp; n, const Vec3&amp; p0,
+                     float&amp; tOut) {
+    float denom = dot(n, ray.dir);
+    if (std::fabs(denom) &lt; 1e-6f) return false;  // 레이가 평면과 평행
+
+    float t = dot(n, p0 - ray.origin) / denom;
+    if (t &lt; 0.0f) return false;                  // 교차점이 레이 뒤쪽
+    tOut = t;
+    return true;
+}
+
+// ── 레이-구 교차 (이차방정식) ───────────────────────────────
+// 구: 중심 center, 반지름 radius. 가장 가까운 양수 t를 out에 넣고 true.
+inline bool raySphere(const Ray&amp; ray, const Vec3&amp; center, float radius,
+                      float&amp; tOut) {
+    Vec3 oc = ray.origin - center;
+    float a = dot(ray.dir, ray.dir);       // dir 정규화 시 1
+    float b = 2.0f * dot(oc, ray.dir);
+    float c = dot(oc, oc) - radius * radius;
+
+    float disc = b * b - 4.0f * a * c;
+    if (disc &lt; 0.0f) return false;         // 판별식 음수 → 교차 없음
+
+    float sq = std::sqrt(disc);
+    float t0 = (-b - sq) / (2.0f * a);     // 가까운 근 먼저
+    float t1 = (-b + sq) / (2.0f * a);
+
+    if (t0 &gt; 1e-4f)      { tOut = t0; return true; }  // 앞쪽 표면
+    else if (t1 &gt; 1e-4f) { tOut = t1; return true; }  // 레이 시작점이 구 내부
+    return false;                                     // 둘 다 뒤쪽
+}</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>피킹에 쓰기 — 마우스 레이로 구 클릭 판정</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">Ray pickRay = /* 카메라·마우스에서 만든 레이 (dir 정규화됨) */;
+Vec3 spherePos{ 0, 1, 0 };
+float t;
+
+if (raySphere(pickRay, spherePos, 0.5f, t)) {
+    Vec3 hit = pickRay.origin + pickRay.dir * t;   // 실제 교차점
+    // hit 위치에 마커를 찍거나 물체를 선택 상태로 만든다.
+}</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      부동소수 비교에 <code>== 0.0f</code>를 쓰면 거의 항상 실패합니다. 위 코드처럼 <strong>엡실론</strong>
+      (<code>1e-6f</code> 등)과 비교하세요. 특히 레이-평면에서 분모(<code>n·dir</code>)가 0에 가까우면 나눗셈이
+      폭발하므로 반드시 먼저 걸러야 합니다.
+    </div>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      레이-구에서 <code>t0</code>가 음수이고 <code>t1</code>이 양수이면 <strong>레이 시작점이 구 내부</strong>에
+      있다는 뜻입니다. 카메라가 물체 안으로 들어간 경우 이 처리를 빼먹으면 클릭이 씹힙니다.
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      씬에 물체가 많으면 모든 삼각형에 대해 교차를 도는 것은 느립니다. 먼저 각 물체의 <strong>경계 구/AABB</strong>로
+      빠르게 걸러낸 뒤(broad phase), 통과한 것만 정밀 삼각형 교차(narrow phase)로 검사하세요. 실무 피킹·충돌은
+      대부분 이 2단계 구조입니다.
+    </div>
+
+    <p>실무에서는 GLM 벡터를 그대로 위 함수들의 인자로 쓰거나, 검증된 충돌 라이브러리(Bullet 등)를 사용합니다. 원리를 알면 그 API의 반환값(t, 법선, 교차점)이 무엇인지 바로 이해됩니다.</p>
+  </section>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / OpenGL 3.3+ Core</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

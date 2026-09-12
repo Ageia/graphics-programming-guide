@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: GPU · 셰이더 — C++/OpenGL</title>
+<meta name="description" content="셰이더 컴파일·링크, 버텍스/프래그먼트/컴퓨트 셰이더를 모던 OpenGL(GLSL)로 직접 작성하는 실무자용 구현 가이드." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width: 940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 가이드 허브</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">4장. GPU · 셰이더</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION GUIDE · CHAPTER 4</span>
+  <h1 style="font-size:32px; margin:0 0 12px;">GPU · 셰이더</h1>
+  <p class="lead" style="font-size:16px;">
+    셰이더는 <strong>GPU 위에서 병렬로 도는 작은 프로그램</strong>입니다. 이 장에서는 셰이더를 컴파일·링크하는
+    재사용 가능한 C++ 헬퍼를 만들고, <strong>버텍스 / 프래그먼트 / 컴퓨트</strong> 셰이더를 GLSL로 직접 작성합니다.
+    기본은 OpenGL 3.3 Core, 컴퓨트 셰이더만 4.3+가 필요합니다.
+  </p>
+
+  <!-- ===================================================================== -->
+  <section id="gpu-intro">
+    <h2>1. GPU 병렬 처리: 셰이더는 어떻게 도는가</h2>
+    <p>
+      CPU는 소수의 강력한 코어가 순차 작업을 빠르게 처리합니다. GPU는 반대로 <strong>수천 개의 단순한 코어</strong>가
+      같은 코드를 <em>서로 다른 데이터</em>에 대해 동시에 실행합니다. 셰이더 한 벌을 작성하면 GPU가 그것을
+      수백만 번, 각기 다른 입력으로 병렬 호출합니다.
+    </p>
+    <ul>
+      <li><strong>버텍스 셰이더</strong>는 <em>정점 하나당 한 번</em> 호출됩니다. 정점 10만 개면 10만 번 실행됩니다.</li>
+      <li><strong>프래그먼트 셰이더</strong>는 <em>픽셀(프래그먼트) 하나당 한 번</em> 호출됩니다. 1080p 화면을 꽉 채우면 200만 번 이상입니다.</li>
+      <li><strong>컴퓨트 셰이더</strong>는 우리가 정의한 <em>작업 항목(work item)</em>마다 한 번 호출됩니다.</li>
+    </ul>
+
+    <h3>워크 그룹과 SIMT</h3>
+    <p>
+      GPU는 호출들을 낱개로 다루지 않고 <strong>워프(warp) / 웨이브프론트(wavefront)</strong>라 불리는
+      묶음(보통 32 또는 64개)으로 묶어 실행합니다. 한 묶음의 모든 스레드는 <strong>같은 명령어를 같은 클럭에</strong> 실행합니다.
+      이 방식을 <strong>SIMT</strong>(Single Instruction, Multiple Threads)라고 합니다. 컴퓨트 셰이더에서는 이 묶음의 상위 개념인
+      <strong>워크 그룹(work group)</strong>을 우리가 <code>local_size</code>로 직접 지정합니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>실행 계층 (개념도)</span><span class="lang">text</span></div>
+      <pre><code class="language-text">디스패치 전체
+ ├─ 워크 그룹 (0,0)  ← glDispatchCompute(gx,gy,gz) 로 개수 지정
+ │    ├─ 워프/웨이브 [스레드 0..31]  ← 하드웨어가 한 덩어리로 실행 (SIMT)
+ │    └─ 워프/웨이브 [스레드 32..63]
+ ├─ 워크 그룹 (1,0)
+ └─ ...
+   그룹 내부 스레드 수 = local_size_x * local_size_y * local_size_z</code></pre>
+    </div>
+
+    <h3>분기 발산(branch divergence)이 비싼 이유</h3>
+    <p>
+      한 워프의 32개 스레드가 <em>반드시 같은 명령어</em>를 실행하므로, <code>if</code>에서 절반은 참, 절반은 거짓으로
+      갈리면 GPU는 두 갈래를 <strong>순차적으로 모두</strong> 실행하고 각 스레드에는 해당하는 결과만 남깁니다.
+      즉 분기가 갈리면 <strong>둘 다의 비용을 낸다</strong>는 뜻입니다.
+    </p>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      워프 안의 스레드가 <em>모두 같은 분기</em>로 가면 발산 비용이 없습니다. 픽셀별로 조건이 뒤죽박죽 갈리는 코드보다,
+      화면 영역·오브젝트 단위로 조건이 일관된 코드가 훨씬 빠릅니다. 무거운 <code>if</code>보다 <code>mix()</code>·<code>step()</code> 같은
+      분기 없는(branchless) 수식을 선호하세요.
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="shaderprogram">
+    <h2>2. 셰이더 프로그램 만들기 (재사용 헬퍼)</h2>
+    <p>
+      GLSL 소스를 GPU가 실행할 수 있는 <strong>프로그램 객체</strong>로 만드는 과정은 항상 같습니다:
+      각 셰이더를 <strong>컴파일</strong>하고, 이들을 하나의 <strong>프로그램으로 링크</strong>합니다.
+      실패 로그를 꼭 찍어야 하므로, 매번 반복하지 않도록 작은 헬퍼로 만들어 둡니다.
+    </p>
+    <ol class="steps">
+      <li><code>glCreateShader</code> → <code>glShaderSource</code> → <code>glCompileShader</code>로 컴파일하고 <code>GL_COMPILE_STATUS</code> 확인</li>
+      <li><code>glCreateProgram</code>에 셰이더들을 <code>glAttachShader</code> → <code>glLinkProgram</code> → <code>GL_LINK_STATUS</code> 확인</li>
+      <li>링크가 끝나면 개별 셰이더 객체는 <code>glDeleteShader</code>로 지워도 됩니다(프로그램에 이미 반영됨)</li>
+      <li><code>glGetUniformLocation</code>으로 유니폼 위치를 찾아 <code>glUniform*</code>로 값 전달</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>src/Shader.h</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#pragma once
+#include &lt;glad/glad.h&gt;
+#include &lt;glm/glm.hpp&gt;
+#include &lt;glm/gtc/type_ptr.hpp&gt;   // glm::value_ptr
+#include &lt;string&gt;
+#include &lt;cstdio&gt;
+
+// 셰이더 하나를 컴파일하고 컴파일 로그를 검사한다.
+// type: GL_VERTEX_SHADER / GL_FRAGMENT_SHADER / GL_COMPUTE_SHADER ...
+inline GLuint compileShader(GLenum type, const char* src) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &amp;src, nullptr);
+    glCompileShader(shader);
+
+    GLint ok = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &amp;ok);
+    if (!ok) {
+        GLint len = 0;
+        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &amp;len);
+        std::string log(len &gt; 0 ? len : 1, '\0');
+        glGetShaderInfoLog(shader, len, nullptr, log.data());
+        std::fprintf(stderr, "[셰이더 컴파일 실패]\n%s\n", log.c_str());
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+// 이미 컴파일된 셰이더들을 하나의 프로그램으로 링크한다.
+inline GLuint linkProgram(GLuint vs, GLuint fs) {
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+
+    GLint ok = GL_FALSE;
+    glGetProgramiv(prog, GL_LINK_STATUS, &amp;ok);
+    if (!ok) {
+        GLint len = 0;
+        glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &amp;len);
+        std::string log(len &gt; 0 ? len : 1, '\0');
+        glGetProgramInfoLog(prog, len, nullptr, log.data());
+        std::fprintf(stderr, "[프로그램 링크 실패]\n%s\n", log.c_str());
+        glDeleteProgram(prog);
+        return 0;
+    }
+    // 링크가 끝나면 개별 셰이더는 프로그램 안에 복사되어 있으므로 지워도 된다.
+    glDetachShader(prog, vs);
+    glDetachShader(prog, fs);
+    return prog;
+}
+
+// 얇은 래퍼: 프로그램 사용 + 유니폼 설정을 편하게.
+class Shader {
+public:
+    GLuint id = 0;
+
+    // 버텍스/프래그먼트 소스로 바로 만드는 생성자
+    Shader(const char* vsSrc, const char* fsSrc) {
+        GLuint vs = compileShader(GL_VERTEX_SHADER,   vsSrc);
+        GLuint fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+        if (vs &amp;&amp; fs) id = linkProgram(vs, fs);
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+    }
+    ~Shader() { if (id) glDeleteProgram(id); }
+
+    void use() const { glUseProgram(id); }
+
+    // 유니폼 위치를 이름으로 찾아 값을 넣는다 (오버로드)
+    void setUniform(const char* name, int v) const {
+        glUniform1i(glGetUniformLocation(id, name), v);
+    }
+    void setUniform(const char* name, float v) const {
+        glUniform1f(glGetUniformLocation(id, name), v);
+    }
+    void setUniform(const char* name, const glm::vec3&amp; v) const {
+        glUniform3fv(glGetUniformLocation(id, name), 1, glm::value_ptr(v));
+    }
+    void setUniform(const char* name, const glm::mat4&amp; m) const {
+        // 세 번째 인자 transpose = GL_FALSE (GLM은 열 우선이라 그대로 넘긴다)
+        glUniformMatrix4fv(glGetUniformLocation(id, name), 1, GL_FALSE, glm::value_ptr(m));
+    }
+};</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>glGetUniformLocation</code>이 <code>-1</code>을 돌려주면 그 유니폼이 셰이더에 <em>선언되지 않았거나
+      실제로 사용되지 않아 컴파일러가 제거</em>한 경우입니다. 오타이거나, 결과에 영향 없어 최적화로 지워진 것이니
+      셰이더 코드를 먼저 의심하세요. <code>-1</code>에 값을 넣는 것 자체는 오류가 아니라 조용히 무시됩니다.
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      <code>glGetUniformLocation</code>은 매 프레임 호출하기엔 느립니다. 셰이더 로드 시 위치를 한 번 캐싱해
+      <code>std::unordered_map&lt;std::string,GLint&gt;</code>에 저장하거나, GLSL에서 <code>layout(location=N)</code>으로
+      명시적 위치를 지정하면 조회 자체를 없앨 수 있습니다.
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="vertexshader">
+    <h2>3. Vertex Shader</h2>
+    <p>
+      버텍스 셰이더는 정점마다 실행되며, 최종적으로 <strong><code>gl_Position</code></strong>(클립 공간 좌표)을 반드시
+      써야 합니다. 입력은 VAO에 묶인 <strong>정점 속성(attribute)</strong>이고, <code>layout(location=N)</code>이
+      VBO의 어느 속성 슬롯인지를 가리킵니다. <code>out</code>으로 내보낸 값은 래스터화 과정에서 삼각형 표면을 따라
+      <strong>보간(interpolate)</strong>되어 프래그먼트 셰이더로 넘어갑니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>shaders/basic.vert</span><span class="lang">glsl</span></div>
+      <pre><code class="language-glsl">#version 330 core
+
+// ── 정점 속성 (VAO의 슬롯 번호와 일치해야 한다) ──
+layout(location = 0) in vec3 aPos;      // 위치
+layout(location = 1) in vec3 aNormal;   // 법선
+layout(location = 2) in vec2 aUV;       // 텍스처 좌표
+
+// ── 프래그먼트로 넘길 varying (표면을 따라 보간됨) ──
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+// ── 유니폼 (모든 정점이 공유하는 상수) ──
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+void main() {
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos  = world.xyz;
+
+    // 법선은 모델의 역전치 행렬로 변환해야 정확하지만,
+    // 여기서는 균등 스케일 가정하에 mat3(uModel)로 근사한다.
+    vNormal = mat3(uModel) * aNormal;
+    vUV     = aUV;
+
+    // 최종 출력: 클립 공간 좌표 (필수)
+    gl_Position = uProj * uView * world;
+}</code></pre>
+    </div>
+
+    <h3>정점 변위(vertex displacement): sin 파도</h3>
+    <p>
+      정점 위치를 셰이더에서 <em>직접 흔들면</em> CPU 재계산 없이 GPU만으로 애니메이션을 만들 수 있습니다.
+      물결·깃발·풀 흔들림이 대표적입니다. 아래는 <code>uTime</code>과 좌표로 높이를 sin 파도로 밀어 올립니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>shaders/wave.vert</span><span class="lang">glsl</span></div>
+      <pre><code class="language-glsl">#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 2) in vec2 aUV;
+
+out vec2 vUV;
+out float vHeight;   // 색에 쓰라고 파도 높이도 넘긴다
+
+uniform mat4 uModel, uView, uProj;
+uniform float uTime;
+
+void main() {
+    vec3 p = aPos;
+    // 두 방향의 사인파를 합쳐 자연스러운 물결을 만든다
+    float w = sin(p.x * 3.0 + uTime * 2.0) * 0.15
+            + sin(p.z * 2.0 + uTime * 1.3) * 0.10;
+    p.y += w;
+
+    vHeight = w;
+    vUV = aUV;
+    gl_Position = uProj * uView * uModel * vec4(p, 1.0);
+}</code></pre>
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      정점을 변위시키면 원래의 <code>aNormal</code>은 더 이상 표면과 맞지 않습니다. 조명을 쓴다면 파도 함수를
+      미분해 새 법선을 <em>셰이더 안에서 다시 계산</em>해야 그림자·하이라이트가 자연스럽습니다.
+      변위 정도는 정점 밀도가 낮으면 계단처럼 각지므로, 촘촘한 메시가 필요합니다.
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="fragshader">
+    <h2>4. Fragment Shader</h2>
+    <p>
+      프래그먼트 셰이더는 화면에 찍힐 <em>후보 픽셀(프래그먼트)</em>마다 실행되어 최종 색
+      <strong><code>out vec4 FragColor</code></strong>를 결정합니다. 입력은 버텍스 셰이더에서 보간되어 넘어온
+      <code>in</code> varying과 유니폼입니다. GLSL ES(웹/모바일)와 달리 데스크톱 GLSL 코어 프로파일에서는
+      부동소수 <em>정밀도 지정(<code>precision</code>)</em>이 필수가 아니지만, 이식성을 위해 알아둘 가치가 있습니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>shaders/basic.frag</span><span class="lang">glsl</span></div>
+      <pre><code class="language-glsl">#version 330 core
+
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+
+out vec4 FragColor;    // 이 프래그먼트의 최종 색 (RGBA)
+
+uniform vec3 uLightDir;   // 정규화된 광원 방향
+uniform vec3 uBaseColor;
+
+void main() {
+    vec3 N = normalize(vNormal);
+    // 램버트 확산: 법선과 광원 방향의 내적(음수는 0으로 클램프)
+    float diff = max(dot(N, normalize(-uLightDir)), 0.0);
+    vec3 color = uBaseColor * (0.15 + 0.85 * diff);  // 약간의 앰비언트 + 확산
+    FragColor = vec4(color, 1.0);
+}</code></pre>
+    </div>
+
+    <h3>순수 절차적 프래그먼트: 좌표만으로 그리기</h3>
+    <p>
+      텍스처 없이 <strong>좌표와 시간만으로</strong> 무늬를 계산할 수 있습니다. 화면 전체를 덮는 사각형 하나에
+      아래 셰이더를 씌우면 원·체커·플라스마가 나옵니다. <code>gl_FragCoord</code>는 현재 프래그먼트의 픽셀 좌표입니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>shaders/procedural.frag</span><span class="lang">glsl</span></div>
+      <pre><code class="language-glsl">#version 330 core
+out vec4 FragColor;
+
+uniform float uTime;
+uniform vec2  uResolution;   // (width, height) 픽셀 단위
+
+void main() {
+    // 화면 좌표를 0..1 로 정규화, 종횡비 보정해 -1..1 로
+    vec2 uv = (gl_FragCoord.xy * 2.0 - uResolution) / uResolution.y;
+
+    // (1) 원: 중심까지의 거리로 안/밖 판정 (smoothstep 으로 부드러운 경계)
+    float d = length(uv);
+    float circle = 1.0 - smoothstep(0.48, 0.50, d);
+
+    // (2) 체커: 좌표를 정수 격자로 나눠 짝/홀 판정
+    vec2 g = floor(uv * 4.0);
+    float checker = mod(g.x + g.y, 2.0);
+
+    // (3) 플라스마: 여러 사인파를 시간과 함께 합성
+    float plasma = sin(uv.x * 10.0 + uTime)
+                 + sin(uv.y * 10.0 + uTime * 1.3)
+                 + sin((uv.x + uv.y) * 8.0 - uTime);
+    vec3 plasmaCol = 0.5 + 0.5 * cos(vec3(0.0, 2.0, 4.0) + plasma);
+
+    // 세 무늬를 섞어 데모용으로 합친다
+    vec3 col = mix(plasmaCol, vec3(checker), 0.25);
+    col = mix(col, vec3(1.0), circle * 0.6);
+
+    FragColor = vec4(col, 1.0);
+}</code></pre>
+    </div>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      <code>gl_FragCoord</code>의 원점은 <strong>화면 좌하단</strong>이고 픽셀 중심은 <code>(x+0.5, y+0.5)</code>입니다.
+      이미지 좌표(좌상단 원점)와 상하가 뒤집히므로, 텍스처와 섞을 때는 Y를 뒤집어야 할 수 있습니다.
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      프래그먼트 셰이더는 픽셀 수만큼 실행되므로 <em>가장 비싼 단계</em>가 되기 쉽습니다. 무거운 연산은 가능하면
+      버텍스 셰이더로 옮겨 보간에 맡기고(정점 수 &lt;&lt; 픽셀 수), <code>pow</code>·<code>sin</code>·나눗셈 남용을 피하세요.
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="computeshader">
+    <h2>5. Compute Shader</h2>
+    <p>
+      컴퓨트 셰이더는 <strong>렌더 파이프라인 밖</strong>에서 도는 범용 GPU 연산입니다. 정점·프래그먼트라는 고정
+      역할이 없고, 우리가 정의한 스레드 격자에서 버퍼(SSBO)나 이미지를 마음대로 읽고 씁니다. 파티클 시뮬레이션,
+      물리, 이미지 처리에 적합합니다. <strong>OpenGL 4.3 이상</strong>이 필요합니다.
+    </p>
+    <ol class="steps">
+      <li>SSBO(Shader Storage Buffer)에 파티클 배열을 올린다 (<code>glBufferData</code>)</li>
+      <li>버퍼를 바인딩 포인트에 연결한다 (<code>glBindBufferBase</code>)</li>
+      <li><code>glDispatchCompute</code>로 워크 그룹 개수를 지정해 실행</li>
+      <li><code>glMemoryBarrier</code>로 쓰기 완료를 보장한 뒤 다음 단계(렌더/읽기)로 넘어간다</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>shaders/particles.comp</span><span class="lang">glsl</span></div>
+      <pre><code class="language-glsl">#version 430
+
+// 워크 그룹 하나에 64개 스레드 (1차원)
+layout(local_size_x = 64) in;
+
+struct Particle {
+    vec4 pos;   // xyz = 위치, w = 수명
+    vec4 vel;   // xyz = 속도, w = 여분(정렬용)
+};
+
+// std430 레이아웃의 SSBO, 바인딩 포인트 0번
+layout(std430, binding = 0) buffer Particles {
+    Particle particles[];
+};
+
+uniform float uDt;      // 프레임 델타타임
+uniform vec3  uGravity; // 예: (0, -9.8, 0)
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;          // 전역 스레드 인덱스
+    if (i &gt;= particles.length()) return;       // 범위 밖 스레드는 종료
+
+    Particle p = particles[i];
+    p.vel.xyz += uGravity * uDt;               // 중력 적분
+    p.pos.xyz += p.vel.xyz * uDt;              // 위치 적분
+    p.pos.w   -= uDt;                          // 수명 감소
+
+    // 바닥에 닿으면 튕김 + 리스폰(수명 소진 시)
+    if (p.pos.y &lt; 0.0) { p.pos.y = 0.0; p.vel.y *= -0.6; }
+    if (p.pos.w &lt;= 0.0) { p.pos.xyz = vec3(0.0); p.pos.w = 3.0; }
+
+    particles[i] = p;                          // 다시 써넣는다
+}</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>src/particles.cpp (요지)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;glad/glad.h&gt;
+#include &lt;glm/glm.hpp&gt;
+#include &lt;vector&gt;
+
+struct Particle { glm::vec4 pos; glm::vec4 vel; };
+
+const int COUNT = 100000;
+const int LOCAL_SIZE = 64;
+
+// ── 초기화 ──
+std::vector&lt;Particle&gt; init(COUNT);
+for (auto&amp; p : init) {
+    p.pos = glm::vec4(0.0f, 0.0f, 0.0f, 3.0f);            // 위치, 수명
+    p.vel = glm::vec4((rand()%200-100)/50.0f, 5.0f, 0.0f, 0.0f);
+}
+
+GLuint ssbo;
+glGenBuffers(1, &amp;ssbo);
+glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+glBufferData(GL_SHADER_STORAGE_BUFFER,
+             init.size() * sizeof(Particle), init.data(), GL_DYNAMIC_DRAW);
+// 셰이더의 binding = 0 에 이 버퍼를 연결
+glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+
+// computeProg 는 compileShader(GL_COMPUTE_SHADER, ...) + linkProgram 으로 만든 것
+GLuint computeProg = /* ... */;
+
+// ── 매 프레임: 시뮬레이션 한 스텝 ──
+glUseProgram(computeProg);
+glUniform1f(glGetUniformLocation(computeProg, "uDt"), dt);
+glUniform3f(glGetUniformLocation(computeProg, "uGravity"), 0.0f, -9.8f, 0.0f);
+
+// 필요한 워크 그룹 수 = ceil(COUNT / LOCAL_SIZE)
+GLuint groups = (COUNT + LOCAL_SIZE - 1) / LOCAL_SIZE;
+glDispatchCompute(groups, 1, 1);
+
+// 컴퓨트가 SSBO에 쓴 결과가, 이후 렌더링(정점 읽기)에 보이도록 배리어
+glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
+
+// 이후: 같은 ssbo 를 VBO처럼 바인딩해 점으로 렌더링하거나,
+// glMapBufferRange / glGetBufferSubData 로 CPU에서 읽어올 수도 있다.</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>glDispatchCompute</code> 직후 결과를 바로 쓰면 <em>경쟁 상태</em>가 됩니다. GPU가 아직 쓰는 중일 수 있기 때문입니다.
+      반드시 용도에 맞는 <code>glMemoryBarrier</code> 비트를 넣으세요. 정점으로 렌더링하면
+      <code>GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT</code>, 다른 컴퓨트가 읽으면 <code>GL_SHADER_STORAGE_BARRIER_BIT</code>입니다.
+    </div>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      <code>std430</code> 레이아웃에서 <code>vec3</code>는 16바이트에 정렬됩니다. 그래서 예제는 <code>vec3</code> 대신
+      <code>vec4</code>를 써서 C++ 구조체와 바이트 정렬이 어긋나는 함정을 피했습니다. C++ 쪽 <code>struct</code>와
+      GLSL <code>struct</code>의 크기·정렬이 <em>정확히</em> 일치해야 합니다.
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="shaderlang">
+    <h2>6. GLSL 요점</h2>
+    <p>
+      셰이더 언어는 문법이 작습니다. 자주 쓰는 것만 정리하면 대부분의 셰이더를 읽고 쓸 수 있습니다.
+    </p>
+
+    <h3>한정자(qualifier)</h3>
+    <table class="impl">
+      <thead><tr><th>한정자</th><th>의미</th></tr></thead>
+      <tbody>
+        <tr><td><code>in</code></td><td>이 스테이지로 들어오는 입력 (정점 속성 / 보간된 varying)</td></tr>
+        <tr><td><code>out</code></td><td>다음 스테이지로 내보내는 출력 (varying / FragColor)</td></tr>
+        <tr><td><code>uniform</code></td><td>드로우콜 동안 모든 호출이 공유하는 CPU→GPU 상수</td></tr>
+        <tr><td><code>layout(location=N)</code></td><td>속성 슬롯 / 출력 위치를 명시적으로 지정</td></tr>
+        <tr><td><code>layout(std430, binding=N)</code></td><td>SSBO/UBO의 메모리 레이아웃과 바인딩 포인트</td></tr>
+      </tbody>
+    </table>
+
+    <h3>타입</h3>
+    <ul>
+      <li><strong>스칼라</strong>: <code>float</code>, <code>int</code>, <code>uint</code>, <code>bool</code></li>
+      <li><strong>벡터</strong>: <code>vec2/3/4</code>, <code>ivec*</code>, <code>uvec*</code> — 스위즐 지원(<code>v.xyz</code>, <code>v.rgb</code>, <code>v.xy</code>)</li>
+      <li><strong>행렬</strong>: <code>mat2/3/4</code> — 곱셈은 <code>M * v</code> (열 우선)</li>
+      <li><strong>샘플러</strong>: <code>sampler2D</code>, <code>samplerCube</code> — 텍스처 핸들</li>
+    </ul>
+
+    <h3>자주 쓰는 내장 함수</h3>
+    <div class="code">
+      <div class="code-head"><span>GLSL built-ins</span><span class="lang">glsl</span></div>
+      <pre><code class="language-glsl">mix(a, b, t)        // 선형 보간: a*(1-t) + b*t  (분기 대신 자주 씀)
+clamp(x, lo, hi)    // 범위 제한
+step(edge, x)       // x &lt; edge ? 0 : 1   (하드 컷)
+smoothstep(a, b, x) // a~b 구간에서 부드러운 0→1
+dot(a, b)           // 내적 (조명, 각도 판정)
+cross(a, b)         // 외적 (법선, 접선)
+normalize(v)        // 단위 벡터
+length(v)           // 크기
+reflect(I, N)       // 반사 벡터
+texture(sampler, uv)// 텍스처 샘플링 → vec4
+pow, sin, cos, abs, floor, fract, mod, min, max</code></pre>
+    </div>
+
+    <h3><code>#version</code> 와 프로파일</h3>
+    <ul>
+      <li><code>#version 330 core</code> — OpenGL 3.3 코어(구식 고정 파이프라인 제거). 이 가이드의 기본.</li>
+      <li><code>#version 430</code> — 컴퓨트 셰이더·SSBO 사용 가능(OpenGL 4.3).</li>
+      <li><code>#version 300 es</code> — WebGL2 / OpenGL ES. 이때 <code>precision mediump float;</code> 선언이 필요합니다.</li>
+    </ul>
+
+    <h3>다른 언어와의 매핑</h3>
+    <p>
+      셰이더의 <em>아이디어</em>(스테이지별 병렬 실행, 속성 입력, 유니폼, 내장 벡터 수학)는 API가 달라도 같습니다.
+      문법만 바뀝니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>개념</th><th>GLSL</th><th>HLSL (DX)</th><th>WGSL (WebGPU)</th></tr></thead>
+      <tbody>
+        <tr><td>선형 보간</td><td><code>mix(a,b,t)</code></td><td><code>lerp(a,b,t)</code></td><td><code>mix(a,b,t)</code></td></tr>
+        <tr><td>float 벡터</td><td><code>vec3</code></td><td><code>float3</code></td><td><code>vec3&lt;f32&gt;</code></td></tr>
+        <tr><td>정점 출력 위치</td><td><code>gl_Position</code></td><td><code>SV_Position</code></td><td><code>@builtin(position)</code></td></tr>
+        <tr><td>상수 전달</td><td><code>uniform</code></td><td>cbuffer</td><td><code>var&lt;uniform&gt;</code></td></tr>
+        <tr><td>텍스처 샘플</td><td><code>texture()</code></td><td><code>tex.Sample()</code></td><td><code>textureSample()</code></td></tr>
+      </tbody>
+    </table>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      한 번 GLSL로 셰이더 사고방식을 익히면 HLSL·WGSL·Metal(MSL)은 며칠이면 옮겨갑니다. 언어보다 중요한 것은
+      <strong>병렬 실행 모델</strong>(1장)과 <strong>분기 발산 회피</strong>를 몸에 익히는 것입니다.
+    </div>
+  </section>
+
+  <div class="footer">
+    🛠️ 구현 가이드 · 4장 GPU · 셰이더 · 모든 코드는 학습용으로 새로 작성된 원본 예제입니다 · GLSL / OpenGL 3.3+ (Compute 4.3+)
+  </div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

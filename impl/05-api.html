@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 그래픽스 API — C++/OpenGL</title>
+<meta name="description" content="OpenGL 상태 머신·렌더 루프·디버깅·리소스 관리의 실전, 그리고 DX12/Vulkan/Metal/WebGPU로의 개념 매핑." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width: 940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 가이드 홈</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">5장. 그래픽스 API</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION GUIDE</span>
+  <h1 style="font-size:32px; margin:0 0 12px;">그래픽스 API — 상태 머신과 렌더 루프의 실전</h1>
+  <p class="lead" style="font-size:16px;">
+    앞 장에서 삼각형과 셰이더를 그렸다면, 이 장은 <strong>"그 아래에서 OpenGL이 어떻게 굴러가는가"</strong>를 다룹니다.
+    OpenGL은 거대한 <strong>상태 머신(state machine)</strong>입니다. 이 모델을 이해하면 렌더 루프·디버깅·리소스 관리가 한 줄로 꿰이고,
+    나아가 DX12·Vulkan·Metal·WebGPU 같은 다른 API로 넘어갈 때 개념이 그대로 이식됩니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <section id="api-overview">
+    <h2>1. OpenGL은 상태 머신 — bind-to-edit 모델</h2>
+    <p>
+      OpenGL에는 "객체를 인자로 받아 조작하는" 일반적인 OOP식 API가 거의 없습니다. 대신 <strong>현재 바인딩된 대상</strong>을
+      암묵적으로 조작합니다. 버퍼 하나를 채우려 해도 흐름은 항상 4단계입니다.
+    </p>
+    <ol class="steps">
+      <li><strong>생성(glGen*)</strong> — GPU 객체의 이름(정수 ID)을 발급받는다. 아직 메모리도 내용도 없다.</li>
+      <li><strong>바인딩(glBind*)</strong> — 그 ID를 "현재 활성 대상" 슬롯에 꽂는다. 이후 관련 호출은 모두 이 대상에 적용된다.</li>
+      <li><strong>설정(glBufferData / glTexImage2D / glVertexAttribPointer …)</strong> — 바인딩된 대상을 채우거나 속성을 지정한다.</li>
+      <li><strong>해제(glBind*(0))</strong> — 실수 방지를 위해 슬롯을 비운다(선택이지만 권장).</li>
+    </ol>
+    <p>
+      핵심은 <code>glBufferData</code> 어디에도 "어느 버퍼"라는 인자가 없다는 점입니다. 대상은 <em>직전에 바인딩된 것</em>으로
+      결정됩니다. 이게 OpenGL의 전역 상태 모델이며, 동시에 뒤에서 볼 버그의 온상이기도 합니다.
+    </p>
+
+    <h3>주요 객체 종류</h3>
+    <table class="impl">
+      <thead><tr><th>객체</th><th>바인딩 타깃</th><th>역할</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Buffer</strong> (VBO/EBO/UBO)</td><td><code>GL_ARRAY_BUFFER</code> 등</td><td>정점·인덱스·유니폼 데이터를 담는 GPU 메모리 덩어리</td></tr>
+        <tr><td><strong>VAO</strong> (Vertex Array)</td><td><code>glBindVertexArray</code></td><td>정점 속성 레이아웃 + 어떤 VBO/EBO를 쓰는지 기억</td></tr>
+        <tr><td><strong>Texture</strong></td><td><code>GL_TEXTURE_2D</code> 등</td><td>이미지 데이터 + 샘플링 파라미터</td></tr>
+        <tr><td><strong>FBO</strong> (Framebuffer)</td><td><code>GL_FRAMEBUFFER</code></td><td>화면 대신 텍스처에 렌더링(오프스크린)</td></tr>
+        <tr><td><strong>Program</strong></td><td><code>glUseProgram</code></td><td>링크된 셰이더 파이프라인(정점+프래그먼트 …)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>표준 렌더 루프 골격</h3>
+    <p>
+      거의 모든 프레임은 아래 순서를 반복합니다. <strong>지우고 → 프로그램 바인딩 → VAO 바인딩 → 유니폼 설정 → 드로우 → 스왑.</strong>
+      주석으로 각 단계가 어떤 상태를 건드리는지 표시했습니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>render_loop.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">// ── 초기화(루프 밖, 한 번만) ─────────────────────────────
+GLuint vao, vbo, program;
+glGenVertexArrays(1, &amp;vao);          // 1) VAO 이름 발급
+glGenBuffers(1, &amp;vbo);               //    VBO 이름 발급
+
+glBindVertexArray(vao);              // 2) VAO 바인딩 — 이후 속성 설정이 여기 기록됨
+glBindBuffer(GL_ARRAY_BUFFER, vbo);  //    VBO 바인딩
+glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW); // 3) 데이터 업로드
+glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+glEnableVertexAttribArray(0);
+glBindVertexArray(0);                // 4) 해제(실수 방지)
+
+program = makeProgram(vsSrc, fsSrc); // 셰이더 컴파일·링크(4장 참고)
+GLint uColorLoc = glGetUniformLocation(program, "uColor");
+
+glEnable(GL_DEPTH_TEST);             // 전역 상태: 깊이 테스트 켜기
+
+// ── 프레임 루프 ──────────────────────────────────────────
+while (!glfwWindowShouldClose(window)) {
+    glfwPollEvents();
+
+    // (a) 지우기: 컬러 + 깊이 버퍼를 초기화
+    glClearColor(0.06f, 0.07f, 0.10f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // (b) 프로그램 바인딩: 이후 드로우는 이 셰이더로
+    glUseProgram(program);
+
+    // (c) 유니폼 설정: "현재 프로그램"에 값을 밀어 넣는다
+    glUniform4f(uColorLoc, 0.9f, 0.4f, 0.2f, 1.0f);
+
+    // (d) VAO 바인딩: 정점 레이아웃 + 소스 버퍼 복원
+    glBindVertexArray(vao);
+
+    // (e) 드로우: 지금까지의 상태 스냅샷으로 GPU가 그린다
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    // (f) 스왑: 백버퍼 ↔ 프론트버퍼 교체 → 화면에 표시
+    glfwSwapBuffers(window);
+}</code></pre>
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      드로우 순서를 헷갈리면 화면이 검게 나옵니다. 대표 원인 3가지: ① <code>glUseProgram</code>을 안 하고 유니폼을 설정(위치 −1에 쓰기),
+      ② VAO 바인딩을 빼먹어 정점 소스가 없음, ③ <code>glClear</code>에 <code>GL_DEPTH_BUFFER_BIT</code>를 빠뜨려 이전 프레임 깊이가 남아
+      새 오브젝트가 전부 깊이 테스트에서 탈락. 검은 화면이면 이 3개부터 확인하세요.
+    </div>
+
+    <h3>더블 버퍼링과 V-Sync</h3>
+    <p>
+      화면에 <strong>그리는 중인 버퍼(백버퍼)</strong>와 <strong>모니터에 표시 중인 버퍼(프론트버퍼)</strong>를 분리한 것이 더블 버퍼링입니다.
+      그리기가 끝나면 <code>glfwSwapBuffers</code>로 둘을 통째로 교체하므로, 사용자는 반쯤 그려진 화면(테어링)을 보지 않습니다.
+    </p>
+    <p>
+      교체 <em>타이밍</em>을 모니터 주사율에 맞추는 것이 V-Sync입니다. GLFW에서는 스왑 간격으로 제어합니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>vsync.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">glfwSwapInterval(1);  // 1 = V-Sync ON  (60Hz 모니터면 ~60fps로 상한)
+glfwSwapInterval(0);  // 0 = V-Sync OFF (무제한 fps, 테어링 가능 — 벤치마크용)
+glfwSwapInterval(2);  // 2 = 주사율의 1/2 (60Hz → 30fps)</code></pre>
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      성능 측정 중이라면 V-Sync를 꺼야 실제 프레임 비용이 보입니다(켜져 있으면 스왑에서 대기하느라 CPU가 놀아 왜곡됨).
+      반대로 배포 빌드는 V-Sync ON이 기본입니다 — GPU를 불필요하게 100% 돌려 발열·전력을 낭비하지 않으려면요.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="debug">
+    <h2>2. 디버깅과 검증</h2>
+    <p>
+      상태 머신의 대가는 "어디서 틀렸는지 즉시 알기 어렵다"는 점입니다. 잘못된 호출도 대개 조용히 실패하고, 몇 프레임 뒤
+      엉뚱한 곳에서 검은 화면으로 드러납니다. OpenGL은 두 가지 오류 확인 수단을 제공합니다.
+    </p>
+
+    <h3>구식: glGetError</h3>
+    <p>
+      <code>glGetError</code>는 마지막 이후 발생한 오류 플래그를 하나씩 꺼내옵니다. 문제는 <strong>어느 호출이 오류를 냈는지 알려주지 않는다</strong>는
+      것. 범인을 찾으려면 의심 호출마다 매크로로 감싸야 하니 번거롭습니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>gl_check.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">// 호출 직후 오류를 뱉는 매크로 — 번거롭지만 3.3에서도 동작
+#define GL_CHECK(call) do {                                    \
+    call;                                                      \
+    for (GLenum e; (e = glGetError()) != GL_NO_ERROR; )        \
+        std::fprintf(stderr, "[GL] 0x%04X @ %s:%d -&gt; %s\n",   \
+                     e, __FILE__, __LINE__, #call);            \
+} while (0)
+
+// 사용 예
+GL_CHECK(glDrawArrays(GL_TRIANGLES, 0, 3));</code></pre>
+    </div>
+
+    <h3>모던: KHR_debug 콜백</h3>
+    <p>
+      OpenGL 4.3+ (또는 <code>KHR_debug</code> 확장)에서는 드라이버가 <strong>오류·경고·성능 힌트를 콜백으로 직접 밀어줍니다</strong>.
+      <code>glGetError</code>를 흩뿌릴 필요 없이, 문제가 생긴 그 호출 스택에서 메시지를 받습니다. 디버그 컨텍스트를 요청하고
+      콜백을 등록하기만 하면 됩니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>gl_debug.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;glad/glad.h&gt;
+#include &lt;GLFW/glfw3.h&gt;
+#include &lt;cstdio&gt;
+
+// 사람이 읽을 수 있게 enum을 문자열로 변환
+static const char* srcStr(GLenum s) {
+    switch (s) {
+        case GL_DEBUG_SOURCE_API:             return "API";
+        case GL_DEBUG_SOURCE_SHADER_COMPILER: return "SHADER";
+        case GL_DEBUG_SOURCE_WINDOW_SYSTEM:   return "WINDOW";
+        case GL_DEBUG_SOURCE_APPLICATION:     return "APP";
+        default:                              return "OTHER";
+    }
+}
+static const char* sevStr(GLenum s) {
+    switch (s) {
+        case GL_DEBUG_SEVERITY_HIGH:         return "HIGH";
+        case GL_DEBUG_SEVERITY_MEDIUM:       return "MED";
+        case GL_DEBUG_SEVERITY_LOW:          return "LOW";
+        default:                             return "INFO";
+    }
+}
+
+// 드라이버가 호출하는 콜백. APIENTRY 규약을 꼭 붙인다.
+static void APIENTRY onGlMessage(GLenum source, GLenum type, GLuint id,
+                                 GLenum severity, GLsizei /*len*/,
+                                 const GLchar* msg, const void* /*user*/) {
+    // 무해한 알림성 메시지는 걸러 소음을 줄인다
+    if (severity == GL_DEBUG_SEVERITY_NOTIFICATION) return;
+    std::fprintf(stderr, "[GL/%s/%s] (id=%u) %s\n",
+                 srcStr(source), sevStr(severity), id, msg);
+}
+
+// 컨텍스트 생성 "전"에 디버그 컨텍스트를 요청해야 한다
+void requestDebugContext() {
+    glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
+}
+
+// GLAD 로드 "후"에 콜백을 등록한다
+void installDebugCallback() {
+    GLint flags = 0;
+    glGetIntegerv(GL_CONTEXT_FLAGS, &amp;flags);
+    if (!(flags &amp; GL_CONTEXT_FLAG_DEBUG_BIT)) return; // 디버그 컨텍스트 아님
+
+    glEnable(GL_DEBUG_OUTPUT);
+    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);  // 콜백을 오류 발생 지점에서 동기 호출
+    glDebugMessageCallback(onGlMessage, nullptr);
+    // 모든 메시지를 활성화(원하면 필터로 좁힐 수 있음)
+    glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+}</code></pre>
+    </div>
+    <div class="callout perf">
+      <span class="tag">TIP</span>
+      <code>GL_DEBUG_OUTPUT_SYNCHRONOUS</code>를 켜면 콜백이 <em>문제를 일으킨 그 호출 안에서</em> 실행됩니다.
+      디버거에서 콜백 함수에 브레이크포인트를 걸면 콜스택으로 정확한 범인 줄을 짚을 수 있습니다. 단 동기 모드는 약간 느리니
+      릴리스에서는 끕니다.
+    </div>
+
+    <h3>프레임 캡처: RenderDoc</h3>
+    <p>
+      코드로 안 잡히는 시각적 버그(잘못된 텍스처, 뒤집힌 UV, 엉킨 깊이)는 <strong>RenderDoc</strong>으로 잡습니다.
+      실행 파일을 RenderDoc으로 띄우고 한 프레임을 캡처하면, 그 프레임의 모든 드로우 콜, 바인딩된 리소스, 각 단계의
+      버퍼/텍스처 내용, 셰이더 입력·출력을 클릭 한 번으로 뜯어볼 수 있습니다. "지금 GPU에 뭐가 올라가 있나?"의 최종 진실입니다.
+    </p>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      RenderDoc으로 잡으려면 <strong>디버그 그룹</strong>을 남겨두면 좋습니다. <code>glPushDebugGroup</code> /
+      <code>glPopDebugGroup</code>과 <code>glObjectLabel</code>로 드로우 묶음·객체에 이름을 붙이면, 캡처 화면에서
+      "GBuffer Pass" 같은 라벨로 정리돼 탐색이 훨씬 빨라집니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="resources">
+    <h2>3. 리소스 관리 &amp; 상태 팁</h2>
+    <p>
+      GL 객체는 정수 ID일 뿐이라 <code>delete</code> 대상이 명확하지 않고, 잊어버리면 GPU 메모리가 샙니다.
+      C++답게 <strong>RAII</strong>로 소유권을 코드에 새겨 넣으면 누수와 이중 해제를 원천 차단할 수 있습니다.
+    </p>
+
+    <h3>RAII 래퍼: 소멸자에서 자동 삭제</h3>
+    <div class="code">
+      <div class="code-head"><span>gl_raii.hpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;glad/glad.h&gt;
+#include &lt;utility&gt;   // std::exchange
+
+// VBO/EBO/UBO 같은 버퍼 하나의 수명을 소유하는 작은 래퍼.
+// 복사는 금지(이중 삭제 방지), 이동만 허용.
+struct GlBuffer {
+    GLuint id = 0;
+
+    GlBuffer() { glGenBuffers(1, &amp;id); }
+    ~GlBuffer() { if (id) glDeleteBuffers(1, &amp;id); } // 스코프를 벗어나면 자동 반납
+
+    GlBuffer(const GlBuffer&amp;) = delete;             // 복사 금지
+    GlBuffer&amp; operator=(const GlBuffer&amp;) = delete;
+
+    // 이동: 원본 id를 0으로 비워 소멸 시 삭제되지 않게
+    GlBuffer(GlBuffer&amp;&amp; o) noexcept : id(std::exchange(o.id, 0)) {}
+    GlBuffer&amp; operator=(GlBuffer&amp;&amp; o) noexcept {
+        if (this != &amp;o) { if (id) glDeleteBuffers(1, &amp;id); id = std::exchange(o.id, 0); }
+        return *this;
+    }
+
+    void bind(GLenum target) const { glBindBuffer(target, id); }
+};
+
+// 같은 패턴으로 VAO 래퍼. glGen/glDelete 함수만 바꾸면 된다.
+struct GlVao {
+    GLuint id = 0;
+    GlVao() { glGenVertexArrays(1, &amp;id); }
+    ~GlVao() { if (id) glDeleteVertexArrays(1, &amp;id); }
+    GlVao(const GlVao&amp;) = delete;
+    GlVao&amp; operator=(const GlVao&amp;) = delete;
+    GlVao(GlVao&amp;&amp; o) noexcept : id(std::exchange(o.id, 0)) {}
+    void bind() const { glBindVertexArray(id); }
+};</code></pre>
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      RAII 래퍼는 반드시 <strong>복사를 막고 이동만</strong> 허용해야 합니다. 복사를 허용하면 두 객체가 같은 <code>id</code>를
+      가리키다가 소멸자에서 <code>glDeleteBuffers</code>를 두 번 호출 — 두 번째는 이미 재사용된 ID를 지워 다른 리소스를 파괴합니다.
+    </div>
+
+    <h3>상태 변경 최소화 &amp; 배칭</h3>
+    <p>
+      드로우 콜 자체보다 <strong>상태 전환</strong>(<code>glUseProgram</code>, 텍스처·VAO 재바인딩)이 비쌉니다. 실전 최적화의 핵심은
+      "같은 상태로 최대한 몰아서 그리기"입니다.
+    </p>
+    <ul>
+      <li><strong>정렬 후 드로우</strong>: 오브젝트를 <em>셰이더 → 텍스처 → 메시</em> 순으로 정렬해 같은 상태끼리 연속 배치.</li>
+      <li><strong>VAO는 메시당 하나</strong>: 프레임마다 속성을 다시 지정하지 말고, 메시별 VAO를 만들어 둔 뒤 바인딩만 교체.</li>
+      <li><strong>중복 바인딩 제거</strong>: 마지막에 바인딩한 프로그램/텍스처 ID를 캐시해, 같은 것이면 GL 호출을 건너뛴다.</li>
+      <li><strong>인스턴싱</strong>: 같은 메시를 수백 개 그린다면 <code>glDrawArraysInstanced</code>로 드로우 콜을 1회로 압축.</li>
+    </ul>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      드로우 콜 500개가 60fps를 못 내는데 정점 수는 적다면, 병목은 GPU가 아니라 <strong>CPU의 드라이버 오버헤드(상태 전환)</strong>일
+      가능성이 높습니다. 상태로 정렬·배칭하는 것만으로 몇 배 빨라지는 경우가 흔합니다. 이 "CPU가 드라이버에 명령을 밀어 넣는 비용"을
+      근본적으로 줄이려고 나온 것이 바로 다음 절의 저수준 API들입니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="api-compare">
+    <h2>4. OpenGL → DX12 · Vulkan · Metal · WebGPU 개념 매핑</h2>
+    <p>
+      OpenGL이 "암묵적 전역 상태"로 편의를 제공하는 반면, 현대 저수준 API들은 그 편의를 걷어내고
+      <strong>메모리·동기화·파이프라인을 개발자가 명시적으로 관리</strong>하게 합니다. 대신 드라이버 오버헤드가 줄고 멀티스레드로
+      명령을 기록할 수 있어 고성능·고확장성을 얻습니다. 개념 자체는 이름만 바뀔 뿐 대부분 일대일로 대응됩니다.
+    </p>
+
+    <table class="impl">
+      <thead>
+        <tr><th>OpenGL</th><th>DX12</th><th>Vulkan</th><th>Metal</th><th>WebGPU</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>VAO / VBO<br><span style="color:var(--text-dim);font-size:.85em">정점 버퍼 + 레이아웃</span></td>
+          <td>Vertex Buffer + Input Layout</td>
+          <td>Vertex Buffer + <code>VertexInputState</code></td>
+          <td><code>MTLBuffer</code> + Vertex Descriptor</td>
+          <td>Vertex Buffer + <code>vertexBufferLayout</code></td>
+        </tr>
+        <tr>
+          <td>Program<br><span style="color:var(--text-dim);font-size:.85em">glUseProgram</span></td>
+          <td>Pipeline State Object (PSO)</td>
+          <td><code>VkPipeline</code></td>
+          <td><code>MTLRenderPipelineState</code></td>
+          <td><code>GPURenderPipeline</code></td>
+        </tr>
+        <tr>
+          <td>암묵적 상태<br><span style="color:var(--text-dim);font-size:.85em">전역 상태 머신</span></td>
+          <td>Command List</td>
+          <td>Command Buffer</td>
+          <td><code>MTLCommandBuffer</code></td>
+          <td><code>GPUCommandEncoder</code></td>
+        </tr>
+        <tr>
+          <td>Uniform<br><span style="color:var(--text-dim);font-size:.85em">glUniform / UBO</span></td>
+          <td>Root Signature + Descriptor Heap</td>
+          <td>Descriptor Set + Pipeline Layout</td>
+          <td>Argument Buffer / <code>setBuffer</code></td>
+          <td>Bind Group + Bind Group Layout</td>
+        </tr>
+        <tr>
+          <td>암묵적 동기화<br><span style="color:var(--text-dim);font-size:.85em">드라이버가 알아서</span></td>
+          <td>Barrier + Fence</td>
+          <td><code>VkBarrier</code> + <code>VkFence</code>/Semaphore</td>
+          <td><code>MTLFence</code> / Resource Hazard</td>
+          <td>암묵적(런타임이 배리어 삽입)</td>
+        </tr>
+        <tr>
+          <td>스왑<br><span style="color:var(--text-dim);font-size:.85em">glfwSwapBuffers</span></td>
+          <td>Swap Chain <code>Present</code></td>
+          <td><code>vkQueuePresentKHR</code></td>
+          <td><code>presentDrawable</code></td>
+          <td>Surface Present(자동)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      OpenGL의 "지우고-바인딩하고-그리기" 4~5줄이, Vulkan에서는 수백 줄로 늘어납니다. 이유는 성능 때문이 아니라
+      <strong>드라이버가 대신 해주던 결정(메모리 할당, 리소스 상태 전이, 큐 동기화, 파이프라인 사전 컴파일)을 전부 직접</strong>
+      하게 됐기 때문입니다. 첫 삼각형까지 1,000줄이라는 악명은 여기서 나옵니다.
+    </div>
+
+    <h3>학습 경로 — OpenGL로 개념, 그다음 목적별로</h3>
+    <p>
+      결론부터: <strong>개념은 OpenGL에서 익히고, 목적에 맞는 저수준 API로 옮겨가는 것</strong>이 가장 빠릅니다.
+      MVP·래스터화·깊이·조명·텍스처·프레임버퍼 같은 렌더링의 <em>본질</em>은 어느 API에서나 같고, OpenGL이 그것을 가장 적은
+      코드로 실험하게 해줍니다. 그 개념 지도를 손에 쥔 상태에서 저수준 API의 "명시성"을 배우면 훨씬 덜 헤맵니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>목표</th><th>추천 API</th><th>이유</th></tr></thead>
+      <tbody>
+        <tr><td>웹 / 크로스플랫폼 · 입문 후 다음 단계</td><td><strong>WebGPU</strong></td><td>저수준 개념(파이프라인·바인드그룹)을 현대적·안전한 형태로 도입. Vulkan보다 훨씬 완만.</td></tr>
+        <tr><td>Windows 게임 · AAA</td><td><strong>DX12</strong></td><td>윈도우·Xbox 1급 지원, 풍부한 툴(PIX), 콘솔과의 접점.</td></tr>
+        <tr><td>크로스플랫폼 고성능</td><td><strong>Vulkan</strong></td><td>가장 낮은 오버헤드·가장 명시적. 데스크톱·모바일·리눅스 전부 커버하지만 진입 장벽이 가장 높음.</td></tr>
+        <tr><td>Apple 생태계(macOS/iOS)</td><td><strong>Metal</strong></td><td>Apple 플랫폼의 유일한 1급 API. Objective-C/Swift와 밀착, 툴링 우수.</td></tr>
+      </tbody>
+    </table>
+    <div class="callout perf">
+      <span class="tag">TIP</span>
+      곧장 Vulkan으로 뛰어들다 지치는 경우가 많습니다. 권장 순서는 <strong>OpenGL(개념) → WebGPU(명시성의 완만한 도입)
+      → 필요 시 DX12/Vulkan/Metal(목적별)</strong>입니다. WebGPU를 거치면 "파이프라인 상태 객체", "바인드 그룹", "커맨드 인코더"
+      같은 저수준 개념을 미리 체득해, 이후 API 전환의 인지 부하가 크게 줄어듭니다.
+    </div>
+    <p>
+      한 문장으로: <strong>OpenGL은 "무엇을 그리는가"에 집중하게 해주고, 저수준 API는 "언제 어떤 메모리에 어떻게 동기화하며 그리는가"까지
+      당신에게 맡깁니다.</strong> 전자를 확실히 이해한 사람만이 후자의 명시성을 감당할 수 있습니다.
+    </p>
+  </section>
+
+  <div class="footer">
+    🛠️ 구현 가이드 · 5장 그래픽스 API · 모든 코드는 학습용으로 새로 작성된 원본 예제입니다 · C++17 / OpenGL 3.3+ Core
+  </div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

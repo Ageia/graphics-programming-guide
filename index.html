@@ -41,6 +41,30 @@
       <a href="#lighting">조명과 그림자</a>
       <a href="#texmap">텍스처 매핑</a>
     </div>
+    <div class="nav-group">
+      <div class="nav-title">4. GPU · 셰이더</div>
+      <a href="#gpu-intro">GPU 병렬 처리</a>
+      <a href="#vertexshader">Vertex Shader</a>
+      <a href="#fragshader">Fragment Shader</a>
+      <a href="#computeshader">Compute Shader</a>
+      <a href="#shaderlang">GLSL · HLSL · WGSL</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-title">5. 그래픽스 API</div>
+      <a href="#api-overview">API 지형도</a>
+      <a href="#api-compare">OpenGL · DX12 · Vulkan · Metal · WebGPU</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-title">6. 고급 렌더링</div>
+      <a href="#pbr">PBR (물리 기반 렌더링)</a>
+      <a href="#hdr">HDR · 톤 매핑</a>
+      <a href="#shadowmap">Shadow Mapping</a>
+      <a href="#deferred">Deferred Rendering</a>
+      <a href="#screenspace">Screen-Space Effects</a>
+      <a href="#raytracing">Ray Tracing</a>
+      <a href="#pathtracing">Path Tracing</a>
+      <a href="#gi">Global Illumination</a>
+    </div>
   </nav>
 
   <!-- ============ 본문 ============ -->
@@ -411,6 +435,379 @@
         아티스트가 이 펼친 지도 위에 그림을 그리면, 그게 다시 3D로 감겨 올라가는 거예요.</div>
     </section>
 
+    <!-- ========================================================= -->
+    <!-- 4. GPU / 셰이더 -->
+    <!-- ========================================================= -->
+
+    <section id="gpu-intro">
+      <h2>GPU 병렬 처리</h2>
+      <p class="lead">CPU는 몇 명의 천재, GPU는 수천 명의 일꾼. 그래픽스는 "수천 명의 일꾼"이 유리합니다.</p>
+
+      <p>화면의 픽셀은 수백만 개. 각 픽셀 계산은 <strong>서로 독립적</strong>이라 동시에 처리해도 됩니다.
+        <strong>CPU</strong>는 코어가 몇 개뿐이라 순서대로(직렬) 빠르게 처리하고,
+        <strong>GPU</strong>는 느리지만 코어가 수천 개라 <strong>한꺼번에(병렬)</strong> 처리해요.
+        같은 계산을 데이터만 바꿔 대량 반복 — 이게 그래픽스에 딱 맞습니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">CPU(직렬) vs GPU(병렬) 픽셀 처리 경주</div>
+        <canvas id="c-parallel" height="320"></canvas>
+        <div class="controls" id="ctl-parallel"></div>
+        <p class="hint">"출발" 버튼을 누르면 같은 이미지를 CPU 방식(한 칸씩)과 GPU 방식(여러 칸 동시)으로 채웁니다.</p>
+      </div>
+
+      <div class="tip"><strong>SIMD / SIMT:</strong> GPU는 "하나의 명령을 여러 데이터에 동시에"(Single Instruction,
+        Multiple Data) 적용합니다. 그래서 <em>모든 픽셀이 같은 셰이더 코드를 각자의 데이터로 실행</em>하죠.
+        조건 분기(if)가 많으면 일부 일꾼이 놀게 되어 느려지는 이유이기도 합니다.</div>
+
+      <p>GPU에게 "각 정점/픽셀마다 이걸 해라"라고 시키는 작은 프로그램이 <strong>셰이더(Shader)</strong>입니다.
+        렌더링 파이프라인에서 순서대로 <strong>Vertex Shader → (래스터화) → Fragment Shader</strong>가 돌아요.</p>
+    </section>
+
+    <section id="vertexshader">
+      <h2>Vertex Shader</h2>
+      <p class="lead">정점(vertex) 하나하나의 <strong>위치</strong>를 계산하는 프로그램. MVP 변환이 여기서 일어납니다.</p>
+
+      <p>메시의 각 정점에 대해 딱 한 번씩 실행됩니다. 주 임무는 3D 좌표를 화면 클립 좌표로
+        변환하는 것(<code>gl_Position = MVP * position</code>). 여기서 정점을 흔들거나 밀면
+        <strong>물결·바람·모프</strong> 같은 변형 효과를 GPU에서 공짜로 얻습니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">Vertex Shader로 평면을 출렁이게 하기</div>
+        <canvas id="c-vertexshader" height="360"></canvas>
+        <div class="controls" id="ctl-vertexshader"></div>
+        <p class="hint">진폭·주파수·시간 슬라이더가 정점의 높이를 <code>y += sin(x*f + t)*a</code> 로 바꿉니다.
+          정점만 움직였는데 표면 전체가 물결쳐요.</p>
+      </div>
+    </section>
+
+    <section id="fragshader">
+      <h2>Fragment / Pixel Shader</h2>
+      <p class="lead">삼각형을 덮는 <strong>픽셀 하나하나의 색</strong>을 계산하는 프로그램. 조명·텍스처·특수효과의 무대.</p>
+
+      <p>래스터화로 삼각형이 픽셀들로 쪼개지면, 각 픽셀(프래그먼트)마다 프래그먼트 셰이더가 실행되어
+        <strong>최종 색</strong>을 출력합니다(<code>gl_FragColor = ...</code>). 수백만 번 병렬 실행되죠.
+        아래는 <strong>진짜 GPU(WebGL)에서 도는 프래그먼트 셰이더</strong>입니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">실제 GPU에서 도는 프래그먼트 셰이더 (WebGL)</div>
+        <canvas id="c-fragshader" height="340"></canvas>
+        <div class="controls" id="ctl-fragshader"></div>
+        <p class="hint">효과 버튼을 눌러보세요. 각 픽셀이 자기 좌표만으로 색을 계산합니다 — 도형 데이터 없이 그림이 나와요.
+          WebGL 미지원 시 소프트웨어로 대체됩니다.</p>
+      </div>
+
+      <div class="tip"><strong>왜 픽셀마다 좌표만으로 그림이 나올까?</strong> 각 픽셀은 자기 위치 <code>uv</code>를 알아요.
+        거기에 수식을 넣으면(예: 중심까지 거리 &lt; 0.5 이면 원 안) 도형·그라디언트·패턴이 <em>계산으로</em> 만들어집니다.
+        이게 셰이더 아트와 프로시저럴 텍스처의 원리예요.</div>
+    </section>
+
+    <section id="computeshader">
+      <h2>Compute Shader</h2>
+      <p class="lead">그리기와 무관하게 <strong>GPU를 순수 계산기</strong>로 쓰는 셰이더. 물리·파티클·이미지 처리에.</p>
+
+      <p>버텍스/프래그먼트 셰이더는 "그리기 파이프라인"에 묶여 있지만, <strong>컴퓨트 셰이더</strong>는
+        화면 출력과 무관하게 <strong>임의의 대규모 병렬 계산</strong>을 합니다. 수만 개 파티클의 위치 갱신,
+        입자 시뮬레이션, 블러, 물리 등을 GPU의 수천 코어로 한꺼번에 처리해요.
+        데이터를 <strong>작업 그룹(workgroup)</strong> 단위로 나눠 스레드들이 병렬 실행됩니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">수천 개 파티클을 병렬로 갱신 (컴퓨트 개념 시뮬레이션)</div>
+        <canvas id="c-compute" height="340"></canvas>
+        <div class="controls" id="ctl-compute"></div>
+        <p class="hint">각 파티클은 "같은 규칙"을 자기 데이터로 실행합니다 — 컴퓨트 셰이더가 하는 일과 동일한 구조예요.
+          파티클 수를 늘려보세요.</p>
+      </div>
+    </section>
+
+    <section id="shaderlang">
+      <h2>GLSL · HLSL · WGSL</h2>
+      <p class="lead">셰이더를 쓰는 언어들. 문법은 조금 다르지만 <strong>하는 일은 똑같습니다</strong>.</p>
+
+      <p>C를 닮은 작은 언어들이에요. 어떤 그래픽스 API를 쓰느냐에 따라 언어가 갈립니다:</p>
+      <ul>
+        <li><strong>GLSL</strong> — OpenGL / WebGL / Vulkan(SPIR-V로 컴파일)</li>
+        <li><strong>HLSL</strong> — DirectX (그리고 요즘은 Vulkan에도 많이 사용)</li>
+        <li><strong>WGSL</strong> — WebGPU 전용 신생 언어</li>
+      </ul>
+      <p>아래는 <strong>"화면 좌표로 빨강→파랑 그라디언트를 칠하는"</strong> 똑같은 프래그먼트 셰이더를 세 언어로 쓴 것입니다.
+        분위기만 비교해보세요 — 개념은 동일합니다.</p>
+
+      <div class="grid2" style="grid-template-columns:1fr 1fr 1fr; gap:12px;">
+        <div>
+          <h4 style="margin-top:0">GLSL (WebGL)</h4>
+          <pre><code>precision mediump float;
+varying vec2 vUv;
+void main() {
+  vec3 col = mix(
+    vec3(1.0, 0.2, 0.2),
+    vec3(0.2, 0.4, 1.0),
+    vUv.x);
+  gl_FragColor = vec4(col, 1.0);
+}</code></pre>
+        </div>
+        <div>
+          <h4 style="margin-top:0">HLSL (DirectX)</h4>
+          <pre><code>float4 main(
+  float2 uv : TEXCOORD0
+) : SV_Target {
+  float3 col = lerp(
+    float3(1.0, 0.2, 0.2),
+    float3(0.2, 0.4, 1.0),
+    uv.x);
+  return float4(col, 1.0);
+}</code></pre>
+        </div>
+        <div>
+          <h4 style="margin-top:0">WGSL (WebGPU)</h4>
+          <pre><code>@fragment
+fn main(
+  @location(0) uv: vec2f
+) -> @location(0) vec4f {
+  let col = mix(
+    vec3f(1.0, 0.2, 0.2),
+    vec3f(0.2, 0.4, 1.0),
+    uv.x);
+  return vec4f(col, 1.0);
+}</code></pre>
+        </div>
+      </div>
+      <div class="tip"><strong>공통점:</strong> ① 벡터 타입(vec3/float3)이 일급 시민, ② <code>mix/lerp</code> 같은
+        내장 함수, ③ "입력을 받아 색(vec4)을 반환". 하나를 익히면 나머지는 문법만 갈아끼우면 됩니다.</div>
+    </section>
+
+    <!-- ========================================================= -->
+    <!-- 5. 그래픽스 API -->
+    <!-- ========================================================= -->
+
+    <section id="api-overview">
+      <h2>그래픽스 API 지형도</h2>
+      <p class="lead">GPU에게 명령을 내리는 통로. "쉽고 자동" ↔ "어렵지만 완전 제어"의 스펙트럼.</p>
+
+      <p>그래픽스 API는 내 코드와 GPU 드라이버 사이의 <strong>약속(인터페이스)</strong>입니다.
+        고수준 API는 많은 걸 알아서 해줘 배우기 쉽지만 세밀한 제어가 어렵고,
+        저수준 API는 메모리·동기화까지 직접 다뤄 <strong>강력하지만 코드가 길고 복잡</strong>합니다.
+        아래 차트에서 각 API의 위치와 "삼각형 하나 그리는 데 드는 대략적 코드량"을 비교해보세요.</p>
+
+      <div class="demo">
+        <div class="demo-title">추상화 수준 ↔ 제어권, 그리고 코드 복잡도</div>
+        <canvas id="c-apichart" height="380"></canvas>
+        <div class="controls" id="ctl-apichart"></div>
+        <p class="hint">점 위에 마우스를 올리면 설명이 뜹니다. 아래 막대는 "삼각형 하나 띄우기"에 필요한 대략적 코드 라인 수예요.</p>
+      </div>
+    </section>
+
+    <section id="api-compare">
+      <h2>OpenGL · DirectX 12 · Vulkan · Metal · WebGPU</h2>
+      <p class="lead">언제 무엇을 골라야 할까? 목적별 정리.</p>
+
+      <div style="overflow-x:auto">
+      <table style="width:100%; border-collapse:collapse; font-size:14px; margin:16px 0;">
+        <thead>
+          <tr style="text-align:left; border-bottom:2px solid var(--border);">
+            <th style="padding:10px 12px;">API</th>
+            <th style="padding:10px 12px;">수준</th>
+            <th style="padding:10px 12px;">플랫폼</th>
+            <th style="padding:10px 12px;">이럴 때 좋음</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 12px;"><strong style="color:var(--accent2)">OpenGL</strong></td>
+            <td style="padding:10px 12px;">고수준</td>
+            <td style="padding:10px 12px;">크로스플랫폼(구형 폭넓음)</td>
+            <td style="padding:10px 12px;">그래픽스 <strong>원리 학습</strong>, 빠른 프로토타이핑, 예제·자료가 가장 많음</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 12px;"><strong style="color:var(--accent2)">DirectX 12</strong></td>
+            <td style="padding:10px 12px;">저수준</td>
+            <td style="padding:10px 12px;">Windows · Xbox</td>
+            <td style="padding:10px 12px;">Windows <strong>게임·엔진</strong> 개발, 콘솔, 최대 성능</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 12px;"><strong style="color:var(--accent2)">Vulkan</strong></td>
+            <td style="padding:10px 12px;">저수준</td>
+            <td style="padding:10px 12px;">크로스플랫폼(Win/Linux/Android)</td>
+            <td style="padding:10px 12px;"><strong>저수준 GPU 제어</strong>, 멀티스레드 렌더링, 이식성 필요한 고성능 엔진</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 12px;"><strong style="color:var(--accent2)">Metal</strong></td>
+            <td style="padding:10px 12px;">중·저수준</td>
+            <td style="padding:10px 12px;">Apple(macOS · iOS)</td>
+            <td style="padding:10px 12px;"><strong>Apple 플랫폼</strong> 전용 최적 성능, 애플 생태계 통합</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 12px;"><strong style="color:var(--accent2)">WebGPU</strong></td>
+            <td style="padding:10px 12px;">중수준</td>
+            <td style="padding:10px 12px;">웹 브라우저</td>
+            <td style="padding:10px 12px;"><strong>웹에서 GPU</strong> 프로그래밍, 최신 웹 3D·컴퓨트, WebGL의 후계</td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="tip"><strong>추천 학습 순서:</strong> 개념은 <b>OpenGL/WebGL</b>로 감을 잡고 →
+        웹이면 <b>WebGPU</b>, Windows 게임이면 <b>DirectX 12</b>, 크로스플랫폼 고성능이면 <b>Vulkan</b>,
+        애플 전용이면 <b>Metal</b>로 넘어가는 흐름이 자연스럽습니다. 저수준 API는 개념(파이프라인·버퍼·동기화)을
+        먼저 이해한 뒤 도전하는 게 덜 고통스러워요.</div>
+    </section>
+
+    <!-- ========================================================= -->
+    <!-- 6. 고급 렌더링 -->
+    <!-- ========================================================= -->
+
+    <section id="pbr">
+      <h2>Physically Based Rendering (PBR)</h2>
+      <p class="lead">"대충 예뻐 보이게"가 아니라 <strong>실제 빛의 물리 법칙</strong>대로 표면을 계산하기.</p>
+
+      <p>PBR은 재질을 몇 개의 물리적 파라미터로 표현합니다. 핵심은 두 개:</p>
+      <ul>
+        <li><strong>Roughness(거칠기)</strong>: 표면이 매끄러운가(반짝, 좁은 하이라이트) 거친가(뿌연 반사)</li>
+        <li><strong>Metallic(금속성)</strong>: 금속인가(반사색=재질색, 확산 거의 없음) 비금속인가(하얀 반사)</li>
+      </ul>
+      <p>어떤 조명 아래서도 <strong>일관되게 사실적</strong>으로 보이는 게 PBR의 장점이라, 오늘날 거의 모든 엔진의 표준입니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">Roughness · Metallic 로 재질 바꾸기</div>
+        <canvas id="c-pbr" height="360"></canvas>
+        <div class="controls" id="ctl-pbr"></div>
+        <p class="hint">거칠기를 낮추면 하이라이트가 좁고 날카로워지고, 금속성을 올리면 반사가 재질색을 띱니다.</p>
+      </div>
+    </section>
+
+    <section id="hdr">
+      <h2>HDR · 톤 매핑</h2>
+      <p class="lead">태양은 종이보다 수만 배 밝다. 이 넓은 밝기를 0~255 화면에 우겨넣는 기술.</p>
+
+      <p><strong>HDR(High Dynamic Range)</strong>은 밝기를 0~1에 가두지 않고 <strong>실제 물리량(수천, 수만)</strong>으로
+        계산합니다. 그런데 모니터는 결국 0~255만 표현하죠. 그래서 마지막에 넓은 밝기 범위를 화면 범위로
+        <strong>부드럽게 압축</strong>하는 <strong>톤 매핑(tone mapping)</strong>이 필요합니다.
+        단순히 잘라내면(clip) 밝은 곳이 하얗게 다 타버려요.</p>
+
+      <div class="demo">
+        <div class="demo-title">노출(Exposure)과 톤 매핑 커브</div>
+        <canvas id="c-hdr" height="340"></canvas>
+        <div class="controls" id="ctl-hdr"></div>
+        <p class="hint">노출을 올리며 "그냥 자르기(clip)"와 "톤 매핑(Reinhard/ACES)"을 비교하세요.
+          오른쪽 그래프가 밝기 압축 곡선입니다.</p>
+      </div>
+    </section>
+
+    <section id="shadowmap">
+      <h2>Shadow Mapping</h2>
+      <p class="lead">그림자 = "빛의 눈으로 볼 때 가려진 곳". 빛 시점의 깊이 지도를 만들어 판정합니다.</p>
+
+      <p>가장 널리 쓰이는 그림자 기법입니다. 2단계로 동작해요:</p>
+      <ol>
+        <li><strong>1패스</strong>: <em>빛의 위치에서</em> 장면을 렌더해 각 방향의 "가장 가까운 표면까지 거리"를
+          <strong>섀도우 맵(깊이 지도)</strong>에 저장.</li>
+        <li><strong>2패스</strong>: 카메라로 그릴 때 각 점을 빛 시점으로 변환해, 그 점이 섀도우 맵에 적힌 거리보다
+          <strong>멀면 = 뭔가에 가려짐 = 그림자</strong>.</li>
+      </ol>
+
+      <div class="demo">
+        <div class="demo-title">빛의 시점 → 섀도우 맵 → 그림자 (2D 단면)</div>
+        <canvas id="c-shadowmap" height="360"></canvas>
+        <div class="controls" id="ctl-shadowmap"></div>
+        <p class="hint">빛과 가림막을 움직여보세요. 빛에서 각 방향으로 쏜 광선이 가림막에 막히면 그 뒤가 그림자가 됩니다.</p>
+      </div>
+    </section>
+
+    <section id="deferred">
+      <h2>Deferred Rendering</h2>
+      <p class="lead">조명을 나중에! 먼저 화면 정보만 모아두고, 조명은 화면 픽셀에 한 번씩만 계산.</p>
+
+      <p>조명이 수백 개면, 물체마다 모든 빛을 계산하는 <strong>전방 렌더링(Forward)</strong>은 폭발합니다.
+        <strong>디퍼드 렌더링</strong>은 순서를 바꿔요:</p>
+      <ol>
+        <li><strong>G-buffer 패스</strong>: 조명 없이, 각 화면 픽셀의 <strong>재질 정보</strong>(색/Albedo, 법선/Normal,
+          깊이/Depth, 위치)만 여러 장의 텍스처에 저장.</li>
+        <li><strong>라이팅 패스</strong>: 저장된 G-buffer를 읽어 <strong>화면 픽셀당 딱 한 번</strong> 조명 계산.
+          빛이 아무리 많아도 "보이는 픽셀 수"만큼만 계산돼요.</li>
+      </ol>
+
+      <div class="demo">
+        <div class="demo-title">G-buffer 들여다보기 (Albedo · Normal · Depth · 최종)</div>
+        <canvas id="c-deferred" height="360"></canvas>
+        <div class="controls" id="ctl-deferred"></div>
+        <p class="hint">버튼으로 각 G-buffer 채널을 보고, 조명 수를 늘려보세요. 조명이 많아도 라이팅 패스는 화면 크기만큼만 돕니다.</p>
+      </div>
+    </section>
+
+    <section id="screenspace">
+      <h2>Screen-Space Effects</h2>
+      <p class="lead">이미 렌더된 "화면 이미지"를 후처리해서 효과를 얹기. 싸고 빠른 눈속임의 예술.</p>
+
+      <p>3D를 다시 계산하지 않고, <strong>완성된 2D 화면(과 깊이·법선 정보)</strong>만 가지고 효과를 추가합니다.
+        빠르기 때문에 실시간에 애용돼요:</p>
+      <ul>
+        <li><strong>SSAO</strong>: 화면 깊이로 "구석·틈"을 찾아 은은한 그늘을 넣어 입체감 ↑</li>
+        <li><strong>Bloom</strong>: 밝은 부분이 번지는 빛무리</li>
+        <li><strong>Vignette / 색수차 / 모션블러</strong> 등 영화 같은 룩</li>
+      </ul>
+
+      <div class="demo">
+        <div class="demo-title">후처리 효과 토글 (Vignette · Bloom · 색수차 · 그레인)</div>
+        <canvas id="c-screenspace" height="320"></canvas>
+        <div class="controls" id="ctl-screenspace"></div>
+        <p class="hint">효과를 켜고 강도를 조절하세요. 원본 3D는 그대로, 화면 이미지에만 필터를 얹습니다.</p>
+      </div>
+    </section>
+
+    <section id="raytracing">
+      <h2>Ray Tracing</h2>
+      <p class="lead">픽셀마다 눈에서 광선을 쏴, 무엇에 맞았는지 추적해 색을 정하기. 반사·굴절이 자연스럽습니다.</p>
+
+      <p>래스터화가 "삼각형 → 픽셀"이라면, 레이 트레이싱은 반대로 <strong>"픽셀 → 광선 → 장면"</strong>입니다.
+        각 픽셀에서 광선을 쏘고, 가장 먼저 부딪힌 표면을 찾은 뒤, 거기서 <strong>빛 쪽으로 또 광선</strong>을 쏴
+        그림자를 판정하고, <strong>반사 방향으로 광선</strong>을 튕겨 거울 반사를 얻어요.
+        아래는 <strong>브라우저에서 도는 실제 소프트웨어 레이트레이서</strong>입니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">실시간 소프트웨어 레이 트레이서 (반사 · 그림자)</div>
+        <canvas id="c-raytracing" height="360"></canvas>
+        <div class="controls" id="ctl-raytracing"></div>
+        <p class="hint">반사 횟수(bounce)를 올리면 거울에 비친 상 안에 또 상이 비칩니다. 조명·구를 움직여보세요.</p>
+      </div>
+    </section>
+
+    <section id="pathtracing">
+      <h2>Path Tracing</h2>
+      <p class="lead">레이 트레이싱을 확률로 확장. 빛의 무작위 경로를 수없이 쌓아 <strong>사진 같은</strong> 그림을 얻기.</p>
+
+      <p>패스 트레이싱은 각 픽셀에서 광선을 쏘되, 표면에 맞으면 <strong>무작위 방향으로 계속 튕기며</strong>
+        빛을 만날 때까지 경로(path)를 추적합니다. 한 번으로는 노이즈(지글지글)투성이라,
+        <strong>같은 장면을 수백~수천 번 반복해 평균</strong>내면 점점 깨끗한 사실적 이미지가 됩니다.
+        부드러운 그림자, 간접광, 색 번짐이 <em>공짜로</em> 나오는 게 매력이에요.</p>
+
+      <div class="demo">
+        <div class="demo-title">누적 패스 트레이서: 노이즈가 걷히는 과정</div>
+        <canvas id="c-pathtracing" height="360"></canvas>
+        <div class="controls" id="ctl-pathtracing"></div>
+        <p class="hint">"누적 시작"을 누르면 샘플이 쌓이며 노이즈가 서서히 사라집니다. 샘플 수를 보세요.</p>
+      </div>
+    </section>
+
+    <section id="gi">
+      <h2>Global Illumination</h2>
+      <p class="lead">빛은 한 번 튕기고 끝나지 않는다. 벽에 튄 빛이 옆면을 물들이는 <strong>간접광</strong>까지 계산.</p>
+
+      <p><strong>직접광(Direct)</strong>만 계산하면 그림자 속은 새까맣습니다. 하지만 현실에선 빛이 벽·바닥에
+        <strong>여러 번 튕기며(bounce)</strong> 온 공간을 은은히 채우고, 빨간 벽 옆 물체는 살짝 붉게 물들죠
+        (<strong>색 번짐, color bleeding</strong>). 이 간접광 전부를 다루는 게 <strong>전역 조명(GI)</strong>입니다.
+        패스 트레이싱은 GI를 자연스럽게 포함하고, 실시간에선 라이트맵·복셀·SSGI 등으로 근사합니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">직접광 only vs 전역 조명 (색 번짐)</div>
+        <canvas id="c-gi" height="360"></canvas>
+        <div class="controls" id="ctl-gi"></div>
+        <p class="hint">GI를 켜면 그림자 속이 밝아지고, 색깔 벽이 이웃 표면을 물들입니다 — 훨씬 사실적이죠.</p>
+      </div>
+
+      <div class="tip"><strong>정리:</strong> 직접광 + <em>간접광(GI)</em> = 사실적인 빛.
+        오프라인(영화)은 패스 트레이싱으로 정확히, 실시간(게임)은 근사 기법 + 요즘은
+        <strong>하드웨어 레이 트레이싱</strong>으로 점점 진짜 GI에 다가가고 있습니다.</div>
+    </section>
+
     <div class="footer">
       🎨 그래픽스 프로그래밍 비주얼 가이드 · 모든 데모는 순수 JavaScript + Canvas로 제작 ·
       마음껏 코드를 열어보고 수정해보세요
@@ -422,6 +819,10 @@
 <script src="js/demos-math.js"></script>
 <script src="js/demos-2d.js"></script>
 <script src="js/demos-3d.js"></script>
+<script src="js/demos-gpu.js"></script>
+<script src="js/demos-api.js"></script>
+<script src="js/demos-adv1.js"></script>
+<script src="js/demos-adv2.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>

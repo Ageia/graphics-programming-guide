@@ -560,6 +560,7 @@
       GFX.button(ctl, "리셋", () => reset(), true);
 
       reset();
+      addSamples(6);   // 초기 미리보기: "누적 시작" 전에도 (노이즈 있는) 장면이 바로 보이도록
       present();
       window.addEventListener("resize", present);
     } catch (e) { console.error("pathtracing demo error", e); }

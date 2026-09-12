@@ -65,6 +65,15 @@
       <a href="#pathtracing">Path Tracing</a>
       <a href="#gi">Global Illumination</a>
     </div>
+    <div class="nav-group">
+      <div class="nav-title">7. 실전 렌더링 기법</div>
+      <a href="#antialiasing">안티앨리어싱</a>
+      <a href="#gamma">감마 · 선형 색공간</a>
+      <a href="#mipmap">밉맵 · 텍스처 필터링</a>
+      <a href="#transparency">투명과 렌더링 순서</a>
+      <a href="#ao">앰비언트 오클루전</a>
+      <a href="#lod">LOD · 컬링</a>
+    </div>
   </nav>
 
   <!-- ============ 본문 ============ -->
@@ -413,6 +422,12 @@
       <div class="tip"><strong>조명 3요소:</strong> <b>Ambient</b>(전체를 은은하게) +
         <b>Diffuse</b>(방향에 따른 기본 밝기) + <b>Specular</b>(매끈한 표면의 반짝임)
         을 더한 것이 고전적인 <em>퐁(Phong) 조명 모델</em>입니다.</div>
+
+      <div class="tip"><strong>심화 (RTR 4판):</strong> 퐁은 빠른 근사일 뿐, 현대 렌더링은
+        <a href="#pbr">물리 기반(PBR)</a>으로 갑니다. 알아두면 좋은 것: ① <strong>프레넬 효과</strong> —
+        어떤 표면이든 <em>스치는 각도</em>에서 반사가 강해집니다(잔잔한 호수를 비스듬히 보면 거울이 되죠).
+        ② <strong>면 광원(area light)</strong> — 점 광원과 달리 크기가 있어 부드러운 그림자와 넓은 하이라이트를
+        만듭니다. ③ 빛의 세기는 거리 제곱에 반비례(<em>역제곱 감쇠</em>)합니다.</div>
     </section>
 
     <section id="texmap">
@@ -433,6 +448,11 @@
 
       <div class="tip"><strong>UV 언랩핑:</strong> 3D 표면을 가위로 잘라 평평하게 펼친 지도가 UV 맵입니다.
         아티스트가 이 펼친 지도 위에 그림을 그리면, 그게 다시 3D로 감겨 올라가는 거예요.</div>
+
+      <div class="tip"><strong>심화 (RTR 4판):</strong> 색만 입히는 게 아니에요. <strong>노멀 맵</strong>은
+        표면의 <em>법선</em>을 픽셀마다 흔들어 실제 굴곡 없이 울퉁불퉁해 보이게 하고, <strong>러프니스/메탈릭 맵</strong>은
+        <a href="#pbr">PBR</a> 재질 파라미터를 위치마다 다르게 줍니다. 또 멀어질 때 텍스처가 지글거리는 문제는
+        <a href="#mipmap">밉맵과 필터링</a>으로 해결하죠 — 아래 7장에서 다룹니다.</div>
     </section>
 
     <!-- ========================================================= -->
@@ -672,6 +692,13 @@ fn main(
         <div class="controls" id="ctl-pbr"></div>
         <p class="hint">거칠기를 낮추면 하이라이트가 좁고 날카로워지고, 금속성을 올리면 반사가 재질색을 띱니다.</p>
       </div>
+
+      <div class="tip"><strong>심화 (RTR 4판) — BRDF:</strong> PBR의 심장은 <strong>BRDF</strong>
+        (양방향 반사율 분포 함수)입니다. "빛이 이 방향에서 들어와 저 방향으로 얼마나 반사되나"를 기술하는 함수예요.
+        실시간 표준은 <em>미세면(microfacet)</em> 모델로, 표면을 무수히 작은 거울들의 집합으로 보고
+        ① 얼마나 많은 미세면이 반사 방향을 향하나(<em>법선분포 D</em>), ② 미세면끼리 서로 가리는 정도
+        (<em>기하 G</em>), ③ 각도에 따라 반사가 강해지는 <em>프레넬(Fresnel) F</em> — 이 셋을 곱해 스페큘러를 만듭니다.
+        <strong>에너지 보존</strong>(반사가 입사보다 많을 수 없음)을 지키는 게 "물리 기반"의 핵심이에요.</div>
     </section>
 
     <section id="hdr">
@@ -808,6 +835,149 @@ fn main(
         <strong>하드웨어 레이 트레이싱</strong>으로 점점 진짜 GI에 다가가고 있습니다.</div>
     </section>
 
+    <!-- ========================================================= -->
+    <!-- 7. 실전 렌더링 기법 -->
+    <!-- ========================================================= -->
+
+    <section id="antialiasing">
+      <h2>안티앨리어싱 (Antialiasing)</h2>
+      <p class="lead">비스듬한 선의 "계단(지글지글)"을 부드럽게. 픽셀 하나를 여러 번 샘플링해 평균 내기.</p>
+
+      <p>픽셀은 네모난데 도형의 경계는 매끈합니다. 그래서 경계가 <strong>계단(재기, jaggies)</strong>처럼
+        보이죠. 이건 앞서 본 <a href="#raster">래스터라이제이션</a>의 숙명입니다. 해법의 핵심은
+        <strong>"픽셀 하나 안에서 여러 지점을 검사해 평균색을 내는 것"</strong>이에요. 경계에 걸친 픽셀은
+        도형색과 배경색이 섞여 <em>중간톤</em>이 되고, 멀리서 보면 부드럽게 보입니다.</p>
+      <ul>
+        <li><strong>SSAA</strong>: 화면을 통째로 크게 그린 뒤 축소 — 가장 정확하지만 가장 비쌈</li>
+        <li><strong>MSAA</strong>: 경계(엣지)에서만 여러 번 샘플 — 실시간의 고전적 절충안</li>
+        <li><strong>FXAA/TAA</strong>: 완성된 화면에서 후처리로(또는 여러 프레임을 섞어) 매끈하게 — 저렴하고 현대 게임의 주력</li>
+      </ul>
+
+      <div class="demo">
+        <div class="demo-title">계단 현상 vs 슈퍼샘플링: 픽셀당 샘플 수 늘리기</div>
+        <canvas id="c-aa" height="360"></canvas>
+        <div class="controls" id="ctl-aa"></div>
+        <p class="hint">픽셀당 샘플 수를 1 → 16으로 올려보세요. 확대된 경계에서 계단이 중간톤으로 부드러워집니다.</p>
+      </div>
+
+      <div class="tip"><strong>심화 (RTR 4판):</strong> 이건 신호처리의 <em>표본화 정리</em> 문제예요.
+        화면 해상도로 표현 못 하는 고주파(날카로운 경계)가 저주파 가짜 무늬로 둔갑하는 게 앨리어싱입니다.
+        그래서 "더 촘촘히 샘플링(SSAA/MSAA)"하거나 "미리 흐리게(prefilter)" 해서 고주파를 줄이는 거죠.
+        움직이는 장면엔 이전 프레임을 재활용하는 <strong>TAA</strong>가 가성비로 널리 쓰입니다.</div>
+    </section>
+
+    <section id="gamma">
+      <h2>감마 · 선형 색공간</h2>
+      <p class="lead">"밝기 0.5는 왜 회색이 아닐까?" 빛 계산은 선형에서, 저장·표시는 sRGB에서.</p>
+
+      <p>모니터의 픽셀 값(0~255)은 <strong>빛의 세기에 정비례하지 않습니다</strong>. 사람 눈이 어두운 쪽 차이에
+        더 민감해서, 저장은 <strong>sRGB(감마) 공간</strong>에 촘촘하게 하죠. 그런데 <strong>빛의 덧셈·조명 계산은
+        실제 물리량, 즉 선형(linear) 공간</strong>에서 해야 맞습니다. 이 변환을 빼먹으면 조명이 탁해지고,
+        두 색을 섞을 때 엉뚱한 결과가 나와요.</p>
+      <pre><code>선형 → 화면 : 대략 out = pow(color, 1/2.2)   (감마 인코딩)
+화면 → 선형 : 대략 lin = pow(value, 2.2)     (감마 디코딩)</code></pre>
+
+      <div class="demo">
+        <div class="demo-title">감마의 함정: 잘못된 블렌딩 vs 올바른(선형) 블렌딩</div>
+        <canvas id="c-gamma" height="320"></canvas>
+        <div class="controls" id="ctl-gamma"></div>
+        <p class="hint">감마 슬라이더와 "선형 공간에서 계산" 토글을 바꿔보세요. 그라디언트 밝기와 색 혼합 결과가 달라집니다.</p>
+      </div>
+
+      <div class="tip"><strong>심화 (RTR 4판):</strong> 물리 기반 렌더링(<a href="#pbr">PBR</a>)이 제대로 작동하려면
+        <em>텍스처를 읽을 때 sRGB→선형으로 디코딩</em>하고, 모든 조명을 선형에서 계산한 뒤, <em>마지막에
+        선형→sRGB로 인코딩</em>해서 출력해야 합니다. 요즘 GPU는 sRGB 텍스처/프레임버퍼로 이 변환을 자동 처리해요.</div>
+    </section>
+
+    <section id="mipmap">
+      <h2>밉맵 · 텍스처 필터링</h2>
+      <p class="lead">멀리 있는 텍스처가 지글거리는 이유와 해법. 미리 축소해 둔 이미지 사다리.</p>
+
+      <p>텍스처를 입힌 바닥이 멀어지면, 화면 픽셀 하나가 텍스처의 <strong>수많은 텍셀</strong>을 덮게 됩니다.
+        이때 한 점만 콕 집어 읽으면(점 샘플링) 프레임마다 어떤 텍셀이 뽑힐지 튀어서 <strong>지글지글(반짝임)</strong>
+        거려요 — 텍스처의 앨리어싱이죠.</p>
+      <p><strong>밉맵(mipmap)</strong>은 텍스처를 미리 절반씩 줄인 이미지들(1/2, 1/4, 1/8…)로 만들어 두고,
+        거리(축소 정도)에 맞는 크기를 골라 씁니다. 여기에 필터링을 더해요:</p>
+      <ul>
+        <li><strong>이중선형(Bilinear)</strong>: 가까운 4텍셀을 섞어 매끈하게</li>
+        <li><strong>삼중선형(Trilinear)</strong>: 인접한 두 밉맵 레벨 사이도 섞어 경계 없이</li>
+        <li><strong>이방성(Anisotropic)</strong>: 비스듬히 볼 때 뭉개짐을 줄여 바닥·벽이 선명</li>
+      </ul>
+
+      <div class="demo">
+        <div class="demo-title">지글거리는 바닥 vs 밉맵 + 필터링</div>
+        <canvas id="c-mipmap" height="360"></canvas>
+        <div class="controls" id="ctl-mipmap"></div>
+        <p class="hint">밉맵/필터를 껐다 켜보세요. 끄면 먼 곳이 지글거리고, 켜면 부드럽게 정리됩니다. 밉맵 사다리도 함께 보여줘요.</p>
+      </div>
+    </section>
+
+    <section id="transparency">
+      <h2>투명과 렌더링 순서</h2>
+      <p class="lead">반투명은 순서가 생명. <a href="#zbuffer">Z-buffer</a>만으로는 유리를 제대로 못 그립니다.</p>
+
+      <p><a href="#blend">알파 블렌딩</a>은 "위색 × α + 아래색 × (1−α)"였죠. 문제는 <strong>여러 반투명 물체가
+        겹칠 때</strong>입니다. 블렌딩은 <em>이미 그려진 색 위에</em> 섞는 연산이라, <strong>뒤에서 앞으로
+        (back-to-front) 순서대로</strong> 그려야 맞아요. 순서가 틀리면 뒤 유리가 앞 유리 위에 섞여 색이 어긋납니다.</p>
+      <p>게다가 불투명 물체는 Z-buffer로 순서를 신경 안 써도 되지만, 반투명은 깊이 기록을 켜면 서로를 가려버려
+        엉망이 됩니다. 그래서 보통 <strong>① 불투명 먼저(깊이 쓰기 ON) → ② 반투명은 정렬해서 나중에(깊이 쓰기 OFF)</strong>
+        그려요.</p>
+
+      <div class="demo">
+        <div class="demo-title">반투명 카드 겹치기: 잘못된 순서 vs 정렬된 순서</div>
+        <canvas id="c-transparency" height="340"></canvas>
+        <div class="controls" id="ctl-transparency"></div>
+        <p class="hint">정렬을 껐다 켜보세요. 카드 깊이를 바꾸며 순서가 틀렸을 때 색이 어떻게 어긋나는지 확인하세요.</p>
+      </div>
+
+      <div class="tip"><strong>심화 (RTR 4판):</strong> 정렬로도 교차하는 반투명은 완벽히 못 풀어서,
+        순서와 무관하게 합치는 <strong>OIT(Order-Independent Transparency)</strong> 기법들(가중 블렌딩, 깊이 필링 등)이
+        연구·사용됩니다.</div>
+    </section>
+
+    <section id="ao">
+      <h2>앰비언트 오클루전 (Ambient Occlusion)</h2>
+      <p class="lead">구석·틈이 어두운 이유. 주변광이 얼마나 "가려지는가(차폐)"를 계산해 입체감을 살리기.</p>
+
+      <p>주변광(ambient)은 사방에서 은은히 오는 빛인데, <strong>좁은 틈·구석·물체가 맞닿는 곳</strong>은 그 빛이
+        주변 기하에 <strong>가려져(차폐, occlusion)</strong> 실제로 더 어둡습니다. 이걸 근사해 어둡게 깔아주면
+        장면이 갑자기 <strong>땅에 붙어 있는 듯한 입체감</strong>을 얻어요.</p>
+      <p>실시간에선 화면 깊이 정보만으로 근사하는 <strong>SSAO</strong>(Screen-Space AO)가 대표적입니다
+        (<a href="#screenspace">스크린 스페이스 효과</a>의 일종).</p>
+
+      <div class="demo">
+        <div class="demo-title">AO 껐을 때 vs 켰을 때 (구석의 접촉 그늘)</div>
+        <canvas id="c-ao" height="340"></canvas>
+        <div class="controls" id="ctl-ao"></div>
+        <p class="hint">AO를 켜면 물체가 맞닿는 구석과 틈에 부드러운 그늘이 생겨 훨씬 사실적으로 앉아 보입니다.</p>
+      </div>
+    </section>
+
+    <section id="lod">
+      <h2>LOD · 컬링 (상세 수준과 걸러내기)</h2>
+      <p class="lead">안 보이거나 멀리 있는 건 대충/아예 안 그리기. 프레임을 지키는 최적화의 기본.</p>
+
+      <p>수백만 삼각형을 매 프레임 다 그릴 순 없습니다. 두 가지 큰 아이디어로 일을 줄여요:</p>
+      <ul>
+        <li><strong>컬링(Culling) — 아예 안 그리기</strong>:
+          <em>절두체 컬링</em>(카메라 시야 밖 제외), <em>후면 컬링</em>(뒤돌아선 삼각형 제외),
+          <em>가림 컬링</em>(다른 물체에 완전히 가려진 것 제외).</li>
+        <li><strong>LOD(Level of Detail) — 대충 그리기</strong>: 멀어지면 삼각형 적은 <em>저해상도 모델</em>로 교체.
+          어차피 작게 보여서 티가 안 나요.</li>
+      </ul>
+
+      <div class="demo">
+        <div class="demo-title">거리에 따른 LOD 전환 + 절두체 컬링</div>
+        <canvas id="c-lod" height="360"></canvas>
+        <div class="controls" id="ctl-lod"></div>
+        <p class="hint">카메라 거리/시야를 바꿔보세요. 멀어지면 모델이 단순해지고, 시야 밖 물체는 그리기에서 빠지며 삼각형 수가 확 줄어요.</p>
+      </div>
+
+      <div class="tip"><strong>심화 (RTR 4판):</strong> 컬링은 <em>공간 자료구조</em>(BVH, 옥트리, BSP 등)로
+        "볼 필요 없는 큰 덩어리"를 통째로 빠르게 걸러냅니다. LOD 전환 시 모델이 <em>툭 바뀌는(popping)</em> 걸 막으려
+        두 단계를 잠깐 섞는 기법도 씁니다.</div>
+    </section>
+
     <div class="footer">
       🎨 그래픽스 프로그래밍 비주얼 가이드 · 모든 데모는 순수 JavaScript + Canvas로 제작 ·
       마음껏 코드를 열어보고 수정해보세요
@@ -823,6 +993,8 @@ fn main(
 <script src="js/demos-api.js"></script>
 <script src="js/demos-adv1.js"></script>
 <script src="js/demos-adv2.js"></script>
+<script src="js/demos-adv3.js"></script>
+<script src="js/demos-adv4.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>

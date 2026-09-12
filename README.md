@@ -1,5 +1,9 @@
 # 🎨 그래픽스 프로그래밍 비주얼 가이드
 
+### ▶️ **[👉 지금 바로 열어보기 (라이브 데모)](https://ageia.github.io/graphics-programming-guide/)**
+
+[![라이브 사이트](https://img.shields.io/badge/🌐_Live_Demo-ageia.github.io-6ea8fe?style=for-the-badge)](https://ageia.github.io/graphics-programming-guide/)
+
 벡터부터 텍스처 매핑까지, **그래픽스 프로그래밍의 기초를 그림과 인터랙티브 데모로 하나하나** 설명하는 웹 가이드입니다. 수식만 보면 막막한 개념들을 슬라이더로 만지고 점을 드래그하며 직관으로 이해하는 것을 목표로 합니다.
 
 ## ✨ 특징

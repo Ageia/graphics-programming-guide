@@ -410,10 +410,8 @@
     const ctl = document.getElementById("ctl-zbuffer");
     let useZ = true;
 
-    GFX.checkbox(ctl, "깊이 테스트(Z-buffer) 켜기", true, (v) => { useZ = v; render(); });
-    const sRot = GFX.slider(ctl, { label: "회전 (°)", min: 0, max: 360, step: 1, value: 40, onInput: render });
-    window.addEventListener("resize", () => setTimeout(render, 50));
-
+    // 컨트롤 생성 시 render()가 즉시 호출되므로 render가 쓰는 상태(sRot, T)를 먼저 선언(TDZ 방지)
+    let sRot;
     // 세 개의 서로 교차하는 삼각형 (색 다름, 깊이 다름)
     const T = [
       { v: [[-1.2,-0.9, 0.6],[ 1.2,-0.9,-0.6],[ 0.0, 1.1, 0.0]], col: [255,123,114] },
@@ -421,12 +419,16 @@
       { v: [[-1.2, 0.9, 0.0],[ 1.2, 0.9, 0.0],[ 0.0,-1.1, 0.0]], col: [110,168,254] },
     ];
 
+    GFX.checkbox(ctl, "깊이 테스트(Z-buffer) 켜기", true, (v) => { useZ = v; render(); });
+    sRot = GFX.slider(ctl, { label: "회전 (°)", min: 0, max: 360, step: 1, value: 40, onInput: render });
+    window.addEventListener("resize", () => setTimeout(render, 50));
+
     function render() {
       const w = S.w, h = S.h, ctx = S.ctx;
       GFX.clear(ctx, w, h);
       // 내부 렌더 해상도 (성능)
       const RW = 300, RH = Math.round(RW * (h / w));
-      const model = M4.mul(M4.rotY(rad(sRot.get())), M4.rotX(0.35));
+      const model = M4.mul(M4.rotY(rad(sRot ? sRot.get() : 40)), M4.rotX(0.35));
       const view = M4.lookAt([0, 0, 4], [0, 0, 0], [0, 1, 0]);
       const proj = M4.perspective(rad(50), RW / RH, 0.1, 100);
       const mvp = M4.mul(proj, M4.mul(view, model));

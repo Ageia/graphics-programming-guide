@@ -679,12 +679,14 @@
     }
 
     // 슬라이더: U/V 는 시작+크기 <= 1 로 클램프
-    const sU = G.slider(ctl, { label: "U 시작", min: 0, max: 1, step: 0.01, value: U, onInput: (v) => { U = Math.min(v, 1 - size); sU.set(U); draw(); } });
-    const sV = G.slider(ctl, { label: "V 시작", min: 0, max: 1, step: 0.01, value: Vc, onInput: (v) => { Vc = Math.min(v, 1 - size); sV.set(Vc); draw(); } });
+    // (슬라이더 생성 시 onInput이 즉시 호출되므로 sU/sV를 먼저 let 선언 + 가드로 TDZ 방지)
+    let sU, sV;
+    sU = G.slider(ctl, { label: "U 시작", min: 0, max: 1, step: 0.01, value: U, onInput: (v) => { U = Math.min(v, 1 - size); if (sU) sU.set(U); draw(); } });
+    sV = G.slider(ctl, { label: "V 시작", min: 0, max: 1, step: 0.01, value: Vc, onInput: (v) => { Vc = Math.min(v, 1 - size); if (sV) sV.set(Vc); draw(); } });
     G.slider(ctl, { label: "크기 (UV)", min: 0.1, max: 1, step: 0.01, value: size, onInput: (v) => {
       size = v;
-      if (U + size > 1) { U = 1 - size; sU.set(U); }
-      if (Vc + size > 1) { Vc = 1 - size; sV.set(Vc); }
+      if (U + size > 1) { U = 1 - size; if (sU) sU.set(U); }
+      if (Vc + size > 1) { Vc = 1 - size; if (sV) sV.set(Vc); }
       draw();
     } });
 

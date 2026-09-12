@@ -221,16 +221,16 @@
       let gamma = 2.2;
       let linear = true; // 선형 공간에서 계산 여부
 
+      // sRGB(0~1) <-> 선형(0~1). 컨트롤 생성 시 draw()가 즉시 호출되므로 먼저 선언(TDZ 방지)
+      const toLinear = (c) => Math.pow(c, gamma);
+      const toSRGB = (c) => Math.pow(c, 1 / gamma);
+
       GFX.slider(ctl, {
         label: "감마 값", min: 1.0, max: 3.0, step: 0.1, value: 2.2,
         format: (v) => (+v).toFixed(1),
         onInput: (v) => { gamma = v; draw(); },
       });
       GFX.checkbox(ctl, "선형 공간에서 계산", true, (c) => { linear = c; draw(); });
-
-      // sRGB(0~1) <-> 선형(0~1). 단순 거듭제곱 근사 사용.
-      const toLinear = (c) => Math.pow(c, gamma);
-      const toSRGB = (c) => Math.pow(c, 1 / gamma);
 
       function draw() {
         const { ctx, w, h } = S;

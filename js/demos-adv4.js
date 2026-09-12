@@ -172,6 +172,15 @@
       let strength = 0.9;  // AO 강도
       let radius = 34;     // AO 반경 (씬 픽셀)
 
+      // 씬/버퍼 상태: 컨트롤 생성 시 draw()가 즉시 호출되므로 먼저 선언(TDZ 방지)
+      const scene = [
+        { nx: 0.30, r: 0.16 },
+        { nx: 0.46, r: 0.13 },
+        { nx: 0.62, r: 0.18 },
+        { nx: 0.80, r: 0.11 },
+      ];
+      let off = null, offW = 0, offH = 0;
+
       G.checkbox(ctl, "앰비언트 오클루전(AO) 켜기", aoOn, (v) => { aoOn = v; draw(); });
       G.slider(ctl, {
         label: "AO 강도", min: 0, max: 1, step: 0.05, value: strength,
@@ -185,17 +194,7 @@
       });
 
       // 씬: 오프스크린 저해상도 버퍼에서 계산 후 확대.
-      // 원들과 바닥선을 정의 (씬 좌표, 버퍼 픽셀 기준으로 스케일함)
-      // 정규화된 배치(0~1) → 버퍼 크기에 맞춰 사용.
-      const scene = [
-        { nx: 0.30, r: 0.16 },
-        { nx: 0.46, r: 0.13 },
-        { nx: 0.62, r: 0.18 },
-        { nx: 0.80, r: 0.11 },
-      ];
-
-      let off = null, offW = 0, offH = 0;
-
+      // (scene / off 는 위에서 선언됨)
       function buildScene() {
         // 버퍼 해상도(적당히): 폭 기준
         offW = Math.max(160, Math.min(340, Math.round(S.w * 0.9)));
@@ -251,7 +250,7 @@
 
       function draw() {
         if (!off) buildScene();
-        const octx = off.getContext("2d");
+        const octx = off.getContext("2d", { willReadFrequently: true });
         const { groundY, circles } = circlesPx();
 
         // 베이스 색 렌더 (평평한 셰이딩)
@@ -365,6 +364,9 @@
       let cullOn = true;
       let lodOn = true;
 
+      // draw()가 컨트롤 생성 시 즉시 호출되므로 먼저 선언(TDZ 방지)
+      const lodColor = [G.COL.green, G.COL.yellow, G.COL.red];
+
       G.slider(ctl, {
         label: "카메라 X 위치", min: 0, max: 1, step: 0.02, value: camX,
         format: (v) => (+v).toFixed(2),
@@ -421,8 +423,6 @@
         if (d < 0.85) return 1;
         return 2;
       }
-
-      const lodColor = [G.COL.green, G.COL.yellow, G.COL.red];
 
       function draw() {
         G.clear(ctx, S.w, S.h);

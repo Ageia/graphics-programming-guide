@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>그래픽스 프로그래밍 비주얼 가이드</title>
+<meta name="description" content="벡터부터 텍스처 매핑까지, 그래픽스 프로그래밍의 기초를 그림과 인터랙티브 데모로 하나하나 설명하는 가이드" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰ 목차</button>
+<div class="layout">
+  <!-- ============ 사이드바 ============ -->
+  <nav class="sidebar">
+    <h1>🎨 그래픽스 기초</h1>
+    <p class="subtitle">벡터부터 텍스처 매핑까지</p>
+
+    <div class="nav-group">
+      <div class="nav-title">1. 기초 수학</div>
+      <a href="#vector">벡터</a>
+      <a href="#matrix">행렬</a>
+      <a href="#coord">좌표계와 변환</a>
+      <a href="#dotcross">내적 · 외적</a>
+      <a href="#trig">삼각함수</a>
+      <a href="#linalg">선형대수와 기하학</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-title">2. 2D 그래픽스</div>
+      <a href="#pixel">픽셀과 색상</a>
+      <a href="#raster">래스터라이제이션</a>
+      <a href="#imgproc">이미지 처리</a>
+      <a href="#blend">알파 블렌딩</a>
+      <a href="#sprite">스프라이트 · 텍스처</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-title">3. 3D 그래픽스</div>
+      <a href="#mvp">MVP 변환</a>
+      <a href="#camera">카메라</a>
+      <a href="#mesh">삼각형과 메시</a>
+      <a href="#zbuffer">깊이 버퍼(Z-buffer)</a>
+      <a href="#lighting">조명과 그림자</a>
+      <a href="#texmap">텍스처 매핑</a>
+    </div>
+  </nav>
+
+  <!-- ============ 본문 ============ -->
+  <main class="content">
+    <div class="hero">
+      <h1>그래픽스 프로그래밍, 그림으로 이해하기</h1>
+      <p>수식만 보면 어렵지만, 눈으로 보면 쉽습니다. 이 가이드의 모든 개념에는
+        <strong>직접 만져보는 인터랙티브 데모</strong>가 있습니다. 슬라이더를 움직이고,
+        점을 드래그하면서 "아 이게 이런 거였구나"를 느껴보세요.</p>
+    </div>
+
+    <!-- ========================================================= -->
+    <!-- 1. 기초 수학 -->
+    <!-- ========================================================= -->
+
+    <section id="vector">
+      <h2>벡터 (Vector)</h2>
+      <p class="lead">그래픽스의 알파벳. 위치, 방향, 속도, 색깔까지 전부 벡터로 표현합니다.</p>
+
+      <p>벡터는 그냥 <strong>숫자 묶음</strong>이에요. 2D에서는 <code>(x, y)</code> 두 개,
+        3D에서는 <code>(x, y, z)</code> 세 개죠. 이걸 두 가지로 볼 수 있어요:</p>
+      <ul>
+        <li><strong>위치</strong>: 원점(0,0)에서 어디에 있는가 → 하나의 <em>점</em></li>
+        <li><strong>방향+크기</strong>: 어느 쪽으로 얼마나 → 하나의 <em>화살표</em></li>
+      </ul>
+
+      <div class="demo">
+        <div class="demo-title">벡터 덧셈을 눈으로: 화살표를 이어붙이기</div>
+        <canvas id="c-vector" height="360"></canvas>
+        <p class="hint">파란 점 <b>A</b>, 초록 점 <b>B</b>를 드래그해보세요. 노란 벡터가 A+B입니다.</p>
+        <div class="readout" id="r-vector"></div>
+      </div>
+
+      <div class="tip"><strong>핵심:</strong> 벡터 덧셈 <code>A + B</code>는 "A만큼 간 뒤, 이어서 B만큼 더 가기"입니다.
+        각 성분(x끼리, y끼리)을 그냥 더하면 돼요.</div>
+
+      <h3>벡터의 길이와 정규화</h3>
+      <p>벡터의 <strong>길이(크기)</strong>는 피타고라스 정리로 구합니다:
+        <code>|v| = √(x² + y²)</code>. 길이를 1로 만든 벡터를
+        <strong>단위 벡터(정규화, normalize)</strong>라고 하고, "순수한 방향"만 남긴 것입니다.
+        조명 계산, 카메라 방향 등에서 항상 쓰여요.</p>
+
+      <div class="demo">
+        <div class="demo-title">길이와 정규화</div>
+        <canvas id="c-normalize" height="340"></canvas>
+        <p class="hint">화살표 끝을 드래그하세요. 회색은 원본, 노란색은 길이 1로 정규화한 벡터입니다.</p>
+        <div class="readout" id="r-normalize"></div>
+      </div>
+    </section>
+
+    <section id="matrix">
+      <h2>행렬 (Matrix)</h2>
+      <p class="lead">벡터를 한꺼번에 이동·회전·확대하는 "변환 기계".</p>
+
+      <p>행렬은 숫자를 격자로 늘어놓은 것입니다. 그래픽스에서 행렬의 진짜 의미는
+        <strong>"공간을 통째로 변형시키는 규칙"</strong>이에요. 어떤 점에 행렬을 곱하면
+        그 점이 회전하거나, 커지거나, 밀려납니다.</p>
+
+      <p>2×2 행렬은 격자(공간)의 <strong>기저 벡터</strong> 두 개를 정하는 것과 같아요.
+        아래에서 슬라이더로 행렬의 네 숫자를 바꾸면 공간 전체가 어떻게 휘는지 보이죠.</p>
+
+      <div class="demo">
+        <div class="demo-title">행렬 = 공간의 변형</div>
+        <canvas id="c-matrix" height="380"></canvas>
+        <div class="controls" id="ctl-matrix"></div>
+        <div class="readout" id="r-matrix"></div>
+      </div>
+
+      <div class="tip"><strong>왜 행렬을 쓸까?</strong> 회전+확대+이동을 매번 따로 계산하지 않고,
+        <em>하나의 행렬로 합쳐서</em> 점 수백만 개에 똑같이 적용할 수 있기 때문입니다.
+        GPU가 가장 잘하는 일이 바로 이 행렬 곱셈이에요.</div>
+    </section>
+
+    <section id="coord">
+      <h2>좌표계와 변환</h2>
+      <p class="lead">이동(Translate) · 회전(Rotate) · 확대(Scale), 그리고 순서의 중요성.</p>
+
+      <p>물체를 화면에 놓는 것은 세 가지 기본 변환의 조합입니다. 중요한 건 <strong>순서</strong>예요.
+        "회전 후 이동"과 "이동 후 회전"은 완전히 다른 결과를 만듭니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">변환 순서 실험실</div>
+        <canvas id="c-transform" height="380"></canvas>
+        <div class="controls" id="ctl-transform"></div>
+        <p class="hint">회전 각도와 이동량을 바꾸고, 순서 버튼을 눌러 차이를 확인하세요.</p>
+      </div>
+
+      <div class="tip"><strong>동차 좌표(Homogeneous):</strong> 이동은 원래 덧셈이라 곱셈인 행렬로 표현이 안 돼요.
+        그래서 좌표에 <code>1</code>을 하나 더 붙여 <code>(x, y, 1)</code>로 만들면, 이동까지도
+        하나의 3×3 행렬 곱으로 통일할 수 있습니다. 3D에서는 <code>(x,y,z,1)</code>과 4×4 행렬을 씁니다.</div>
+    </section>
+
+    <section id="dotcross">
+      <h2>내적 · 외적</h2>
+      <p class="lead">두 벡터의 관계를 숫자로: 내적은 "얼마나 같은 방향인가", 외적은 "수직 방향과 넓이".</p>
+
+      <h3>내적 (Dot Product)</h3>
+      <p><code>A · B = |A||B|cosθ</code>. 결과는 <strong>스칼라(숫자 하나)</strong>입니다.
+        두 벡터가 <strong>같은 방향이면 양수, 수직이면 0, 반대면 음수</strong>가 돼요.
+        조명에서 "빛이 표면에 얼마나 정면으로 닿는가"를 이걸로 계산합니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">내적: 방향이 얼마나 일치하는가</div>
+        <canvas id="c-dot" height="340"></canvas>
+        <p class="hint">두 화살표 끝을 드래그하세요. 사이각과 내적 부호를 보세요.</p>
+        <div class="readout" id="r-dot"></div>
+      </div>
+
+      <h3>외적 (Cross Product)</h3>
+      <p>3D에서 외적 <code>A × B</code>는 <strong>두 벡터에 동시에 수직인 새 벡터</strong>를 줍니다.
+        삼각형의 <strong>법선(normal, 면이 바라보는 방향)</strong>을 구할 때 필수예요.
+        2D에서는 결과가 스칼라 하나가 되는데, 그 부호로 <strong>회전 방향(시계/반시계)</strong>과
+        평행사변형 넓이를 알 수 있습니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">외적: 넓이와 방향(2D)</div>
+        <canvas id="c-cross" height="340"></canvas>
+        <p class="hint">외적 값의 크기 = 평행사변형 넓이, 부호 = B가 A의 왼쪽인지 오른쪽인지.</p>
+        <div class="readout" id="r-cross"></div>
+      </div>
+    </section>
+
+    <section id="trig">
+      <h2>삼각함수</h2>
+      <p class="lead">원운동, 회전, 파동의 언어. sin·cos만 이해하면 절반은 끝납니다.</p>
+
+      <p>단위원(반지름 1인 원) 위의 한 점을 각도 θ로 표현하면 그 좌표가 바로
+        <code>(cos θ, sin θ)</code>입니다. 즉 <strong>cos은 x, sin은 y</strong>예요.
+        회전, 궤도, 흔들림, 파형 전부 여기서 나옵니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">단위원과 sin/cos 파형</div>
+        <canvas id="c-trig" height="320"></canvas>
+        <p class="hint">각도 슬라이더를 돌리면 원 위의 점과 오른쪽 파형이 함께 움직입니다.</p>
+        <div class="controls" id="ctl-trig"></div>
+      </div>
+
+      <div class="tip"><strong>라디안:</strong> 프로그래밍에서 각도는 보통 도(°)가 아니라 라디안을 씁니다.
+        <code>180° = π 라디안 ≈ 3.14159</code>. 변환: <code>라디안 = 도 × π / 180</code>.</div>
+    </section>
+
+    <section id="linalg">
+      <h2>선형대수와 기하학</h2>
+      <p class="lead">지금까지의 도구를 합쳐서 "선분 교차", "점과 선 거리" 같은 실전 문제 풀기.</p>
+
+      <p>게임과 그래픽스에서 끝없이 나오는 질문들 — "이 점이 이 도형 안에 있나?",
+        "두 선분이 만나나?", "마우스가 버튼 위에 있나?" — 은 전부 앞의 내적·외적으로 풀립니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">점이 삼각형 안에 있는가? (외적 부호 이용)</div>
+        <canvas id="c-inside" height="360"></canvas>
+        <p class="hint">삼각형 꼭짓점과 빨간 점을 드래그하세요. 안에 있으면 삼각형이 초록으로 채워집니다.</p>
+        <div class="readout" id="r-inside"></div>
+      </div>
+    </section>
+
+    <!-- ========================================================= -->
+    <!-- 2. 2D 그래픽스 -->
+    <!-- ========================================================= -->
+
+    <section id="pixel">
+      <h2>픽셀과 색상</h2>
+      <p class="lead">화면은 작은 빛 점들의 격자. 각 점은 빨강·초록·파랑의 밝기로 색을 만듭니다.</p>
+
+      <p>모니터의 모든 색은 <strong>RGB</strong> — 빨강(R), 초록(G), 파랑(B) 세 빛을 섞어 만듭니다.
+        각 채널은 0~255. <code>(255,0,0)</code>은 순수 빨강, <code>(255,255,255)</code>는 하양,
+        <code>(0,0,0)</code>은 검정이죠. 빛을 섞을수록 밝아지는 <strong>가산 혼합</strong>입니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">RGB 색 섞기</div>
+        <canvas id="c-rgb" height="200"></canvas>
+        <div class="controls" id="ctl-rgb"></div>
+        <div class="readout" id="r-rgb"></div>
+      </div>
+
+      <div class="tip"><strong>픽셀을 확대하면?</strong> 아래에서 이미지를 확대하면 부드러운 그림이
+        사실은 네모난 색 블록의 모음이라는 걸 볼 수 있어요.</div>
+
+      <div class="demo">
+        <div class="demo-title">픽셀 줌: 그림의 정체</div>
+        <canvas id="c-pixelzoom" height="300"></canvas>
+        <div class="controls" id="ctl-pixelzoom"></div>
+      </div>
+    </section>
+
+    <section id="raster">
+      <h2>래스터라이제이션</h2>
+      <p class="lead">수학적 도형(선·삼각형)을 네모난 픽셀 격자로 "칠하는" 과정.</p>
+
+      <p>컴퓨터는 완벽한 선을 그릴 수 없어요. 격자 위에서 <strong>"어느 픽셀을 켤까?"</strong>를
+        정해야 하죠. 대각선을 그리면 계단 현상(에일리어싱)이 생기는 이유입니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">선 긋기: 어느 픽셀을 켤까 (Bresenham)</div>
+        <canvas id="c-line" height="360"></canvas>
+        <p class="hint">두 끝점을 드래그하세요. 실제로 켜지는 픽셀이 격자에 표시됩니다.</p>
+      </div>
+
+      <div class="demo">
+        <div class="demo-title">삼각형 채우기: 픽셀마다 "안/밖" 판정</div>
+        <canvas id="c-fill" height="360"></canvas>
+        <p class="hint">꼭짓점을 드래그하세요. 각 픽셀 중심이 삼각형 안이면 칠합니다.
+          이게 모든 3D 렌더링의 심장입니다.</p>
+      </div>
+    </section>
+
+    <section id="imgproc">
+      <h2>이미지 처리</h2>
+      <p class="lead">이미지는 숫자 배열. 숫자를 바꾸면 필터가 됩니다 — 밝기, 흑백, 블러.</p>
+
+      <p>이미지 = 픽셀들의 2차원 배열입니다. 각 픽셀 값을 수식으로 바꾸면 <strong>필터</strong>가 되죠.
+        블러 같은 필터는 <strong>주변 픽셀들의 평균</strong>을 쓰는데, 이걸
+        <strong>합성곱(convolution)</strong>이라고 합니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">실시간 이미지 필터</div>
+        <canvas id="c-filter" height="260"></canvas>
+        <div class="controls" id="ctl-filter"></div>
+      </div>
+    </section>
+
+    <section id="blend">
+      <h2>알파 블렌딩</h2>
+      <p class="lead">반투명 유리처럼, 위 그림과 아래 그림을 비율로 섞기.</p>
+
+      <p>알파(A)는 <strong>불투명도</strong>입니다(0=투명, 1=불투명). 반투명한 층을 아래 층 위에
+        올릴 때 최종 색은 이렇게 계산돼요:</p>
+      <pre><code>결과 = 위색 × 알파 + 아래색 × (1 − 알파)</code></pre>
+      <p>이게 <strong>오버 연산</strong>이며 UI, 그림자, 파티클, 안티에일리어싱의 기반입니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">두 원을 알파로 섞기</div>
+        <canvas id="c-blend" height="300"></canvas>
+        <div class="controls" id="ctl-blend"></div>
+        <div class="readout" id="r-blend"></div>
+      </div>
+    </section>
+
+    <section id="sprite">
+      <h2>스프라이트 · 텍스처</h2>
+      <p class="lead">작은 이미지를 화면에 배치·반복·변형해서 세계를 채우기.</p>
+
+      <p><strong>스프라이트</strong>는 게임 캐릭터·아이템 같은 작은 2D 이미지입니다.
+        <strong>텍스처</strong>는 표면에 입히는 그림이고요. 텍스처 좌표
+        <strong>UV</strong>(0~1 범위)를 이용해 "이미지의 어느 부분을 어디에 붙일지" 정합니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">UV 좌표로 텍스처 잘라 붙이기</div>
+        <canvas id="c-sprite" height="320"></canvas>
+        <div class="controls" id="ctl-sprite"></div>
+        <p class="hint">UV 슬라이더로 원본 텍스처(왼쪽)의 어느 영역을 오른쪽 사각형에 매핑할지 조절합니다.</p>
+      </div>
+    </section>
+
+    <!-- ========================================================= -->
+    <!-- 3. 3D 그래픽스 -->
+    <!-- ========================================================= -->
+
+    <section id="mvp">
+      <h2>Model → World → View → Projection 변환</h2>
+      <p class="lead">3D 점이 화면의 2D 픽셀이 되기까지 거치는 4단계 여행.</p>
+
+      <p>3D 물체 하나가 화면에 그려지려면 네 개의 좌표계를 거칩니다. 이걸 <strong>파이프라인</strong>이라 해요:</p>
+      <ul>
+        <li><strong>Model</strong>: 물체 자기 기준 좌표 (예: 주전자의 중심이 원점)</li>
+        <li><strong>World</strong>: 물체를 세계 속 제 위치에 배치</li>
+        <li><strong>View</strong>: 카메라 기준으로 세계를 다시 봄 (카메라가 원점)</li>
+        <li><strong>Projection</strong>: 3D를 2D 화면 평면에 투영 (원근감 부여)</li>
+      </ul>
+
+      <div class="demo">
+        <div class="demo-title">회전하는 3D 큐브: 파이프라인이 실제로 도는 모습</div>
+        <canvas id="c-mvp" height="380"></canvas>
+        <div class="controls" id="ctl-mvp"></div>
+        <p class="hint">각 슬라이더는 파이프라인의 한 단계를 조절합니다. 큐브를 마우스로 드래그해도 됩니다.</p>
+      </div>
+
+      <div class="tip"><strong>원근 투영의 핵심:</strong> 멀리 있는 것은 작게 보입니다.
+        이는 <code>화면x = x / z</code>처럼 <em>깊이 z로 나누기</em> 때문이에요. z가 클수록(멀수록) 작아지죠.</div>
+    </section>
+
+    <section id="camera">
+      <h2>카메라</h2>
+      <p class="lead">카메라는 "위치 + 바라보는 방향 + 위쪽". 세계를 카메라 앞으로 끌어오는 것.</p>
+
+      <p>재미있는 사실: 그래픽스에서 카메라는 실제로 움직이지 않아요.
+        <strong>카메라를 원점에 고정</strong>하고, 대신 <em>세계 전체를 반대로 움직입니다</em>.
+        이 변환을 만드는 것이 <strong>LookAt</strong>이며 세 벡터로 정의됩니다:
+        위치(eye), 목표(target), 위쪽(up).</p>
+
+      <div class="demo">
+        <div class="demo-title">탑뷰로 보는 카메라 (위치·방향·시야각)</div>
+        <canvas id="c-camera" height="380"></canvas>
+        <div class="controls" id="ctl-camera"></div>
+        <p class="hint">위: 세계를 위에서 본 모습(카메라 위치·시야각 조절 가능). 아래: 그 카메라가 보는 화면.</p>
+      </div>
+    </section>
+
+    <section id="mesh">
+      <h2>삼각형과 메시</h2>
+      <p class="lead">모든 3D 모델은 결국 삼각형 덩어리. 왜 하필 삼각형일까?</p>
+
+      <p>구, 사람, 자동차 — 3D의 모든 것은 <strong>삼각형(polygon)의 모음(메시)</strong>입니다.
+        왜 삼각형이냐면: 세 점은 <strong>항상 하나의 평면</strong>을 이루기 때문이에요(휘지 않음).
+        GPU도 삼각형만 그릴 줄 압니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">삼각형으로 도형 만들기 (와이어프레임 ↔ 솔리드)</div>
+        <canvas id="c-mesh" height="380"></canvas>
+        <div class="controls" id="ctl-mesh"></div>
+        <p class="hint">세분화 슬라이더를 올리면 삼각형이 많아지며 구가 매끄러워집니다.</p>
+      </div>
+    </section>
+
+    <section id="zbuffer">
+      <h2>깊이 버퍼 (Z-buffer)</h2>
+      <p class="lead">"누가 앞에 있나?" — 픽셀마다 깊이를 기록해 가림 처리를 하는 방법.</p>
+
+      <p>여러 삼각형이 겹칠 때, 화면의 각 픽셀은 <strong>가장 앞(가장 가까운) 것</strong>만 보여야 합니다.
+        이를 위해 색 버퍼와 별개로 <strong>깊이 버퍼</strong>를 둬서, 픽셀을 칠하기 전에
+        "지금 그리려는 게 이미 있는 것보다 더 가까운가?"를 비교합니다. 가까우면 덮어쓰고, 멀면 버려요.</p>
+
+      <div class="demo">
+        <div class="demo-title">Z-buffer 없이 vs 있이</div>
+        <canvas id="c-zbuffer" height="340"></canvas>
+        <div class="controls" id="ctl-zbuffer"></div>
+        <p class="hint">깊이 테스트를 껐다 켜보세요. 끄면 나중에 그린 도형이 무조건 위로 와서 어색해집니다.</p>
+      </div>
+    </section>
+
+    <section id="lighting">
+      <h2>조명과 그림자</h2>
+      <p class="lead">표면 법선과 빛 방향의 내적으로 밝기를 정하는 것 — 여기서 내적이 빛납니다.</p>
+
+      <p>표면이 밝은지 어두운지는 <strong>표면이 빛을 얼마나 정면으로 받는가</strong>로 정해집니다.
+        이건 <strong>표면 법선(normal) · 빛 방향의 내적</strong>이에요(디퓨즈 조명, 램버트 법칙).
+        정면이면 밝고(내적 1), 비스듬하면 어둡고(내적 0에 가까움), 뒤돌면 안 받죠(음수→0).</p>
+
+      <div class="demo">
+        <div class="demo-title">빛의 방향과 밝기 (디퓨즈 + 스페큘러)</div>
+        <canvas id="c-light" height="360"></canvas>
+        <div class="controls" id="ctl-light"></div>
+        <p class="hint">빛 방향 슬라이더를 돌려보세요. 구의 밝은 면이 따라 움직이고, 반짝이는 하이라이트도 생깁니다.</p>
+      </div>
+
+      <div class="tip"><strong>조명 3요소:</strong> <b>Ambient</b>(전체를 은은하게) +
+        <b>Diffuse</b>(방향에 따른 기본 밝기) + <b>Specular</b>(매끈한 표면의 반짝임)
+        을 더한 것이 고전적인 <em>퐁(Phong) 조명 모델</em>입니다.</div>
+    </section>
+
+    <section id="texmap">
+      <h2>텍스처 매핑</h2>
+      <p class="lead">2D 이미지를 3D 표면에 "포장지처럼" 입히기. UV 좌표가 다리 역할.</p>
+
+      <p>맨질맨질한 3D 면에 벽돌·나무·얼굴을 그려 넣는 방법이 텍스처 매핑입니다.
+        메시의 각 꼭짓점에 <strong>UV 좌표</strong>(텍스처 이미지 상의 위치, 0~1)를 붙여두면,
+        삼각형 내부의 각 픽셀에 대해 UV를 <strong>보간(interpolation)</strong>해서 이미지의
+        해당 색을 가져와 칠합니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">회전하는 텍스처 큐브</div>
+        <canvas id="c-texcube" height="380"></canvas>
+        <div class="controls" id="ctl-texcube"></div>
+        <p class="hint">각 면에 텍스처가 UV 좌표를 따라 입혀진 채 회전합니다. 원근 보정도 확인해보세요.</p>
+      </div>
+
+      <div class="tip"><strong>UV 언랩핑:</strong> 3D 표면을 가위로 잘라 평평하게 펼친 지도가 UV 맵입니다.
+        아티스트가 이 펼친 지도 위에 그림을 그리면, 그게 다시 3D로 감겨 올라가는 거예요.</div>
+    </section>
+
+    <div class="footer">
+      🎨 그래픽스 프로그래밍 비주얼 가이드 · 모든 데모는 순수 JavaScript + Canvas로 제작 ·
+      마음껏 코드를 열어보고 수정해보세요
+    </div>
+  </main>
+</div>
+
+<script src="js/lib.js"></script>
+<script src="js/demos-math.js"></script>
+<script src="js/demos-2d.js"></script>
+<script src="js/demos-3d.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

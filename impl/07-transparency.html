@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 투명과 렌더링 순서 — C++/DirectX 11</title>
+<meta name="description" content="알파 블렌딩·2패스 렌더링·back-to-front 정렬을 D3D11 블렌드/깊이스텐실 스테이트로 한 줄씩 직접 구현합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./07-techniques.html">7장. 실전 렌더링 기법</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">투명과 렌더링 순서</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 7</span>
+  <h1>투명과 렌더링 순서 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    유리·물·연기·불꽃처럼 <strong>뒤가 비치는</strong> 물체는 <strong>알파 블렌딩</strong>으로 그립니다.
+    그런데 블렌딩은 <em>지금 화면(렌더 타깃)에 이미 그려져 있는 색</em>과 새 색을 섞는 연산이라,
+    <strong>어떤 순서로 그리느냐</strong>에 따라 결과가 완전히 달라집니다. 이 페이지에서는
+    ① 알파 오버 블렌드 스테이트를 D3D11 API로 만드는 법, ② 왜 정렬이 필요한지,
+    ③ 불투명/반투명을 나눠 그리는 <strong>2패스 + back-to-front 정렬</strong> 파이프라인을
+    코드 한 줄, 플래그 하나까지 해부합니다. 마지막으로 이 접근의 한계와 OIT까지 짚습니다.
+  </p>
+
+  <!-- ================================================================= -->
+  <h2 id="alpha-over">1. 알파 오버 블렌딩이란 무엇인가</h2>
+  <p>
+    블렌딩(blending)은 픽셀 셰이더가 뱉은 <strong>소스 색(source, 새로 그리는 색)</strong>과,
+    렌더 타깃에 <em>이미 저장되어 있던</em> <strong>목적지 색(destination, 배경/뒤 물체)</strong>을
+    정해진 공식으로 합치는 고정 기능 단계입니다. 우리가 원하는 표준 유리 효과는
+    <strong>알파 오버(alpha over)</strong> 혹은 <strong>소스 알파 블렌딩</strong>이라 부르며,
+    수식은 이렇습니다.
+  </p>
+  <p style="text-align:center; font-size:1.05em;">
+    <code>결과.rgb = 소스.rgb × 소스.a + 목적지.rgb × (1 − 소스.a)</code>
+  </p>
+  <p>
+    <strong>수학적 의미</strong>: 이것은 두 색의 <em>가중 평균(선형 보간, lerp)</em>입니다.
+    소스 알파 <code>a</code>가 1이면 결과는 100% 소스(완전 불투명), 0이면 100% 목적지(완전 투명),
+    0.5면 정확히 반반이 섞입니다. 즉 <code>a</code>는 "이 표면이 빛을 얼마나 막느냐(불투명도)"입니다.
+  </p>
+  <p>
+    <strong>기하 직관</strong>: 창문 유리를 상상해 보세요. 유리 자체 색이 옅은 파랑(소스)이고,
+    유리 <em>너머</em>에 빨간 벽(목적지)이 있다고 합시다. 유리의 불투명도가 0.3이라면
+    최종적으로 보이는 색은 "파랑을 30%, 벽의 빨강을 70%" 섞은 색입니다. 이 "70%"가 바로
+    <code>1 − a = 1 − 0.3 = 0.7</code> 항입니다. 그래서 <strong>목적지에는 반드시
+    (1 − 소스알파)가 곱해져야</strong> 두 기여의 합이 항상 100%가 되어 색이 밝아지거나 어두워지지 않습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>blend_setup.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">using Microsoft::WRL::ComPtr;
+
+// 결과 = src.rgb * src.a + dst.rgb * (1 - src.a)  → 표준 알파 오버
+D3D11_BLEND_DESC bd = {};
+bd.RenderTarget[0].BlendEnable    = TRUE;
+bd.RenderTarget[0].SrcBlend       = D3D11_BLEND_SRC_ALPHA;
+bd.RenderTarget[0].DestBlend      = D3D11_BLEND_INV_SRC_ALPHA;
+bd.RenderTarget[0].BlendOp        = D3D11_BLEND_OP_ADD;
+bd.RenderTarget[0].SrcBlendAlpha  = D3D11_BLEND_ONE;
+bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+bd.RenderTarget[0].BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+ComPtr&lt;ID3D11BlendState&gt; alphaBlend;
+device-&gt;CreateBlendState(&amp;bd, &amp;alphaBlend);
+
+// 활성화: OMSetBlendState (nullptr blend factor, 0xFFFFFFFF sample mask)
+context-&gt;OMSetBlendState(alphaBlend.Get(), nullptr, 0xFFFFFFFF);</code></pre>
+  </div>
+
+  <h3>1-1. 블렌드 공식이 실제로 계산되는 방법</h3>
+  <p>
+    D3D11의 하드웨어 블렌더는 우리가 임의의 수식을 넣는 게 아니라, 딱 이 형태로 고정되어 있습니다.
+  </p>
+  <p style="text-align:center; font-size:1.02em;">
+    <code>결과 = (소스 × SrcBlend) &nbsp;BlendOp&nbsp; (목적지 × DestBlend)</code>
+  </p>
+  <p>
+    즉 우리가 정하는 것은 세 가지 <strong>다이얼</strong>뿐입니다.
+    <strong>SrcBlend</strong>(소스에 곱할 계수), <strong>DestBlend</strong>(목적지에 곱할 계수),
+    <strong>BlendOp</strong>(둘을 합치는 연산: 더하기/빼기 등). 우리 목표 수식
+    <code>src.rgb·src.a + dst.rgb·(1−src.a)</code>과 이 틀을 나란히 놓고 대응시켜 봅시다.
+  </p>
+  <table class="impl">
+    <tr><th>수식의 항</th><th>필요한 계수</th><th>D3D11 열거값</th></tr>
+    <tr><td>소스에 곱하는 값 = <code>src.a</code></td><td>소스 알파</td><td><code>D3D11_BLEND_SRC_ALPHA</code></td></tr>
+    <tr><td>목적지에 곱하는 값 = <code>1 − src.a</code></td><td>1 빼기 소스 알파</td><td><code>D3D11_BLEND_INV_SRC_ALPHA</code></td></tr>
+    <tr><td>둘을 합치는 방법 = 더하기</td><td>덧셈</td><td><code>D3D11_BLEND_OP_ADD</code></td></tr>
+  </table>
+  <p>
+    <code>INV_SRC_ALPHA</code>의 <code>INV</code>는 "inverse(반전)"이 아니라 정확히는
+    <strong>1에서 뺀 값(one-minus)</strong>을 뜻합니다. 즉 <code>1.0 − src.a</code>입니다.
+    이름 때문에 역수(<code>1/a</code>)로 착각하기 쉬운데 그렇지 않습니다.
+  </p>
+
+  <h3>1-2. 코드 한 줄씩 해부</h3>
+
+  <h4><code>using Microsoft::WRL::ComPtr;</code></h4>
+  <p>
+    <strong>ComPtr</strong>는 Windows의 COM 객체(예: <code>ID3D11BlendState</code>)를 자동으로
+    참조 카운트 관리해 주는 스마트 포인터입니다. D3D11 인터페이스는 전부 COM이라
+    <code>Release()</code>를 직접 부르지 않고 <code>ComPtr</code>가 스코프를 벗어날 때
+    자동 해제하도록 맡깁니다. <code>using</code>은 매번 <code>Microsoft::WRL::ComPtr</code>로
+    길게 쓰지 않으려는 이름 축약일 뿐입니다.
+  </p>
+
+  <h4><code>D3D11_BLEND_DESC bd = {};</code></h4>
+  <p>
+    블렌드 스테이트를 만들려면 먼저 그 <em>설계도(description)</em> 구조체를 채워야 합니다.
+    <code>= {}</code>는 C++의 <strong>집합 값-초기화(aggregate value-initialization)</strong>로,
+    구조체의 <em>모든 멤버를 0/FALSE로</em> 밀어 버립니다. 이게 중요한 이유는
+    <code>D3D11_BLEND_DESC</code> 안에는 우리가 명시하지 않는 필드
+    (<code>AlphaToCoverageEnable</code>, <code>IndependentBlendEnable</code>,
+    그리고 <code>RenderTarget[1..7]</code> 등 총 8개 렌더타깃 슬롯)가 있기 때문입니다.
+    <code>= {}</code>가 없으면 이 필드들이 <strong>쓰레기 값</strong>을 담아
+    예측 불가능한 블렌딩(혹은 <code>CreateBlendState</code> 실패)이 생깁니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>D3D11_BLEND_DESC bd;</code>처럼 <code>= {}</code> 없이 선언하면 스택의 쓰레기 값이 그대로 남습니다.
+    특히 <code>AlphaToCoverageEnable</code>이 우연히 <code>TRUE</code>가 되면 MSAA 커버리지가 알파로
+    바뀌어 반투명이 지글거리는 도트 패턴으로 보일 수 있습니다. D3D 디스크립터는 <em>항상</em>
+    <code>= {}</code>로 0-초기화하고 필요한 것만 덮어쓰는 습관을 들이세요.
+  </div>
+
+  <h4><code>bd.RenderTarget[0].BlendEnable = TRUE;</code></h4>
+  <p>
+    <code>RenderTarget[0]</code>은 <strong>0번 렌더 타깃(보통 백버퍼)</strong>의 블렌딩 설정입니다.
+    D3D11은 최대 8개(MRT, Multiple Render Targets) 슬롯을 독립적으로 블렌딩할 수 있지만,
+    화면에 그리는 일반 렌더링은 0번만 씁니다. <code>BlendEnable = TRUE</code>가 없으면
+    아래에 뭘 채우든 블렌딩이 일어나지 않고 소스 색이 목적지를 <em>그냥 덮어씁니다</em>(불투명).
+  </p>
+
+  <h4>RGB 채널 3형제 — SrcBlend / DestBlend / BlendOp</h4>
+  <p>
+    이 세 줄이 앞에서 본 <em>다이얼</em>의 RGB 버전입니다. 표에서 매핑한 그대로,
+    <code>SrcBlend = SRC_ALPHA</code>(소스에 α 곱), <code>DestBlend = INV_SRC_ALPHA</code>(목적지에 1−α 곱),
+    <code>BlendOp = OP_ADD</code>(둘을 더함). 이 세 개가 합쳐져 정확히
+    <code>결과.rgb = src.rgb·α + dst.rgb·(1−α)</code>를 만듭니다.
+  </p>
+
+  <h4>알파 채널 3형제 — SrcBlendAlpha / DestBlendAlpha / BlendOpAlpha</h4>
+  <p>
+    D3D11은 <strong>RGB 채널과 A(알파) 채널의 블렌드 공식을 따로</strong> 지정할 수 있습니다.
+    <code>...Alpha</code>가 붙은 세 필드가 <em>결과 픽셀의 알파값</em>을 어떻게 계산할지 정합니다.
+    여기서는 <code>SrcBlendAlpha = ONE</code>, <code>DestBlendAlpha = INV_SRC_ALPHA</code>이므로
+    결과 알파는 <code>결과.a = src.a·1 + dst.a·(1−src.a)</code>가 됩니다.
+    이것은 알파 채널에 대한 <strong>올바른 누적(over 연산의 알파 공식)</strong>으로,
+    나중에 이 렌더 타깃을 다시 다른 것 위에 합성할 때(예: UI, 오프스크린 합성) 알파가 어긋나지 않게 해줍니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    화면(백버퍼)에 곧장 그릴 때는 목적지 알파가 최종 출력에 거의 영향을 주지 않아
+    RGB만 신경 써도 대개 괜찮습니다. 하지만 <strong>오프스크린 텍스처에 그린 뒤 나중에 합성</strong>하는
+    파이프라인(포스트프로세스, UI 레이어)에서는 알파 공식을 틀리면 가장자리가 검게 뜨거나
+    이중 블렌딩이 됩니다. 위 설정(ONE / INV_SRC_ALPHA)이 그런 경우까지 안전한 표준값입니다.
+  </div>
+
+  <h4><code>RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;</code></h4>
+  <p>
+    이 마스크는 "블렌딩 결과 중 <strong>어떤 채널을 실제로 렌더 타깃에 쓸지</strong>"를 고르는
+    비트 플래그입니다. <code>ENABLE_ALL</code>은 <code>R|G|B|A</code> 네 채널 전부 기록합니다.
+    특정 채널만 쓰고 싶을 때(예: 알파만 갱신) 여기서 마스킹합니다. 대부분의 반투명 렌더링은
+    전부 쓰면 되므로 <code>ALL</code>이 기본값입니다.
+  </p>
+
+  <h4><code>device-&gt;CreateBlendState(&amp;bd, &amp;alphaBlend);</code></h4>
+  <p>
+    채워둔 설계도(<code>bd</code>)를 GPU가 이해하는 <strong>불변 스테이트 객체</strong>로 컴파일합니다.
+    <strong>시그니처</strong>: 첫 인자는 디스크립터 주소(<code>&amp;bd</code>, 읽기 전용),
+    둘째 인자는 결과를 받을 포인터의 주소(<code>&amp;alphaBlend</code>, 즉
+    <code>ID3D11BlendState**</code>). <code>ComPtr</code>의 <code>&amp;</code> 연산자는
+    내부 포인터의 주소를 안전하게 넘겨줍니다.
+  </p>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    블렌드 스테이트는 <strong>초기화 시 한 번만 생성</strong>하고 재사용해야 합니다.
+    <code>CreateBlendState</code>는 무거운 호출이라 프레임마다 만들면 심각한 병목이 됩니다.
+    보통 <code>alphaBlend</code>, <code>additiveBlend</code>(불꽃·글로우용), <code>noBlend</code>(nullptr) 등을
+    시작할 때 미리 만들어 두고 매 프레임 <code>OMSetBlendState</code>로 <em>교체</em>만 합니다.
+  </div>
+
+  <h4><code>context-&gt;OMSetBlendState(alphaBlend.Get(), nullptr, 0xFFFFFFFF);</code></h4>
+  <p>
+    <strong>OM</strong>은 파이프라인의 마지막 단계인 <strong>Output Merger</strong>를 뜻합니다.
+    블렌딩과 깊이/스텐실이 여기서 처리됩니다. 세 인자를 하나씩 봅시다.
+  </p>
+  <ol class="steps">
+    <li><code>alphaBlend.Get()</code> — 방금 만든 스테이트 객체의 <em>원시 포인터</em>. <code>ComPtr</code>는
+        참조 카운트를 건드리지 않고 내부 포인터만 꺼내주는 <code>Get()</code>을 제공합니다.
+        <code>nullptr</code>을 넣으면 "블렌딩 없음(불투명 덮어쓰기)"으로 되돌아갑니다.</li>
+    <li><code>nullptr</code> — <strong>블렌드 팩터</strong>(<code>float[4]</code>)입니다.
+        <code>D3D11_BLEND_BLEND_FACTOR</code> 계수를 쓸 때만 필요하고, 우리는
+        <code>SRC_ALPHA</code>/<code>INV_SRC_ALPHA</code>만 쓰므로 필요 없어 <code>nullptr</code>입니다.</li>
+    <li><code>0xFFFFFFFF</code> — <strong>샘플 마스크</strong>입니다. MSAA에서 어떤 샘플을 쓸지 고르는
+        비트마스크로, <code>0xFFFFFFFF</code>는 "모든 샘플 사용"이라 사실상 항상 이 값을 씁니다.</li>
+  </ol>
+
+  <!-- ================================================================= -->
+  <h2 id="why-sort">2. 왜 정렬이 필요한가</h2>
+  <p>
+    이제 블렌드 스테이트는 준비됐습니다. 하지만 반투명을 <em>그냥</em> 켜고 아무 순서로 그리면
+    결과가 틀립니다. 이유는 두 가지 하드웨어 동작이 얽히기 때문입니다:
+    <strong>깊이 테스트</strong>와 <strong>블렌딩의 순서 의존성</strong>.
+  </p>
+
+  <h3>2-1. 깊이 테스트가 반투명을 지워버린다</h3>
+  <p>
+    <strong>깊이 테스트(Z-test)</strong>는 "이 픽셀의 깊이가 이미 저장된 깊이보다 <em>더 멀면 버린다</em>"는
+    규칙입니다. 불투명 물체에서는 이게 축복입니다 — 가려진 픽셀을 자동으로 폐기해 주니까요.
+    그런데 불투명 물체가 깊이를 <strong>쓰면(write)</strong>, 그 뒤에 있는 반투명 물체는
+    깊이 테스트에서 "더 멀다"고 걸려 <em>아예 그려지지 않습니다</em>. 유리 뒤 물체가 보여야 하는데
+    깊이 버퍼가 유리를 이미 불투명처럼 막아버리는 거죠.
+  </p>
+  <p>
+    <strong>기하 직관</strong>: 카메라 → [빨강 벽(먼 불투명)] → [파랑 유리(가까운 반투명)] 순으로 있다고 합시다.
+    만약 유리를 먼저 그리면서 깊이까지 써버리면, 나중에 그리는 벽이 "유리보다 멀다"고 판정되어
+    통째로 사라집니다. 유리 너머로 보여야 할 벽이 없어지는 겁니다. 그래서 반투명은
+    깊이를 <strong>쓰면 안 됩니다</strong>(테스트는 해야 하지만).
+  </p>
+
+  <h3>2-2. 블렌딩은 순서에 의존한다</h3>
+  <p>
+    알파 오버 <code>C = C_src·α + C_dst·(1−α)</code>는 <strong>교환법칙이 성립하지 않습니다</strong>.
+    두 반투명 A, B를 A→B 순으로 섞은 결과와 B→A 순으로 섞은 결과가 <em>다릅니다</em>.
+    수식으로 확인해 봅시다. 배경 <code>C0</code> 위에 알파 0.5짜리 빨강 <code>R</code>과 파랑 <code>B</code>를 얹을 때:
+  </p>
+  <ul>
+    <li><strong>빨강 먼저 → 파랑</strong>: 먼저 <code>C0·0.5 + R·0.5</code>, 그 위에 파랑을 얹으면
+        <code>(그 결과)·0.5 + B·0.5</code>. 최종에서 파랑 비중이 크고 빨강은 절반으로 눌립니다.</li>
+    <li><strong>파랑 먼저 → 빨강</strong>: 반대로 빨강 비중이 커집니다.</li>
+  </ul>
+  <p>
+    현실에서 "빛이 물체를 통과하는" 물리적으로 올바른 순서는 <strong>가장 먼 것부터 가까운 것으로
+    (back-to-front)</strong>입니다. 배경 → 먼 유리 → 가까운 유리 순으로 얹어야, 각 유리가
+    "자기 뒤에 이미 완성된 색" 위에 자기 색을 올바른 비율로 덧칠하게 됩니다. 그래서
+    <strong>반투명은 카메라에서 먼 것부터 정렬해서 그려야</strong> 합니다.
+  </p>
+
+  <!-- ================================================================= -->
+  <h2 id="two-pass">3. 2패스 렌더링 파이프라인</h2>
+  <p>
+    앞의 두 제약을 동시에 만족시키는 표준 전략이 <strong>2패스 + 정렬</strong>입니다.
+    큰 그림은 이렇습니다.
+  </p>
+  <ol class="steps">
+    <li><strong>불투명 패스</strong>: 깊이 쓰기 ON, 블렌딩 OFF. 순서는 상관없이 다 그립니다
+        (깊이 테스트가 알아서 가림을 처리하고, 오히려 앞→뒤로 그리면 early-Z로 더 빠릅니다).</li>
+    <li>반투명 물체만 골라 카메라 거리로 <strong>정렬(먼 것 먼저)</strong>합니다.</li>
+    <li><strong>반투명 패스</strong>: 깊이 <em>테스트</em>는 유지하되 깊이 <em>쓰기</em>는 끈
+        (<code>DepthWriteMask = ZERO</code>) 깊이-스텐실 스테이트로, 블렌딩 ON으로 정렬된 순서대로 그립니다.</li>
+  </ol>
+  <p>
+    핵심은 <strong>불투명 패스가 깊이 버퍼를 먼저 채워둔다</strong>는 점입니다. 그러면 반투명 패스는
+    그 깊이를 <em>읽어서(테스트)</em> 불투명 물체 뒤에 있는 유리 픽셀은 자동으로 폐기하되,
+    <em>쓰지는 않아서(no-write)</em> 반투명끼리는 서로를 지우지 않습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>two_pass_transparency.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;algorithm&gt;
+#include &lt;vector&gt;
+#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+using Microsoft::WRL::ComPtr;
+
+struct Renderable {
+    XMFLOAT3 position;
+    bool     transparent;
+    // ... 메시 핸들, 머티리얼 등
+};
+
+// 미리 만들어 둔 스테이트들:
+//   dssWrite  : DepthEnable=TRUE,  DepthWriteMask=ALL   (불투명)
+//   dssNoWrite: DepthEnable=TRUE,  DepthWriteMask=ZERO  (반투명, 테스트만)
+//   alphaBlend: 위의 blend_setup.cpp 에서 만든 알파 오버 블렌드 스테이트
+void renderScene(std::vector&lt;Renderable&gt;&amp; objects, XMFLOAT3 camPos) {
+    // ── 패스 1: 불투명 (깊이 쓰기 ON, 블렌딩 OFF) ──
+    context-&gt;OMSetDepthStencilState(dssWrite.Get(), 0);
+    context-&gt;OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);   // 블렌딩 OFF
+    for (auto&amp; o : objects)
+        if (!o.transparent) drawObject(o);
+
+    // ── 반투명만 골라 카메라 거리 제곱으로 정렬 (먼 것 → 가까운 것) ──
+    std::vector&lt;Renderable*&gt; blended;
+    for (auto&amp; o : objects)
+        if (o.transparent) blended.push_back(&amp;o);
+
+    XMVECTOR cam = XMLoadFloat3(&amp;camPos);
+    auto dist2 = [&amp;](const Renderable* o) {
+        XMVECTOR d = XMVectorSubtract(XMLoadFloat3(&amp;o-&gt;position), cam);
+        return XMVectorGetX(XMVector3LengthSq(d));
+    };
+    std::sort(blended.begin(), blended.end(),
+        [&amp;](const Renderable* a, const Renderable* b) {
+            return dist2(a) &gt; dist2(b);   // 거리 큰 것이 앞에 오도록 (먼저 그림)
+        });
+
+    // ── 패스 2: 반투명 (깊이 쓰기 OFF, 블렌딩 ON) ──
+    context-&gt;OMSetBlendState(alphaBlend.Get(), nullptr, 0xFFFFFFFF);
+    context-&gt;OMSetDepthStencilState(dssNoWrite.Get(), 0);   // 깊이 쓰기만 끔
+    for (Renderable* o : blended)
+        drawObject(*o);
+    context-&gt;OMSetDepthStencilState(dssWrite.Get(), 0);     // 다음 프레임 위해 원상복구
+    context-&gt;OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+}</code></pre>
+  </div>
+
+  <h3>3-1. 데이터 구조와 시그니처</h3>
+
+  <h4><code>struct Renderable { XMFLOAT3 position; bool transparent; ... };</code></h4>
+  <p>
+    한 개의 그릴 대상을 표현하는 최소 구조체입니다. <code>position</code>은
+    <strong><code>XMFLOAT3</code></strong> — float 3개(x,y,z)를 담는 <em>저장용</em> 타입입니다.
+    DirectXMath에는 두 종류의 벡터 타입이 있는데, <code>XMFLOAT3</code>는 메모리에 그대로 두는
+    "저장 타입"이고, 실제 <em>연산</em>은 SIMD 레지스터에 올린 <code>XMVECTOR</code>로 합니다
+    (아래 <code>XMLoadFloat3</code>에서 이 변환이 나옵니다). <code>transparent</code>는 이 물체를
+    불투명 패스에서 그릴지 반투명 패스에서 그릴지 가르는 플래그입니다.
+  </p>
+
+  <h4><code>void renderScene(std::vector&lt;Renderable&gt;&amp; objects, XMFLOAT3 camPos)</code></h4>
+  <p>
+    <strong>시그니처 해부</strong>:
+  </p>
+  <ul>
+    <li><code>std::vector&lt;Renderable&gt;&amp; objects</code> — 씬의 모든 물체 목록을
+        <strong>참조(&amp;)</strong>로 받습니다. 참조로 받는 이유는 벡터 전체를 <em>복사하지 않기</em>
+        위해서입니다(수백~수천 개일 수 있음). <code>const</code>를 안 붙인 건 아래에서
+        <code>o.position</code>의 <em>주소</em>(<code>&amp;o.position</code>)를 정렬용 포인터로 담기 때문에,
+        비-const 참조가 필요하기 때문입니다.</li>
+    <li><code>XMFLOAT3 camPos</code> — 카메라 월드 좌표입니다. float 3개짜리 작은 값이라
+        <em>값 복사</em>로 받아도 부담이 없습니다.</li>
+    <li>반환 <code>void</code> — 즉시 컨텍스트에 드로우 명령을 쏘므로 돌려줄 값이 없습니다.</li>
+  </ul>
+
+  <h3>3-2. 패스 1 — 불투명</h3>
+  <div class="code">
+    <div class="code-head"><span>패스 1 발췌</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">context-&gt;OMSetDepthStencilState(dssWrite.Get(), 0);
+context-&gt;OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);   // 블렌딩 OFF
+for (auto&amp; o : objects)
+    if (!o.transparent) drawObject(o);</code></pre>
+  </div>
+  <p>
+    <strong><code>OMSetDepthStencilState(dssWrite.Get(), 0)</code></strong> — 깊이 <em>쓰기까지 ON</em>인
+    스테이트(<code>DepthEnable=TRUE, DepthWriteMask=ALL</code>)를 겁니다. 둘째 인자 <code>0</code>은
+    <strong>스텐실 레퍼런스 값</strong>으로, 스텐실을 안 쓰면 아무 값이나 무방합니다.
+  </p>
+  <p>
+    <strong><code>OMSetBlendState(nullptr, ...)</code></strong> — 첫 인자 <code>nullptr</code>이
+    "블렌딩 없음"을 의미합니다. 불투명은 섞을 필요 없이 <em>그냥 덮어쓰기</em>가 맞습니다.
+  </p>
+  <p>
+    <strong><code>for (auto&amp; o : objects) if (!o.transparent) drawObject(o);</code></strong> —
+    <code>auto&amp; o</code>는 각 원소를 <em>복사 없이 참조</em>로 순회하는 범위 기반 for입니다.
+    <code>!o.transparent</code> 즉 <em>불투명만</em> 그립니다. 여기서는 정렬을 전혀 안 합니다 —
+    깊이 테스트가 가림을 알아서 처리하기 때문입니다.
+  </p>
+
+  <h3>3-3. 반투명 골라내기와 정렬</h3>
+  <div class="code">
+    <div class="code-head"><span>정렬 발췌</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">std::vector&lt;Renderable*&gt; blended;
+for (auto&amp; o : objects)
+    if (o.transparent) blended.push_back(&amp;o);
+
+XMVECTOR cam = XMLoadFloat3(&amp;camPos);
+auto dist2 = [&amp;](const Renderable* o) {
+    XMVECTOR d = XMVectorSubtract(XMLoadFloat3(&amp;o-&gt;position), cam);
+    return XMVectorGetX(XMVector3LengthSq(d));
+};
+std::sort(blended.begin(), blended.end(),
+    [&amp;](const Renderable* a, const Renderable* b) {
+        return dist2(a) &gt; dist2(b);   // 거리 큰 것이 앞에 오도록 (먼저 그림)
+    });</code></pre>
+  </div>
+
+  <h4>포인터 벡터로 모으기</h4>
+  <p>
+    <code>std::vector&lt;Renderable*&gt; blended;</code> — 반투명 물체들을 <strong>포인터</strong>로 모읍니다.
+    구조체 전체를 복사하지 않고 주소만 담아 정렬 비용을 줄입니다. <code>blended.push_back(&amp;o)</code>에서
+    <code>&amp;o</code>가 원본 물체의 주소입니다(그래서 <code>objects</code>가 비-const 참조여야 했습니다).
+  </p>
+
+  <h4><code>XMVECTOR cam = XMLoadFloat3(&amp;camPos);</code></h4>
+  <p>
+    저장 타입 <code>XMFLOAT3</code>를 SIMD 연산 타입 <code>XMVECTOR</code>로 <strong>로드</strong>합니다.
+    <code>XMLoadFloat3</code>는 인자로 <code>XMFLOAT3*</code>(주소)를 받으므로 <code>&amp;camPos</code>를 넘깁니다.
+    카메라 위치는 루프에서 매번 같으니 <em>루프 밖에서 한 번만</em> 로드해 두는 게 효율적입니다.
+  </p>
+
+  <h4><code>dist2</code> 람다 — 카메라까지 거리의 제곱</h4>
+  <p>
+    <code>auto dist2 = [&amp;](const Renderable* o) { ... };</code>는 <strong>람다(익명 함수)</strong>입니다.
+    <code>[&amp;]</code>는 <strong>참조 캡처</strong>로, 바깥의 <code>cam</code>을 복사 없이 그대로 씁니다.
+    내부 계산을 한 줄씩 봅시다.
+  </p>
+  <ol class="steps">
+    <li><code>XMLoadFloat3(&amp;o-&gt;position)</code> — 물체 위치를 <code>XMVECTOR</code>로 로드.</li>
+    <li><code>XMVectorSubtract(위치, cam)</code> — <strong>차 벡터</strong>
+        <code>d = position − cam</code>. 카메라에서 물체로 향하는 방향과 거리를 담습니다.</li>
+    <li><code>XMVector3LengthSq(d)</code> — <strong>길이의 제곱</strong>
+        <code>d·d = dₓ² + dᵧ² + d_z²</code>. 결과는 4채널에 같은 값이 복제된 <code>XMVECTOR</code>입니다.</li>
+    <li><code>XMVectorGetX(...)</code> — 그 중 x 성분(스칼라)만 꺼냅니다.</li>
+  </ol>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    거리 <em>제곱</em>을 쓰는 이유가 핵심입니다. 정렬은 크기 <em>비교</em>만 하면 되는데,
+    <code>a &gt; b ⟺ a² &gt; b²</code>(둘 다 음수 아님)이므로 굳이 <code>sqrt</code>를 부를 필요가 없습니다.
+    <code>sqrt</code>는 비싼 연산이라, 수천 개 물체를 <code>O(n log n)</code>번 비교하는 정렬에서
+    제곱근을 빼면 눈에 띄게 빨라집니다. <strong>거리 비교엔 항상 <code>LengthSq</code></strong>를 기억하세요.
+  </div>
+
+  <h4><code>std::sort(..., 비교람다)</code></h4>
+  <p>
+    <code>std::sort</code>는 <code>[first, last)</code> 구간을 정렬합니다. 셋째 인자인 비교 함수
+    <code>[&amp;](const Renderable* a, const Renderable* b){ return dist2(a) &gt; dist2(b); }</code>는
+    "<code>a</code>가 <code>b</code>보다 <em>앞에 와야 하면 true</em>"를 반환합니다.
+    여기서는 <code>dist2(a) &gt; dist2(b)</code> — 즉 <strong>거리가 더 큰 것(먼 것)이 앞</strong>에 오도록
+    <em>내림차순</em>으로 정렬합니다. 그래서 배열 앞쪽=먼 물체, 뒤쪽=가까운 물체가 되고,
+    앞에서부터 그리면 자연히 <strong>back-to-front</strong>가 됩니다.
+  </p>
+  <p>
+    <strong>손계산 예제</strong>: 카메라가 원점 <code>(0,0,0)</code>이고 두 유리가
+    A=<code>(0,0,3)</code>, B=<code>(0,0,5)</code>라 합시다.
+    <code>dist2(A)=0+0+9=9</code>, <code>dist2(B)=25</code>. <code>25 &gt; 9</code>이므로 B가 A보다 앞에 정렬됩니다.
+    그리는 순서는 B(먼 것) → A(가까운 것). 카메라 기준 뒤에 있는 B가 먼저 그려지니 정확히 back-to-front입니다.
+  </p>
+
+  <h3>3-4. 패스 2 — 반투명</h3>
+  <div class="code">
+    <div class="code-head"><span>패스 2 발췌</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">context-&gt;OMSetBlendState(alphaBlend.Get(), nullptr, 0xFFFFFFFF);
+context-&gt;OMSetDepthStencilState(dssNoWrite.Get(), 0);   // 깊이 쓰기만 끔
+for (Renderable* o : blended)
+    drawObject(*o);
+context-&gt;OMSetDepthStencilState(dssWrite.Get(), 0);     // 다음 프레임 위해 원상복구
+context-&gt;OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);</code></pre>
+  </div>
+  <p>
+    <strong><code>OMSetBlendState(alphaBlend.Get(), ...)</code></strong> — 1절에서 만든 알파 오버
+    스테이트를 켭니다. 이제부터 그려지는 픽셀은 목적지와 섞입니다.
+  </p>
+  <p>
+    <strong><code>OMSetDepthStencilState(dssNoWrite.Get(), 0)</code></strong> — 이 스테이트의 핵심은
+    <code>DepthEnable=TRUE</code>(테스트는 함) + <code>DepthWriteMask=ZERO</code>(쓰지는 않음)입니다.
+    덕분에 불투명 물체 뒤의 유리 픽셀은 <em>테스트</em>로 폐기되지만, 통과한 유리는 깊이를 <em>쓰지 않아</em>
+    다음 유리를 가리지 않습니다. 정렬된 순서대로 겹겹이 올바르게 섞입니다.
+  </p>
+  <p>
+    <strong><code>for (Renderable* o : blended) drawObject(*o);</code></strong> — 포인터 벡터를
+    순회하며 역참조(<code>*o</code>)해서 그립니다. 배열이 이미 <em>먼 것 → 가까운 것</em>으로 정렬돼 있으니
+    이 루프가 곧 back-to-front 드로우입니다.
+  </p>
+  <p>
+    마지막 두 줄 <strong>원상복구</strong>가 매우 중요합니다. <code>dssWrite</code>(쓰기 ON)와
+    <code>nullptr</code>(블렌딩 OFF)로 되돌려, <em>다음 프레임</em>의 불투명 패스가 정상 상태에서 시작하게 합니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    반투명 패스에서 <code>DepthWriteMask = ZERO</code>로 <em>쓰기만</em> 끄고 <code>DepthEnable</code>은
+    반드시 <em>TRUE로 켜둬야</em> 합니다. 테스트까지 꺼버리면 불투명 물체 <em>뒤</em>에 있어야 할 유리가
+    앞에 그려집니다. 그리고 루프가 끝나면 반드시 쓰기 ON 스테이트로 되돌리세요 —
+    안 그러면 다음 프레임의 불투명 물체가 깊이를 못 써서 깊이 버퍼가 망가집니다.
+  </div>
+
+  <h3>3-5. 깊이-스텐실 스테이트는 어떻게 만드나 (참고)</h3>
+  <p>
+    본문 코드는 <code>dssWrite</code>/<code>dssNoWrite</code>가 "미리 만들어져 있다"고 전제했습니다.
+    실제로는 블렌드 스테이트처럼 초기화 때 한 번 만들어 둡니다. 두 스테이트의 차이는
+    <code>DepthWriteMask</code> 한 줄뿐입니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>depth_states.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">ComPtr&lt;ID3D11DepthStencilState&gt; dssWrite, dssNoWrite;
+
+D3D11_DEPTH_STENCIL_DESC dd = {};
+dd.DepthEnable    = TRUE;                          // 깊이 테스트 ON
+dd.DepthFunc      = D3D11_COMPARISON_LESS;         // 더 가까우면 통과 (z 작을수록 가까움)
+
+dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;    // 불투명: 깊이 쓰기 ON
+device-&gt;CreateDepthStencilState(&amp;dd, &amp;dssWrite);
+
+dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;   // 반투명: 테스트만, 쓰기 OFF
+device-&gt;CreateDepthStencilState(&amp;dd, &amp;dssNoWrite);</code></pre>
+  </div>
+  <p>
+    <code>DepthFunc = D3D11_COMPARISON_LESS</code>는 "새 깊이가 저장된 깊이보다 <em>작으면</em>(더 가까우면)
+    통과"를 뜻합니다. D3D의 클립 z가 <strong>[0,1]</strong>이고 0이 근평면·1이 원평면이므로
+    "z가 작다 = 카메라에 가깝다"가 되어 <code>LESS</code>가 올바른 선택입니다.
+    두 스테이트는 <code>DepthWriteMask</code>만 <code>ALL</code>↔<code>ZERO</code>로 다릅니다.
+  </p>
+
+  <!-- ================================================================= -->
+  <h2 id="limits">4. 한계와 OIT</h2>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    정렬은 <strong>오브젝트 단위</strong>라, <strong>서로 관통하는 반투명 메시</strong>나
+    <em>자기 자신이 겹치는</em> 메시(예: 반투명 구·나뭇잎 뭉치)에서는 여전히 틀립니다.
+    오브젝트 하나의 중심 거리로는 그 안에서 어느 삼각형이 앞/뒤인지 결정할 수 없기 때문입니다.
+  </div>
+  <p>
+    이 문제를 <strong>순서에 무관하게</strong> 푸는 기법이 <strong>OIT(Order-Independent
+    Transparency)</strong>입니다. 실무에서 가장 흔한 <strong>Weighted Blended OIT</strong>는
+    각 반투명 픽셀의 색을 <em>깊이 기반 가중치</em>로 곱해 누적 버퍼에 더하고, 별도 버퍼에
+    커버리지(가중치 합)를 모은 뒤, 마지막에 <em>색 합 ÷ 가중치 합</em>으로 나눠 근사합니다.
+    정렬이 전혀 필요 없어 대량의 파티클·연기·식생에 특히 유용합니다(대신 물리적으로 정확하진 않고 근사입니다).
+  </p>
+  <table class="impl">
+    <tr><th>기법</th><th>정렬 필요?</th><th>정확도</th><th>적합한 곳</th></tr>
+    <tr><td>2패스 + 정렬 (이 페이지)</td><td>필요 (오브젝트 단위)</td><td>오브젝트 간 정확, 내부 교차 부정확</td><td>유리창·소수의 큰 반투명 물체</td></tr>
+    <tr><td>Weighted Blended OIT</td><td>불필요</td><td>근사 (겹침 많으면 흐릿)</td><td>대량 파티클·연기·식생</td></tr>
+    <tr><td>Depth Peeling</td><td>불필요</td><td>정확 (레이어 수만큼)</td><td>정확도 우선·오프라인/여유 있는 씬</td></tr>
+  </table>
+  <p>
+    실무 팁: 대부분의 게임은 "큰 반투명(유리·물)은 2패스+정렬, 자잘한 반투명(파티클)은 additive 블렌딩 또는
+    Weighted OIT"로 <strong>혼합</strong>합니다. additive(<code>SrcBlend=ONE, DestBlend=ONE</code>)는
+    덧셈이라 순서 무관하고 불꽃·글로우처럼 <em>밝아지기만 하는</em> 효과에 자연스럽습니다.
+  </p>
+
+  <!-- ================================================================= -->
+  <h2 id="api-map">5. DirectXMath / D3D11 API 대응 정리</h2>
+  <table class="impl">
+    <tr><th>이 페이지 코드</th><th>역할</th><th>대응 개념/수식</th></tr>
+    <tr><td><code>XMLoadFloat3(&amp;v)</code></td><td>저장 타입 → SIMD 벡터 로드</td><td><code>XMFLOAT3</code> → <code>XMVECTOR</code></td></tr>
+    <tr><td><code>XMVectorSubtract(a,b)</code></td><td>벡터 차</td><td><code>d = a − b</code></td></tr>
+    <tr><td><code>XMVector3LengthSq(d)</code></td><td>길이 제곱</td><td><code>dₓ²+dᵧ²+d_z²</code></td></tr>
+    <tr><td><code>XMVectorGetX(v)</code></td><td>x 성분 스칼라 추출</td><td>4채널 중 하나 꺼내기</td></tr>
+    <tr><td><code>CreateBlendState</code></td><td>알파 오버 스테이트 생성</td><td><code>src·α + dst·(1−α)</code></td></tr>
+    <tr><td><code>OMSetBlendState</code></td><td>블렌딩 켜기/끄기</td><td>Output Merger 단계</td></tr>
+    <tr><td><code>OMSetDepthStencilState</code></td><td>깊이 테스트/쓰기 전환</td><td>write ALL ↔ ZERO</td></tr>
+  </table>
+  <p>
+    정리하면, <strong>투명은 "블렌드 공식(무엇을 섞나) + 깊이 쓰기 제어(무엇을 남기나) + 정렬(어떤 순서로 섞나)"</strong>
+    세 축의 협업입니다. 세 가지 중 하나라도 어긋나면 유리가 검게 뜨거나, 뒤 물체가 사라지거나,
+    겹친 색이 이상해집니다. 이 페이지의 2패스 파이프라인은 그 세 축을 가장 단순하고 정확하게 묶는 표준 레시피입니다.
+  </p>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./07-mipmap.html">← 밉맵 · 텍스처 필터링</a>
+    <a href="./07-ao.html">앰비언트 오클루전 (Ambient Occlusion) →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

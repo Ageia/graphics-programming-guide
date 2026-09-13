@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 물리 기반 렌더링 (PBR) — C++/DirectX 11</title>
+<meta name="description" content="Cook-Torrance BRDF(D·G·F)를 HLSL로 한 줄씩 해부하며 직접 구현하는 물리 기반 렌더링 가이드. 미세면 이론·에너지 보존·프레넬을 입문자 눈높이로 설명." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">물리 기반 렌더링 (PBR)</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6</span>
+  <h1>물리 기반 렌더링 (PBR) — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    퐁/블린-퐁 조명은 "예뻐 보이도록" 손으로 계수를 튜닝하는 모델입니다. 광원 세기나 재질을 바꾸면
+    또 튜닝해야 하고, 서로 다른 조명 환경에서 같은 재질이 다르게 보입니다. <strong>PBR(Physically Based
+    Rendering)</strong>은 이 문제를 정면으로 해결합니다. 빛이 표면과 상호작용하는 방식을 <strong>에너지 보존</strong>과
+    <strong>미세면(microfacet) 이론</strong>이라는 물리 법칙으로 기술하기 때문에, 재질을 <strong>albedo(기본색) ·
+    metallic(금속성) · roughness(거칠기)</strong> 세 값으로만 표현해도 어떤 조명에서든 일관되게 사실적입니다.
+    이 페이지에서는 실시간 표준인 <strong>Cook-Torrance BRDF</strong>를 HLSL 픽셀 셰이더로 한 줄씩 뜯어보며,
+    수식이 왜 그렇게 생겼는지 · 각 항이 기하학적으로 무엇을 뜻하는지 · 코드의 어느 부분에 대응하는지를
+    입문자 눈높이로 끝까지 설명합니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <!-- 0. 큰 그림 -->
+  <!-- ============================================================ -->
+  <h2>0. 왜 PBR인가 — 반사 방정식과 BRDF</h2>
+  <p>
+    코드에 들어가기 전에, 우리가 셰이더에서 결국 무엇을 <em>계산</em>하려는지 한 줄로 정리하겠습니다. 렌더링의
+    근본 질문은 이것입니다: <strong>"이 표면 점에서, 카메라 방향으로 나가는 빛(복사휘도)은 얼마인가?"</strong>
+    이를 수학으로 적은 것이 <strong>반사 방정식(reflectance equation)</strong>입니다.
+  </p>
+  <p style="text-align:center; color:var(--text-dim);">
+    <code>L<sub>o</sub>(V) = ∫<sub>Ω</sub> f(L, V) · L<sub>i</sub>(L) · (N·L) dω<sub>L</sub></code>
+  </p>
+  <p>
+    말로 풀면: 점을 덮은 반구(Ω) 위 <strong>모든 입사 방향 L</strong>에 대해, 그 방향에서 들어온 빛
+    <code>L<sub>i</sub></code>에 <strong>BRDF <code>f</code></strong>(그 빛이 시선 방향 V로 얼마나 튕겨나가는지의 비율)와
+    <strong>람베르트 코사인 항 <code>N·L</code></strong>(비스듬히 들어온 빛은 단위 면적당 세기가 줄어듦)을 곱해
+    전부 더한(적분한) 것이 나가는 빛 <code>L<sub>o</sub></code>라는 뜻입니다.
+  </p>
+  <ol class="steps">
+    <li><strong>점광원 근사</strong>: 실시간에서는 반구 전체를 적분하지 못하므로, 광원을 몇 개의 <em>점</em>으로 보고
+      적분(∫)을 합(Σ)으로 바꿉니다. 코드의 <code>for</code> 루프가 바로 이 Σ입니다.</li>
+    <li><strong>BRDF <code>f</code> 를 물리적으로 만든다</strong>: 이것이 PBR의 핵심입니다. Cook-Torrance는
+      <code>f</code>를 <strong>확산(diffuse)</strong> 항과 <strong>정반사(specular)</strong> 항의 합으로 씁니다.</li>
+    <li style="list-style:none; margin-left:0;">
+      <p style="text-align:center; color:var(--text-dim);">
+        <code>f = k<sub>d</sub>·(albedo/π)  +  (D·G·F) / (4·(N·V)·(N·L))</code>
+      </p>
+    </li>
+    <li><strong>D — 법선 분포(GGX/Trowbridge-Reitz)</strong>: 표면을 이루는 무수히 작은 거울(미세면) 중, 하필
+      하프벡터 H 방향으로 정렬되어 시선으로 빛을 정확히 튕겨줄 미세면의 비율. roughness가 작을수록 좁고
+      강렬한 하이라이트가 됩니다.</li>
+    <li><strong>G — 기하 감쇠(Smith + Schlick-GGX)</strong>: 미세면들이 서로를 가려(masking) 빛을 못 받거나,
+      반사된 빛이 옆 봉우리에 막혀(shadowing) 시선까지 못 오는 손실.</li>
+    <li><strong>F — 프레넬(Schlick 근사)</strong>: 표면을 스치듯 비스듬히 볼수록 반사율이 급격히 커지는 현상.
+      정면에서의 기본 반사율 <code>F0</code>에서 출발해 스침각에서 1(완전 반사)로 향합니다.</li>
+    <li><strong>금속-거칠기 워크플로 + 에너지 보존</strong>: 비금속은 <code>F0=0.04</code>로 고정, 금속은 albedo가
+      곧 <code>F0</code>. 그리고 정반사로 튕겨나간 에너지만큼 확산광을 줄여(<code>kd = (1-F)(1-metallic)</code>) 총
+      에너지가 입사량을 넘지 않게 합니다.</li>
+  </ol>
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 페이지의 모든 벡터·행렬은 이 사이트 공통 규약을 따릅니다: <strong>행벡터 <code>v' = v*M</code></strong>
+    (HLSL <code>mul(v, M)</code>), 행 우선 저장, <strong>왼손 좌표계</strong>, 클립 공간 z 범위 <code>[0,1]</code>,
+    텍스처 V축 위→아래. 실무에서는 검증된 라이브러리(DirectXMath 등)를 쓰는 것을 권장하며, 이 페이지의
+    직접 구현은 <em>원리를 손으로 따라가 보기 위한 학습용</em>입니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 1. 상수 버퍼와 입력 -->
+  <!-- ============================================================ -->
+  <h2>1. 셰이더 입력 — 보간값과 상수 버퍼</h2>
+  <p>
+    픽셀 셰이더가 조명을 계산하려면 세 가지가 필요합니다. (1) 지금 이 픽셀이 <em>어디</em>에 있는지(월드 좌표),
+    (2) 표면이 <em>어느 쪽</em>을 향하는지(법선), (3) <em>재질과 광원</em>이 무엇인지. 앞의 둘은 정점 셰이더가
+    래스터라이저를 거쳐 <strong>보간</strong>해 넘겨주고, 셋째는 <strong>상수 버퍼</strong>로 CPU에서 업로드합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>pbr.hlsl — 입력 구조체와 상수 버퍼</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 정점 셰이더에서 넘어온 보간값
+struct PSIn {
+    float4 posH     : SV_Position;
+    float3 worldPos : WORLDPOS;   // 월드 좌표
+    float3 normal   : NORMAL;     // 월드 공간 법선
+    float2 uv       : TEXCOORD0;
+};
+
+// --- 프레임/재질 상수 버퍼 ---
+#define NR_LIGHTS 4
+cbuffer PBRConstants : register(b0) {
+    float3 camPos;      float _pad0;
+    float3 albedo;      float metallic;   // 재질 (텍스처 대신 균일값으로 단순화)
+    float  roughness;   float ao;         float2 _pad1;
+    float4 lightPositions[NR_LIGHTS];     // 점광원 배열 (.xyz 사용)
+    float4 lightColors[NR_LIGHTS];
+};
+
+static const float PI = 3.14159265359;</code></pre>
+  </div>
+
+  <h3>1-1. <code>PSIn</code> 구조체 — 픽셀마다 보간되어 도착하는 값들</h3>
+  <p>
+    <code>struct PSIn</code>은 정점 셰이더의 출력이자 픽셀 셰이더의 입력입니다. 각 멤버 뒤의
+    <code>: SV_Position</code>, <code>: NORMAL</code> 같은 것을 <strong>시맨틱(semantic)</strong>이라고 부릅니다.
+    시맨틱은 "이 데이터가 파이프라인에서 무슨 역할인지"를 GPU에 알려주는 이름표입니다.
+  </p>
+  <ul>
+    <li><code>float4 posH : SV_Position</code> — <strong>SV_</strong>는 "system value"의 약자로, GPU가 특별하게
+      다루는 시맨틱입니다. <code>SV_Position</code>은 클립→스크린 변환이 끝난 <em>화면 픽셀 좌표</em>라서,
+      래스터라이저가 어느 픽셀을 칠할지 결정하는 데 씁니다. 픽셀 셰이더 안에서는 보통 직접 쓰지 않습니다.</li>
+    <li><code>float3 worldPos : WORLDPOS</code> — 이 픽셀에 대응하는 표면 점의 <strong>월드 좌표</strong>입니다.
+      광원과의 거리·방향을 재려면 반드시 광원과 <em>같은 좌표계</em>에 있어야 하므로 월드 공간으로 넘깁니다.
+      <code>WORLDPOS</code>는 사용자 정의 시맨틱이라 이름은 자유이며, 정점 셰이더 출력과 철자만 맞으면 됩니다.</li>
+    <li><code>float3 normal : NORMAL</code> — <strong>월드 공간 법선</strong>. 표면이 향하는 방향입니다. 뒤에서
+      <code>normalize</code>하는 이유는, 세 정점의 법선을 픽셀 위치에 맞춰 선형 보간하면 <em>길이가 1이 아니게</em>
+      되기 때문입니다(단위벡터 두 개를 섞으면 대개 짧아집니다).</li>
+    <li><code>float2 uv : TEXCOORD0</code> — 텍스처 좌표. 이 예제는 재질을 균일값으로 단순화해 실제로 쓰진
+      않지만, 실무에서 albedo/normal/roughness 맵을 샘플할 때 필요합니다.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">직관</span>
+    보간이 무엇인지 한 장면으로: 삼각형의 세 꼭짓점에만 값(예: 법선)이 정해져 있고, 그 안쪽 수천 개 픽셀의
+    값은 세 꼭짓점 값을 <em>무게중심 좌표(barycentric)</em>로 섞어 만듭니다. 그래서 곡면처럼 매끄러운 음영이
+    나옵니다. 이 "섞기"가 길이를 망가뜨리므로 법선은 픽셀 셰이더에서 다시 정규화해야 하는 것입니다.
+  </div>
+
+  <h3>1-2. <code>cbuffer</code> — 16바이트 정렬과 패딩의 정체</h3>
+  <p>
+    <code>cbuffer PBRConstants : register(b0)</code>는 상수 버퍼입니다. C++ 쪽에서 <code>b0</code> 슬롯에 바인딩한
+    구조체가 여기로 들어옵니다. 여기서 입문자가 가장 헷갈리는 것이 중간중간 끼어 있는 <code>_pad0</code>,
+    <code>_pad1</code> 같은 <strong>패딩 변수</strong>입니다.
+  </p>
+  <p>
+    HLSL 상수 버퍼에는 엄격한 규칙이 하나 있습니다: <strong>어떤 변수도 16바이트(<code>float4</code> 하나 크기)
+    경계를 걸쳐서는 안 된다</strong>는 것입니다. GPU는 상수를 16바이트짜리 레지스터 단위로 읽기 때문입니다.
+    한 줄씩 배치를 따라가 봅시다(각 칸 = 4바이트 = <code>float</code> 하나):
+  </p>
+  <table class="impl">
+    <thead><tr><th>16바이트 레지스터</th><th>.x</th><th>.y</th><th>.z</th><th>.w</th></tr></thead>
+    <tbody>
+      <tr><td>레지스터 0</td><td colspan="3"><code>camPos</code> (float3)</td><td><code>_pad0</code></td></tr>
+      <tr><td>레지스터 1</td><td colspan="3"><code>albedo</code> (float3)</td><td><code>metallic</code></td></tr>
+      <tr><td>레지스터 2</td><td><code>roughness</code></td><td><code>ao</code></td><td colspan="2"><code>_pad1</code> (float2)</td></tr>
+      <tr><td>레지스터 3~</td><td colspan="4"><code>lightPositions[0]</code> (float4)</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>camPos</code>는 <code>float3</code>라 12바이트를 쓰고 4바이트가 남습니다. 만약 바로 뒤에
+    <code>albedo</code>(또 float3)를 붙이면 <code>albedo</code>의 일부가 레지스터 경계를 넘어가 버립니다. 그래서
+    <code>_pad0</code>로 남은 4바이트를 채워 <code>albedo</code>가 <em>새 레지스터</em>에서 시작하게 만든 것입니다.
+    <code>metallic</code>은 마침 <code>albedo</code> 뒤 4바이트에 딱 맞아 같은 레지스터에 얹혔습니다. 이렇게
+    "float3 + float1"을 짝지어 배치하는 것이 상수 버퍼 설계의 기본기입니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    C++ 구조체와 HLSL cbuffer의 <strong>메모리 레이아웃이 한 바이트라도 어긋나면</strong> 값이 통째로 밀려서
+    엉뚱하게 읽힙니다(예: roughness 자리에 ao 값이 들어옴). C++ 쪽에서도 동일하게 패딩을 넣거나
+    <code>alignas(16)</code>·명시적 <code>float pad;</code>로 맞춰야 합니다. 배열(<code>lightPositions</code>)은 HLSL에서
+    각 원소가 <em>무조건 16바이트 정렬</em>되므로, 점광원 위치를 <code>float3</code>가 아니라 <code>float4</code>로 둔
+    것도 이 규칙을 피하려는 설계입니다.
+  </div>
+  <p>
+    <code>static const float PI = 3.14159265359;</code>는 셰이더 전역 상수입니다. <code>static const</code>이므로
+    상수 버퍼가 아니라 셰이더 코드에 <em>박제된 값</em>이라 업로드가 필요 없습니다. 뒤에서 램버트 확산
+    <code>albedo/π</code>와 GGX 분모에 등장합니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <!-- 2. D 항 -->
+  <!-- ============================================================ -->
+  <h2>2. D — 법선 분포 함수 (GGX / Trowbridge-Reitz)</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 표면을 이루는 무수한 미세거울 중, 하필 <strong>하프벡터 H</strong> 방향을
+    향하고 있어 광원 L의 빛을 정확히 시선 V로 튕겨줄 수 있는 미세면의 <em>밀도(비율)</em>를 돌려줍니다.
+    이 값이 하이라이트의 <strong>모양과 집중도</strong>를 결정합니다.
+  </p>
+  <p>
+    <strong>왜 하프벡터인가:</strong> 하나의 매끈한 거울이 L의 빛을 V로 정확히 보내려면, 그 거울의 법선이
+    반드시 L과 V의 정중앙, 즉 <code>H = normalize(L + V)</code>를 향해야 합니다(반사의 법칙). 그러니 "H를 향한
+    미세면이 얼마나 많은가"가 곧 "그 픽셀이 얼마나 밝게 반짝일 수 있는가"입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>pbr.hlsl — 법선 분포 D</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// D: GGX 법선 분포 함수. H 방향에 미세면이 얼마나 몰려있나
+float distributionGGX(float3 N, float3 H, float rough) {
+    float a  = rough * rough;          // roughness 제곱이 더 지각적으로 선형
+    float a2 = a * a;
+    float NdotH  = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
+    return a2 / max(denom, 1e-7);      // 0 나눗셈 방지
+}</code></pre>
+  </div>
+
+  <h3>2-1. 시그니처 해부</h3>
+  <p>
+    <code>float distributionGGX(float3 N, float3 H, float rough)</code> — 반환 타입이 <code>float</code> 하나인 것에
+    주목하세요. D는 방향에 따른 <em>스칼라 밀도</em>라서 색이 아니라 수 하나입니다. 인자는 모두 값 전달(HLSL은
+    벡터/스칼라를 레지스터로 넘기므로 C++처럼 참조를 쓸 필요가 없습니다). <code>N</code>은 표면 법선,
+    <code>H</code>는 하프벡터, <code>rough</code>는 <code>[0,1]</code> 거칠기입니다. 셋 다 호출부에서 이미
+    정규화된 단위벡터를 넘긴다고 가정합니다.
+  </p>
+
+  <h3>2-2. 한 줄씩: roughness를 제곱하는 이유</h3>
+  <p>
+    <code>float a = rough * rough;</code> — GGX 수식이 요구하는 거칠기 파라미터 α는 사용자가 조절하는
+    <code>roughness</code>를 그대로가 아니라 <strong>제곱해서</strong> 씁니다. 왜냐하면 슬라이더의 0→1 변화가
+    <em>눈에 보이는 하이라이트 크기</em>와 더 자연스럽게(지각적으로 선형에 가깝게) 대응하기 때문입니다.
+    roughness를 그대로 α로 쓰면 슬라이더 앞쪽에서 하이라이트가 급변해 조절이 까다롭습니다. 이 관례는
+    디즈니 원칙 BRDF 이후 사실상 업계 표준이 되었습니다.
+  </p>
+  <p>
+    <code>float a2 = a * a;</code> — 수식에 α²가 반복 등장하므로 미리 계산해 둡니다. 결국
+    <code>a2 = roughness⁴</code>입니다.
+  </p>
+
+  <h3>2-3. 수식 → 기하 직관 → 코드 매핑</h3>
+  <p>
+    GGX 법선 분포의 수학적 정의는 다음과 같습니다:
+  </p>
+  <p style="text-align:center; color:var(--text-dim);">
+    <code>D(H) = α² / ( π · ( (N·H)²·(α²−1) + 1 )² )</code>
+  </p>
+  <p><strong>기하 직관(그림글):</strong> N과 H가 완전히 같은 방향이면(정면에서 하이라이트 정중앙을 볼 때)
+    <code>N·H = 1</code>이고, 분모의 괄호가 <code>(1·(α²−1)+1)=α²</code>이 되어 <code>D = α²/(π·α⁴) = 1/(π·α²)</code>로
+    <em>최대</em>가 됩니다. α(거칠기)가 작을수록 이 최댓값이 커지죠 — 즉 매끄러운 표면은 하이라이트가 아주
+    좁고 뾰족하며 강렬합니다. 반대로 N과 H가 조금만 어긋나도(<code>N·H</code>가 1에서 떨어짐) 분모가 급격히
+    커져 D가 뚝 떨어집니다. 이 "급격히 떨어지는 정도"가 하이라이트의 가장자리 롤오프이며, GGX가 다른
+    분포보다 사랑받는 이유가 바로 이 <strong>긴 꼬리(가장자리에서 완전히 0이 되지 않고 은은히 남는)</strong>
+    특성 때문입니다.</p>
+  <p><strong>코드 매핑:</strong></p>
+  <ul>
+    <li><code>NdotH = max(dot(N, H), 0.0)</code> — 수식의 <code>N·H</code>. 두 단위벡터의 내적은 사이각의
+      코사인입니다. <code>max(...,0)</code>로 음수(뒷면 방향)를 잘라 물리적으로 말이 되게 합니다.</li>
+    <li><code>NdotH2 = NdotH * NdotH</code> — 수식의 <code>(N·H)²</code>.</li>
+    <li><code>denom = (NdotH2 * (a2 - 1.0) + 1.0)</code> — 분모 안쪽 괄호 <code>(N·H)²(α²−1)+1</code> 그대로입니다.</li>
+    <li><code>denom = PI * denom * denom</code> — 그 괄호를 <em>제곱</em>하고 π를 곱해 완전한 분모
+      <code>π·(...)²</code>를 만듭니다.</li>
+    <li><code>return a2 / max(denom, 1e-7)</code> — 분자 α²를 분모로 나눕니다.</li>
+  </ul>
+
+  <h3>2-4. 손계산 예제</h3>
+  <p>
+    roughness = 0.5라 해 봅시다. 그러면 <code>a = 0.25</code>, <code>a2 = 0.0625</code>입니다. 하이라이트 정중앙
+    (<code>N·H = 1</code>)에서:
+  </p>
+  <ul>
+    <li>괄호 = <code>1·(0.0625−1)+1 = 0.0625</code></li>
+    <li>분모 = <code>π · 0.0625² = 3.14159 · 0.003906 ≈ 0.012272</code></li>
+    <li>D = <code>0.0625 / 0.012272 ≈ 5.093</code></li>
+  </ul>
+  <p>
+    이번엔 roughness = 0.1(매끈)로 같은 정중앙을 계산하면 <code>a2 = 0.0001</code>, 분모 ≈ <code>π·0.0001² ≈
+    3.14e-8</code>, D ≈ <code>0.0001 / 3.14e-8 ≈ 3183</code>. <strong>거칠기만 0.5→0.1로 낮췄는데 정점 밝기가 약
+    5에서 3000 이상으로 폭증</strong>했습니다. 이것이 매끈한 금속의 눈부신 점 하이라이트가 나오는 수치적
+    이유입니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>max(denom, 1e-7)</code>의 작은 엡실론은 <strong>0으로 나누기</strong>를 막습니다. α가 아주 작고
+    <code>N·H</code>가 특정 값일 때 분모가 0에 가까워질 수 있는데, 이때 나눗셈이 <code>inf</code>/<code>NaN</code>을
+    내면 그 픽셀이 검게 죽거나 화면 전체 톤매핑을 오염시킬 수 있습니다. 엡실론은 "물리적으로는 무한대지만
+    화면에는 아주 밝은 유한값으로" 안전하게 클램프하는 장치입니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 3. G 항 -->
+  <!-- ============================================================ -->
+  <h2>3. G — 기하 감쇠 함수 (Smith + Schlick-GGX)</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 미세면들이 <em>서로를 가려</em> 발생하는 빛 손실 비율을 <code>[0,1]</code>로
+    돌려줍니다. 거친 표면일수록 봉우리와 골이 험해서, 빛이 골에 못 들어가거나(그림자, shadowing) 튕겨나온
+    빛이 옆 봉우리에 막혀 시선까지 못 오는(가림, masking) 일이 잦습니다. G는 이 손실을 보정해 표면이 실제보다
+    밝아지지 않게 합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>pbr.hlsl — 기하 감쇠 G</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// Schlick-GGX: 한 방향에 대한 기하 감쇠
+float geometrySchlickGGX(float NdotV, float rough) {
+    float r = rough + 1.0;
+    float k = (r * r) / 8.0;           // 직접광용 k
+    return NdotV / (NdotV * (1.0 - k) + k);
+}
+
+// Smith: 시선(V)과 광원(L) 양쪽의 가림을 곱한다
+float geometrySmith(float3 N, float3 V, float3 L, float rough) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    return geometrySchlickGGX(NdotV, rough) * geometrySchlickGGX(NdotL, rough);
+}</code></pre>
+  </div>
+
+  <h3>3-1. <code>geometrySchlickGGX</code> — 한 방향의 가림</h3>
+  <p>
+    이 함수는 <em>한 방향</em>(시선이든 광원이든)에 대한 가림 계수 하나를 계산합니다. 인자 <code>NdotV</code>는
+    그 방향과 법선의 코사인, <code>rough</code>는 거칠기입니다.
+  </p>
+  <ul>
+    <li><code>float r = rough + 1.0;</code> — 다음 줄에서 쓸 중간값입니다.</li>
+    <li><code>float k = (r * r) / 8.0;</code> — Schlick-GGX가 요구하는 재매핑 계수 k입니다.
+      <strong>직접광(점광원/방향광)</strong>에서는 <code>k = (roughness+1)²/8</code>을 씁니다. (참고: <em>IBL
+      환경광</em>에서는 <code>k = roughness²/2</code>로 다르게 씁니다. 상황에 맞는 k를 쓰지 않으면 거친 표면이
+      부자연스럽게 어두워지거나 밝아집니다.)</li>
+    <li><code>return NdotV / (NdotV * (1.0 - k) + k);</code> — Schlick-GGX 본체입니다.</li>
+  </ul>
+  <p>
+    <strong>기하 직관:</strong> <code>NdotV</code>가 1(정면에서 봄)이면 반환값은 <code>1/(1·(1−k)+k) = 1/1 = 1</code>,
+    즉 가림이 전혀 없습니다. 정면에서는 골 속까지 다 보이니까요. 반대로 <code>NdotV</code>가 0에 가까우면
+    (거의 스치듯 봄) 반환값이 <code>0/(0+k) = 0</code>으로 떨어져 거의 다 가려집니다 — 스침각에서는 봉우리
+    뒤가 안 보이니 당연합니다. k가 클수록(거칠수록) 이 감쇠가 더 이른 각도에서 시작됩니다.
+  </p>
+
+  <h3>3-2. <code>geometrySmith</code> — 왜 두 번 곱하나</h3>
+  <p>
+    빛이 눈에 도달하려면 <strong>두 관문</strong>을 통과해야 합니다. (1) 광원 L에서 미세면까지 <em>들어오는</em>
+    길에 가림이 없어야 하고(shadowing), (2) 미세면에서 시선 V까지 <em>나가는</em> 길에도 가림이 없어야 합니다
+    (masking). Smith 근사는 이 두 확률이 독립이라고 가정하고 <strong>곱</strong>합니다:
+  </p>
+  <p style="text-align:center; color:var(--text-dim);">
+    <code>G = G<sub>1</sub>(N·V) · G<sub>1</sub>(N·L)</code>
+  </p>
+  <ul>
+    <li><code>NdotV = max(dot(N, V), 0.0)</code> — 시선 쪽 코사인(가림/masking 담당).</li>
+    <li><code>NdotL = max(dot(N, L), 0.0)</code> — 광원 쪽 코사인(그림자/shadowing 담당).</li>
+    <li>둘 각각에 <code>geometrySchlickGGX</code>를 적용해 <strong>곱</strong>합니다.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">직관</span>
+    G가 <code>[0,1]</code>인 이유: 각 G₁이 확률처럼 0~1이고, 두 확률의 곱도 0~1이기 때문입니다. G=1은 "아무것도
+    안 가려짐", G=0은 "완전히 가려짐"을 뜻합니다. 스페큘러가 스침각에서 너무 밝아지는 것을 막는 게 G의
+    실질적 역할입니다(D만 있으면 가장자리가 과하게 타버립니다).
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 4. F 항 -->
+  <!-- ============================================================ -->
+  <h2>4. F — 프레넬 (Schlick 근사)</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 표면을 <em>바라보는 각도</em>에 따라 정반사율이 얼마인지를 <strong>RGB
+    3채널</strong>로 돌려줍니다. 잔잔한 호수를 정면 위에서 보면 바닥이 비치지만(반사 약함), 멀리 수평선
+    쪽으로 스치듯 보면 거울처럼 하늘이 반사되는(반사 강함) 현상 — 그것이 프레넬 효과입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>pbr.hlsl — 프레넬 F</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// F: 프레넬 Schlick 근사. 스치는 각도일수록 반사율 상승
+float3 fresnelSchlick(float cosTheta, float3 F0) {
+    return F0 + (1.0 - F0) * pow(saturate(1.0 - cosTheta), 5.0);
+}</code></pre>
+  </div>
+
+  <h3>4-1. 시그니처 — 왜 반환이 <code>float3</code>인가</h3>
+  <p>
+    반환 타입이 <code>float3</code>인 것이 핵심입니다. 금속은 파장(색)마다 반사율이 다릅니다 — 금이
+    노랗게, 구리가 붉게 반짝이는 이유죠. 그래서 반사율은 스칼라 하나가 아니라 RGB 세 값(<code>F0</code>가
+    <code>float3</code>)이며, 결과 F도 <code>float3</code>입니다. 인자 <code>cosTheta</code>는 보통 <code>H·V</code>
+    (하프벡터와 시선의 코사인), <code>F0</code>는 <strong>정면에서의 기본 반사율</strong>입니다.
+  </p>
+
+  <h3>4-2. 수식 → 직관 → 코드</h3>
+  <p style="text-align:center; color:var(--text-dim);">
+    <code>F(θ) = F0 + (1 − F0)·(1 − cosθ)⁵</code>
+  </p>
+  <p><strong>기하 직관:</strong> 정면(<code>cosθ = 1</code>)이면 <code>(1−1)⁵ = 0</code>이라 <code>F = F0</code> —
+    기본 반사율만 나옵니다. 스침각(<code>cosθ → 0</code>)이면 <code>(1−0)⁵ = 1</code>이라 <code>F = F0 + (1−F0) =
+    1</code> — <em>모든 재질이 스침각에서는 완전 거울</em>이 됩니다. 5제곱은 이 상승이 오직 각도가 극단적으로
+    스칠 때만 급격히 일어나도록 만드는 Schlick의 경험적 근사입니다(정밀한 프레넬 방정식을 값싸게 흉내낸 것).</p>
+  <ul>
+    <li><code>saturate(1.0 - cosTheta)</code> — <code>1−cosθ</code>를 <code>[0,1]</code>로 클램프합니다.
+      <code>saturate</code>는 GPU에서 사실상 공짜(하드웨어 지원)라 <code>clamp(x,0,1)</code>보다 선호됩니다.
+      음수가 들어와 <code>pow</code>에서 NaN이 나는 것을 막는 안전장치이기도 합니다.</li>
+    <li><code>pow(..., 5.0)</code> — 5제곱.</li>
+    <li><code>F0 + (1.0 - F0) * ...</code> — <code>F0</code>와 1 사이를 위 5제곱 값으로 보간합니다. 결과적으로
+      F0(정면)에서 1(스침각)로 부드럽게 올라갑니다.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">직관</span>
+    <code>F0</code> 예시 값: 물 0.02, 플라스틱/피부 0.04, 다이아몬드 0.17, 금속은 0.5~1.0(색을 띔). 다음
+    절에서 비금속은 0.04로 고정하고 금속은 albedo를 F0로 쓰는 이유가 여기 있습니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 5. main -->
+  <!-- ============================================================ -->
+  <h2>5. <code>main</code> — 조각들을 Cook-Torrance로 조립</h2>
+  <p>
+    이제 D·G·F를 한데 모아 실제 픽셀 색을 계산합니다. 큰 흐름은 이렇습니다.
+  </p>
+  <ol class="steps">
+    <li>이 픽셀의 법선 N과 시선 V를 정규화한다.</li>
+    <li>재질로부터 기본 반사율 F0를 정한다(금속/비금속 구분).</li>
+    <li>광원마다 반복: L·H·거리감쇠를 구하고, D·G·F로 스페큘러를, 에너지 보존으로 확산을 계산해 누적.</li>
+    <li>단순 앰비언트를 더하고, HDR→LDR 톤매핑 + 감마 후 출력.</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>pbr.hlsl — 픽셀 셰이더 본체</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">float4 main(PSIn i) : SV_Target {
+    float3 N = normalize(i.normal);
+    float3 V = normalize(camPos - i.worldPos);
+
+    // 비금속 기본 반사율 0.04, 금속이면 albedo 자체가 F0
+    float3 F0 = lerp((float3)0.04, albedo, metallic);
+
+    float3 Lo = (float3)0.0;            // 나가는 복사휘도 누적
+    for (int idx = 0; idx &lt; NR_LIGHTS; ++idx) {
+        float3 L = normalize(lightPositions[idx].xyz - i.worldPos);
+        float3 H = normalize(V + L);
+        float dist = length(lightPositions[idx].xyz - i.worldPos);
+        float atten = 1.0 / (dist * dist);          // 물리적 역제곱 감쇠
+        float3 radiance = lightColors[idx].xyz * atten;
+
+        // Cook-Torrance 스페큘러 항
+        float  D = distributionGGX(N, H, roughness);
+        float  G = geometrySmith(N, V, L, roughness);
+        float3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+        float3 numerator = D * G * F;
+        float denom = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 1e-4;
+        float3 specular = numerator / denom;
+
+        // 에너지 보존: 반사한 만큼 확산은 줄이고, 금속은 확산이 없다
+        float3 kd = ((float3)1.0 - F) * (1.0 - metallic);
+
+        float NdotL = max(dot(N, L), 0.0);
+        Lo += (kd * albedo / PI + specular) * radiance * NdotL;
+    }
+
+    // 아주 단순한 앰비언트 (뒤에서 IBL로 대체하는 것이 정석)
+    float3 ambient = (float3)0.03 * albedo * ao;
+    float3 color = ambient + Lo;
+
+    // HDR → LDR: 다음 절의 톤매핑으로 넘기려면 이 두 줄은 빼고 float4(color,1)만 출력
+    color = color / (color + (float3)1.0);          // Reinhard
+    color = pow(color, (float3)(1.0 / 2.2));         // 감마
+    return float4(color, 1.0);
+}</code></pre>
+  </div>
+
+  <h3>5-1. N과 V 준비</h3>
+  <ul>
+    <li><code>float3 N = normalize(i.normal);</code> — 앞서 말한 대로 보간으로 길이가 망가진 법선을 단위벡터로
+      되돌립니다. 이후 모든 내적(<code>N·L</code>, <code>N·V</code> 등)이 정확한 코사인이 되려면 필수입니다.</li>
+    <li><code>float3 V = normalize(camPos - i.worldPos);</code> — 시선 벡터는 <strong>표면에서 카메라로</strong>
+      향합니다. <code>camPos - worldPos</code> 순서(끝점 − 시작점)에 주의하세요. 방향만 필요하므로 정규화합니다.</li>
+  </ul>
+
+  <h3>5-2. F0 — 금속/비금속을 <code>lerp</code>로 통합</h3>
+  <p>
+    <code>float3 F0 = lerp((float3)0.04, albedo, metallic);</code>
+  </p>
+  <p>
+    <code>lerp(a, b, t)</code>는 선형 보간 <code>a·(1−t) + b·t</code>입니다. 여기서:
+  </p>
+  <ul>
+    <li><code>metallic = 0</code>(완전 비금속) → <code>F0 = 0.04</code>(회색빛 약한 반사). 비금속의 정반사는
+      색이 없어(흰색) 세 채널 모두 0.04입니다.</li>
+    <li><code>metallic = 1</code>(완전 금속) → <code>F0 = albedo</code>. 금속은 확산이 없고 정반사가 곧 그
+      금속의 색이므로, albedo를 그대로 반사색(F0)으로 씁니다.</li>
+    <li>중간값은 두 상태를 섞습니다(반쯤 녹슨 금속 등을 표현). <code>(float3)0.04</code>는 스칼라 0.04를 세
+      채널로 복제하는 HLSL 캐스트 문법입니다.</li>
+  </ul>
+
+  <h3>5-3. 광원 루프 — 반사 방정식의 Σ</h3>
+  <p>
+    <code>Lo</code>는 이 픽셀에서 카메라로 나가는 빛(복사휘도)을 <strong>누적</strong>하는 변수로, 0에서
+    시작합니다. <code>for (int idx = 0; idx &lt; NR_LIGHTS; ++idx)</code>가 각 광원의 기여를 더합니다. 루프 안:
+  </p>
+  <ul>
+    <li><code>L = normalize(lightPositions[idx].xyz - i.worldPos)</code> — 표면에서 <strong>광원으로</strong>
+      향하는 단위벡터. V와 마찬가지로 "끝 − 시작"입니다.</li>
+    <li><code>H = normalize(V + L)</code> — 하프벡터. V와 L의 정중앙 방향(2절에서 설명). D와 F가 이걸 씁니다.</li>
+    <li><code>dist = length(lightPositions[idx].xyz - i.worldPos)</code> — 광원까지의 실제 거리(월드 단위).</li>
+    <li><code>atten = 1.0 / (dist * dist)</code> — <strong>역제곱 감쇠</strong>. 점광원의 빛은 거리 제곱에 반비례해
+      약해집니다(구면으로 퍼지므로). 물리적으로 정확한 형태라 PBR에서는 이걸 씁니다.</li>
+    <li><code>radiance = lightColors[idx].xyz * atten</code> — 이 픽셀에 실제로 도달한 광원의 세기(색 × 감쇠).
+      반사 방정식의 <code>L<sub>i</sub></code>에 해당합니다.</li>
+  </ul>
+
+  <h3>5-4. Cook-Torrance 스페큘러 조립</h3>
+  <ul>
+    <li><code>D = distributionGGX(N, H, roughness)</code> · <code>G = geometrySmith(N, V, L, roughness)</code> ·
+      <code>F = fresnelSchlick(max(dot(H, V), 0.0), F0)</code> — 앞서 만든 세 함수 호출. F의 각도로 <code>H·V</code>를
+      쓰는 것에 주목(스페큘러는 하프벡터 기준으로 반사가 일어나므로).</li>
+    <li><code>numerator = D * G * F</code> — 분자 <code>D·G·F</code>. D·G는 스칼라, F는 float3라 결과가 float3.</li>
+    <li><code>denom = 4.0 * max(dot(N,V),0.0) * max(dot(N,L),0.0) + 1e-4</code> — Cook-Torrance 정규화 분모
+      <code>4·(N·V)·(N·L)</code>. 끝의 <code>+1e-4</code>는 <code>N·V</code>나 <code>N·L</code>이 0이 되어 0으로
+      나누는 것을 막는 엡실론입니다.</li>
+    <li><code>specular = numerator / denom</code> — 최종 정반사 항.</li>
+  </ul>
+
+  <h3>5-5. 에너지 보존과 확산 — 가장 중요한 한 줄</h3>
+  <p>
+    <code>float3 kd = ((float3)1.0 - F) * (1.0 - metallic);</code>
+  </p>
+  <p>
+    이 한 줄이 PBR을 "물리적"으로 만드는 핵심입니다. 두 인수를 봅시다.
+  </p>
+  <ul>
+    <li><code>(1.0 - F)</code> — <strong>에너지 보존</strong>. F는 정반사로 튕겨나간 빛의 비율입니다. 그러면
+      나머지 <code>(1−F)</code>만이 표면 속으로 들어가 확산될 수 있습니다. 정반사가 강한 곳(스침각)일수록
+      확산은 자동으로 줄어들어, <em>반사+확산 합이 입사량을 절대 넘지 않습니다</em>. 이것이 퐁 모델과의
+      결정적 차이 — 퐁은 이 둘을 따로 튜닝해 쉽게 에너지 위반이 일어납니다.</li>
+    <li><code>(1.0 - metallic)</code> — <strong>금속은 확산이 없다</strong>. 금속은 들어온 빛을 표면 속에서
+      흡수해 버려 확산 반사가 거의 없습니다. metallic=1이면 이 인수가 0이라 확산 항 전체가 사라집니다.</li>
+  </ul>
+  <p>
+    마지막 누적:
+  </p>
+  <ul>
+    <li><code>NdotL = max(dot(N, L), 0.0)</code> — 람베르트 코사인 항. 빛이 비스듬히 들어올수록 단위 면적당
+      받는 에너지가 줄어드는 물리 현상. 뒷면(음수)은 잘라냅니다.</li>
+    <li><code>Lo += (kd * albedo / PI + specular) * radiance * NdotL</code> — <strong>반사 방정식 그 자체</strong>입니다.
+      괄호 안이 BRDF <code>f</code>(확산 <code>kd·albedo/π</code> + 정반사 <code>specular</code>), 거기에 도달광
+      <code>radiance</code>와 코사인 <code>NdotL</code>을 곱해 이 광원의 기여를 누적합니다.</li>
+  </ul>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    확산에 <code>/PI</code>가 붙는 이유를 빼먹기 쉽습니다. 람베르트 확산 BRDF는 <code>albedo/π</code>입니다 —
+    반구 전체로 균일하게 재방출되는 에너지를 정규화하는 상수 π입니다. 이걸 생략하면 확산이 약 3.14배
+    과하게 밝아져 정반사와의 균형이 깨집니다. 정반사 항에는 이미 분모에 <code>4·(N·V)·(N·L)</code> 정규화가
+    들어 있으므로 별도 π가 없습니다.
+  </div>
+
+  <h3>5-6. 앰비언트, 톤매핑, 감마</h3>
+  <ul>
+    <li><code>ambient = (float3)0.03 * albedo * ao</code> — 아주 조잡한 환경광입니다. 직접광이 안 닿는 부분이
+      완전 검게 되지 않도록 albedo의 3%를 깔아줍니다. <code>ao</code>는 ambient occlusion(구석이 더 어두워지는
+      정도). <strong>정석은 IBL로 대체</strong>하는 것입니다(아래 perf callout 참고).</li>
+    <li><code>color = ambient + Lo</code> — 환경광 + 직접광 누적.</li>
+    <li><code>color = color / (color + (float3)1.0)</code> — <strong>Reinhard 톤매핑</strong>. PBR 결과는 1.0을 훌쩍
+      넘는 HDR이라 그대로 화면에 못 냅니다. 이 식은 <code>[0,∞)</code>를 <code>[0,1)</code>로 부드럽게 압축합니다
+      (큰 값일수록 1에 수렴).</li>
+    <li><code>color = pow(color, (float3)(1.0/2.2))</code> — <strong>감마 보정</strong>. 지금까지 모든 계산은 선형
+      공간에서 했으므로, sRGB 디스플레이용으로 <code>1/2.2</code>제곱해 인코딩합니다.</li>
+    <li><code>return float4(color, 1.0)</code> — 알파 1(불투명)로 출력.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    이 셰이더는 톤매핑·감마를 셰이더 <em>안</em>에서 처리하지만, 실무에서는 이 두 줄을 빼고 HDR 그대로
+    <code>float4(color, 1)</code>를 float 렌더 타깃에 출력한 뒤, <strong>별도 후처리 패스</strong>에서 노출·블룸과
+    함께 톤매핑하는 것이 정석입니다. 자세한 흐름은 다음 페이지(HDR·톤 매핑)에서 다룹니다.
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    셰이더 내부의 <code>albedo</code>는 반드시 <strong>선형 공간</strong>이어야 합니다. sRGB 텍스처를 그대로
+    쓰면 조명이 두 번 감마 처리되어 어두워집니다. <code>DXGI_FORMAT_R8G8B8A8_UNORM_SRGB</code> 포맷으로 SRV를
+    만들어 샘플 시 자동 선형화하거나, 샘플 직후 <code>pow(c, 2.2)</code>로 직접 선형화하세요.
+  </div>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    실제 재질감은 <strong>IBL(Image-Based Lighting)</strong>에서 나옵니다. HDR 환경맵을 미리 필터링해
+    irradiance 큐브맵(확산)과 prefiltered 큐브맵 + BRDF LUT(스페큘러)을 만들어 앰비언트를 대체하면 추가
+    조명 없이도 사실적인 결과가 나옵니다. 또한 위 루프의 D·G·F 계산은 픽셀·광원당 반복되므로, 광원이 많다면
+    <a href="./06-advanced.html#deferred">디퍼드 렌더링</a>으로 셰이딩 비용을 화면 픽셀 수로 고정하는 것이
+    유리합니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 6. C++/DirectXMath 대응 -->
+  <!-- ============================================================ -->
+  <h2>6. C++ · DirectXMath 대응 — 상수 버퍼 업로드</h2>
+  <p>
+    셰이더가 아무리 완벽해도 C++에서 상수 버퍼를 <em>정확한 레이아웃으로</em> 채워 넘기지 못하면 화면은
+    엉망이 됩니다. HLSL cbuffer와 <strong>바이트 단위로 일치</strong>하는 C++ 구조체를 만들고, 매 프레임
+    업로드하는 코드를 보겠습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>pbr_upload.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+using Microsoft::WRL::ComPtr;
+
+static const int NR_LIGHTS = 4;
+
+// HLSL cbuffer PBRConstants와 바이트 레이아웃이 1:1로 일치해야 한다.
+// 각 float3 뒤에 float 패딩을 넣어 16바이트 정렬을 셰이더와 똑같이 맞춘다.
+struct PBRConstantsCPU {
+    XMFLOAT3 camPos;    float _pad0;
+    XMFLOAT3 albedo;    float metallic;
+    float    roughness; float ao;  XMFLOAT2 _pad1;
+    XMFLOAT4 lightPositions[NR_LIGHTS];   // .xyz만 사용, w는 패딩
+    XMFLOAT4 lightColors[NR_LIGHTS];
+};
+static_assert(sizeof(PBRConstantsCPU) % 16 == 0, "cbuffer는 16바이트 배수여야 함");
+
+// --- 상수 버퍼 생성 (한 번만) ---
+ComPtr&lt;ID3D11Buffer&gt; pbrCB;
+D3D11_BUFFER_DESC bd = {};
+bd.ByteWidth      = sizeof(PBRConstantsCPU);   // 16 배수
+bd.Usage          = D3D11_USAGE_DYNAMIC;       // CPU가 매 프레임 갱신
+bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;    // Map으로 쓰기
+device-&gt;CreateBuffer(&amp;bd, nullptr, &amp;pbrCB);
+
+// --- 매 프레임 값 채워 업로드 ---
+PBRConstantsCPU c = {};
+c.camPos    = { camX, camY, camZ };
+c.albedo    = { 1.0f, 0.765f, 0.336f };  // 금색 (이미 선형 공간 값)
+c.metallic  = 1.0f;
+c.roughness = 0.2f;
+c.ao        = 1.0f;
+for (int k = 0; k &lt; NR_LIGHTS; ++k) {
+    c.lightPositions[k] = { lx[k], ly[k], lz[k], 1.0f };
+    c.lightColors[k]    = { 300.0f, 300.0f, 300.0f, 1.0f }; // HDR 세기
+}
+
+D3D11_MAPPED_SUBRESOURCE ms;
+ctx-&gt;Map(pbrCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;ms);
+memcpy(ms.pData, &amp;c, sizeof(c));
+ctx-&gt;Unmap(pbrCB.Get(), 0);
+
+// b0 슬롯에 바인딩 (HLSL의 register(b0)과 일치)
+ctx-&gt;PSSetConstantBuffers(0, 1, pbrCB.GetAddressOf());</code></pre>
+  </div>
+
+  <h3>6-1. 구조체 레이아웃 1:1 매핑</h3>
+  <p>
+    이 C++ 구조체는 1절의 HLSL cbuffer와 <strong>필드 순서·패딩까지 완전히 동일</strong>합니다. HLSL의
+    <code>float3</code>는 C++의 <code>XMFLOAT3</code>(float 3개, 12바이트), <code>float4</code>는 <code>XMFLOAT4</code>
+    (16바이트)에 대응합니다. <code>_pad0</code>·<code>_pad1</code>이 셰이더와 같은 자리에 있어야 값이 밀리지
+    않습니다. <code>static_assert(sizeof(...) % 16 == 0, ...)</code>는 이 구조체가 16의 배수인지
+    <em>컴파일 타임</em>에 검사해, 레이아웃 실수를 빌드 단계에서 잡아줍니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>XMFLOAT3</code>와 <code>XMVECTOR</code>를 혼동하지 마세요. <code>XMVECTOR</code>는 SIMD 정렬(16바이트) 레지스터
+    타입이라 <em>구조체 멤버로 두면 안 됩니다</em>(정렬 요구 때문에 예상치 못한 패딩·오정렬 발생). 저장·업로드
+    용은 항상 <code>XMFLOAT2/3/4</code>를 쓰고, 계산할 때만 <code>XMLoadFloat3</code>로 <code>XMVECTOR</code>로
+    올렸다가 <code>XMStoreFloat3</code>로 다시 내리는 것이 DirectXMath의 정석 패턴입니다.
+  </div>
+
+  <h3>6-2. HLSL 내적/정규화의 DirectXMath 대응</h3>
+  <p>
+    이 예제는 조명 계산을 <em>셰이더에서</em> 하므로 C++ 수학이 많이 필요 없지만, 만약 CPU에서 같은 계산을
+    검증하고 싶다면 HLSL 내장 함수는 다음과 같이 1:1 대응됩니다.
+  </p>
+  <table class="impl">
+    <thead><tr><th>HLSL (셰이더)</th><th>DirectXMath (C++)</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td><code>dot(N, H)</code></td><td><code>XMVector3Dot(N, H)</code></td><td>두 벡터의 내적(코사인)</td></tr>
+      <tr><td><code>normalize(v)</code></td><td><code>XMVector3Normalize(v)</code></td><td>단위벡터로</td></tr>
+      <tr><td><code>length(v)</code></td><td><code>XMVector3Length(v)</code></td><td>벡터 길이(거리)</td></tr>
+      <tr><td><code>V + L</code></td><td><code>XMVectorAdd(V, L)</code></td><td>성분별 덧셈(하프벡터 전 단계)</td></tr>
+      <tr><td><code>lerp(a, b, t)</code></td><td><code>XMVectorLerp(a, b, t)</code></td><td>선형 보간(F0 계산)</td></tr>
+      <tr><td><code>pow(x, 5)</code></td><td><code>XMVectorPow(x, {5,5,5,5})</code></td><td>성분별 거듭제곱(프레넬)</td></tr>
+      <tr><td><code>saturate(x)</code></td><td><code>XMVectorSaturate(x)</code></td><td>[0,1] 클램프</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>XMFLOAT3 f = {...}</code>를 계산에 쓰려면 먼저 <code>XMVECTOR v = XMLoadFloat3(&amp;f);</code>로 올린 뒤
+    위 함수들을 적용하고, 결과를 <code>XMStoreFloat3(&amp;f, v);</code>로 내립니다. 이 load/store 왕복이 SIMD의
+    비용이자 규칙입니다.
+  </p>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    상수 버퍼 업로드에는 <code>Map(D3D11_MAP_WRITE_DISCARD)</code>를 썼습니다. <code>WRITE_DISCARD</code>는
+    "이전 내용은 버리고 새 메모리를 달라"는 뜻이라, GPU가 아직 옛 버퍼를 쓰는 중이라도 드라이버가 새
+    영역을 내주어 <strong>CPU가 멈추지(stall) 않습니다</strong>. 매 프레임 바뀌는 상수 버퍼의 표준 갱신
+    방식입니다. 반대로 거의 안 바뀌는 데이터는 <code>UpdateSubresource</code>가 더 단순합니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-advanced.html">← 6장 허브</a>
+    <a href="./06-hdr.html">HDR · 톤 매핑 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

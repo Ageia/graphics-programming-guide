@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 삼각함수 — C++/DirectX 11</title>
+<meta name="description" content="도↔라디안 변환과 sin/cos로 2D 회전·공전(orbit)을 C++로 한 줄씩 유도하고 DirectXMath로 대응시키는 삼각함수 구현 가이드." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./01-math.html">1장. 기초 수학</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">삼각함수</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 1</span>
+  <h1>삼각함수 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    회전하는 물체, 태양을 공전하는 행성, 흔들리는 카메라 — 그래픽스에서 "돈다"는 움직임은 거의 전부
+    <strong>sin</strong>과 <strong>cos</strong> 두 함수 위에서 굴러갑니다. 이 페이지에서는 먼저
+    <strong>도(degree)와 라디안(radian)</strong>의 관계를 유도해 변환 함수를 만들고, 그다음 sin/cos만으로
+    <strong>2D 점을 원점 기준으로 회전</strong>시키는 <code>rotate2D</code>와, 물체를 원 궤도 위에 올려
+    <strong>공전</strong>시키는 <code>orbitPosition</code>을 한 성분씩 유도합니다. 마지막으로
+    <strong>deltaTime 기반 프레임 독립 애니메이션</strong>과 <strong>DirectXMath</strong> 대응까지 이어갑니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드는 D3D 규약을 따릅니다: <strong>행벡터</strong> <code>v' = v * M</code>, 행렬은 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>. 아래 <code>rotate2D</code>는 행렬을 쓰지 않는 <em>순수 성분 계산</em>이라 손계산으로
+    회전 공식을 눈으로 확인하기에 좋습니다. 행렬 회전(<code>rotateZ</code> 등)은 <a href="./01-transform.html">좌표계와 변환</a> 페이지를 참고하세요.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">0. 무엇을 만드나</h2>
+  <p>
+    이 페이지의 목표 산출물은 딱 네 개입니다. 각각이 그래픽스 어디에 쓰이는지 먼저 감을 잡고 들어갑시다.
+  </p>
+  <ul>
+    <li><strong><code>toRadians / toDegrees</code></strong> — 사람이 읽기 좋은 <em>도</em>와 컴퓨터가 계산하는 <em>라디안</em> 사이를 오가는 변환기. 모든 각도 입력의 관문입니다.</li>
+    <li><strong><code>rotate2D</code></strong> — 2D 점 (x, y)를 원점 기준으로 주어진 각만큼 회전. 스프라이트 회전, UI 요소 회전, 2D 게임의 핵심.</li>
+    <li><strong><code>orbitPosition</code></strong> — 중심점 둘레의 원 궤도 위 한 점을 반환. 행성 공전, 카메라 궤도, 파티클 링 배치에 사용.</li>
+    <li><strong>deltaTime 애니메이션 루프</strong> — 프레임레이트가 달라도 <em>같은 속도</em>로 회전하게 만드는 시간 기반 갱신.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">1. 도(degree) vs 라디안(radian): 왜 라디안인가</h2>
+
+  <h3>라디안이라는 게 대체 무엇인가</h3>
+  <p>
+    우리가 일상에서 쓰는 <strong>도(°)</strong>는 한 바퀴를 <strong>360</strong> 등분한 단위입니다. 360이라는 숫자는
+    수학적 필연이 아니라 고대 바빌로니아의 60진법에서 온 <em>역사적 관습</em>일 뿐입니다. 반면
+    <strong>라디안</strong>은 원 자체의 기하학에서 자연스럽게 나옵니다.
+  </p>
+  <p>
+    <strong>정의(그림글):</strong> 반지름이 <code>r</code>인 원을 그리고, 그 원 위에서 <em>호(둘레의 일부)의 길이가 정확히 r만큼</em>
+    되는 부채꼴을 잘라냅니다. 그 부채꼴의 중심각이 바로 <strong>1 라디안</strong>입니다. 즉 "각도"를
+    "호의 길이 ÷ 반지름"으로 정의한 것입니다(<code>θ = 호길이 / r</code>). 이렇게 하면 각도가
+    <em>길이의 비</em>라서 단위가 없어지고, 원의 크기와 무관해집니다.
+  </p>
+  <p>
+    원의 전체 둘레는 <code>2πr</code>입니다. 호 길이가 <code>2πr</code>이면 각도는 <code>2πr / r = 2π</code> 라디안,
+    즉 한 바퀴가 <strong>2π 라디안 = 360°</strong>입니다. 여기서 핵심 변환 관계가 나옵니다:
+  </p>
+  <div class="callout">
+    <span class="tag">공식</span>
+    <strong>2π 라디안 = 360°</strong> &nbsp;⟹&nbsp; <strong>π 라디안 = 180°</strong> &nbsp;⟹&nbsp;
+    <strong>1° = π/180 라디안</strong>, &nbsp;<strong>1 라디안 = 180/π ° ≈ 57.2958°</strong>.
+  </div>
+
+  <h3>왜 하필 라디안을 써야 하나 (세 가지 이유)</h3>
+  <ol class="steps">
+    <li><strong>표준 라이브러리가 라디안만 받는다.</strong> C의 <code>&lt;cmath&gt;</code>에 있는 <code>std::sin</code>,
+      <code>std::cos</code>, <code>std::tan</code>은 <em>인자를 라디안으로 해석</em>합니다. 여기에 도 단위 값(예: 90)을 그대로
+      넣으면 "90 라디안"(약 5156°, 14바퀴하고도 조금)을 계산해 완전히 엉뚱한 값이 나옵니다.</li>
+    <li><strong>미적분·물리 공식이 라디안 위에서만 깔끔하다.</strong> 예를 들어 각이 작을 때 <code>sin(θ) ≈ θ</code>라는
+      근사, 회전 속도(각속도) <code>ω</code>와 실제 이동 속도 <code>v = ωr</code> 같은 관계식이 라디안일 때만 계수 없이 성립합니다.</li>
+    <li><strong>DirectXMath 등 그래픽 수학 라이브러리도 라디안 기준.</strong> <code>XMMatrixRotationZ(angle)</code>,
+      <code>XMMatrixPerspectiveFovLH(fovAngleY, ...)</code> 등은 모두 라디안을 요구합니다. 그래서 사람이 도로 입력하고
+      싶을 때는 <code>XMConvertToRadians(90.0f)</code>로 바꿔서 넘겨야 합니다.</li>
+  </ol>
+  <p>
+    정리하면 <strong>"사람은 도로 생각하고, 컴퓨터는 라디안으로 계산한다."</strong> 그 경계에 변환 함수를 놓는 것이 이 절의 목적입니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">2. 변환 함수: toRadians / toDegrees</h2>
+
+  <div class="code">
+    <div class="code-head"><span>Trig.h</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include "Vec3.h"
+#include &lt;cmath&gt;
+
+constexpr float PI = 3.14159265358979323846f;
+
+inline float toRadians(float deg){ return deg * (PI / 180.f); }
+inline float toDegrees(float rad){ return rad * (180.f / PI); }</code></pre>
+  </div>
+
+  <h3>시그니처 한 조각씩 뜯어보기</h3>
+  <p>
+    <code>constexpr float PI</code> — <code>constexpr</code>는 "이 값은 <em>컴파일 시점에 이미 확정된 상수</em>"라는 뜻입니다.
+    런타임에 계산되지 않으므로 어디서 써도 추가 비용이 없고, 배열 크기 같은 상수식 자리에도 넣을 수 있습니다. 뒤에 붙은
+    <code>f</code>는 이 숫자가 <code>double</code>이 아니라 <strong><code>float</code>(단정밀도)</strong>라는 표시입니다.
+    그래픽스는 대부분 float로 계산하므로, <code>f</code>를 빼면 double↔float 변환이 섞여 경고나 미세한 정밀도 손실이 납니다.
+  </p>
+  <p>
+    <code>inline</code> — 이 함수가 여러 <code>.cpp</code>에서 <code>#include</code>되어도 <em>중복 정의 링크 오류가 나지 않게</em> 하고,
+    컴파일러에게 "호출을 함수 본문으로 펼쳐 넣어도 좋다"는 힌트를 줍니다. 본문이 곱셈 한 번뿐인 이런 초소형 함수에 딱 맞습니다.
+  </p>
+  <p>
+    <code>float toRadians(float deg)</code> — 도 값을 받아 라디안을 <em>값으로</em> 반환합니다. float는 4바이트로 작아서
+    참조(<code>const float&amp;</code>)로 받을 이유가 없습니다. 오히려 복사가 더 쌉니다. (참조가 이득인 경우는 <code>Vec3</code>처럼
+    큰 구조체이고, 그건 다음 함수에서 다룹니다.)
+  </p>
+
+  <h3>수식 → 직관 → 코드 3단 매핑</h3>
+  <p>
+    <strong>수학적 의미:</strong> 1절에서 얻은 <code>1° = π/180 라디안</code>을 그대로 옮긴 것입니다.
+    <code>deg</code>도가 있으면 라디안은 <code>deg × (π/180)</code>.
+  </p>
+  <p>
+    <strong>기하학적 직관:</strong> <code>π/180</code>은 "1도가 원둘레(2π) 중 차지하는 비율"입니다. 한 바퀴 360도를
+    2π 라디안이라는 파이 조각으로 나눌 때, 도 하나당 파이 조각의 크기가 <code>2π/360 = π/180</code>인 셈이죠.
+    그 조각 크기에 도 개수를 곱하면 총 라디안이 됩니다.
+  </p>
+  <p>
+    <strong>코드 매핑:</strong> <code>deg * (PI / 180.f)</code>에서 괄호로 <code>PI / 180.f</code>를 묶은 것은
+    "1도당 라디안"이라는 <em>상수 계수</em>를 먼저 만들고 거기에 도를 곱한다는 의도를 드러냅니다. 값 자체는
+    <code>(deg * PI) / 180.f</code>와 같지만, 의미가 더 잘 읽히고 <code>PI/180.f</code>는 컴파일 시 상수로 접혀 계산됩니다.
+    <code>toDegrees</code>는 정확히 역연산으로, <code>180/π ≈ 57.2958</code>을 곱해 라디안을 도로 되돌립니다.
+  </p>
+
+  <h3>손계산으로 확인</h3>
+  <ul>
+    <li><code>toRadians(180)</code> = 180 × (π/180) = <strong>π ≈ 3.14159</strong> ✔ (반 바퀴)</li>
+    <li><code>toRadians(90)</code> = 90 × (π/180) = <strong>π/2 ≈ 1.5708</strong> ✔ (직각)</li>
+    <li><code>toDegrees(π)</code> = π × (180/π) = <strong>180</strong> ✔ (되돌아옴)</li>
+    <li><code>toRadians(1)</code> = <strong>≈ 0.01745</strong> — 1도는 라디안으로 아주 작은 값입니다.</li>
+  </ul>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong><code>std::sin(90)</code>은 재앙입니다.</strong> 90을 라디안으로 해석해 <code>sin(90 rad) ≈ 0.894</code>를 돌려줍니다.
+    의도한 <code>sin(90°) = 1</code>과 전혀 다르죠. 반드시 <code>std::sin(toRadians(90))</code>처럼 <em>라디안으로 바꾼 뒤</em> 넘기세요.
+    "각도를 함수에 넣기 직전에는 항상 라디안인지 의심한다"를 습관으로 만드세요.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">3. 2D 회전: rotate2D</h2>
+
+  <p>
+    <strong>무엇을 만드나:</strong> 2D 점 <code>(x, y)</code>를 <em>원점(0,0) 기준</em>으로 반시계 방향 <code>angle</code>(라디안)만큼
+    돌린 새 좌표로 갱신합니다. <strong>왜 필요한가:</strong> 스프라이트를 회전시키거나, 방향 벡터를 특정 각만큼 틀거나,
+    2D 게임에서 총알을 조준 방향으로 쏘는 등 "평면에서 돌리기"의 가장 기본 도구입니다.
+  </p>
+
+  <ol class="steps">
+    <li>회전각의 <code>sin</code>과 <code>cos</code>를 <strong>한 번씩만</strong> 미리 계산해 둔다.</li>
+    <li>표준 2D 회전 공식으로 <em>새 x</em>와 <em>새 y</em>를 각각 계산한다.</li>
+    <li>계산이 <strong>모두 끝난 뒤</strong> 임시 변수의 값을 원래 변수에 되쓴다(제자리 갱신 버그 방지).</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>Trig.h</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 2D 점 (x,y)를 원점 기준 angle(라디안)만큼 회전
+inline void rotate2D(float&amp; x, float&amp; y, float angle){
+    float s = std::sin(angle), c = std::cos(angle);
+    float nx = x*c - y*s;   // 표준 2D 회전 공식 (새 x)
+    float ny = x*s + y*c;   //                    (새 y)
+    x = nx; y = ny;         // 계산이 끝난 뒤 한꺼번에 되쓴다
+}</code></pre>
+  </div>
+
+  <h3>시그니처: 왜 <code>float&amp;</code>(참조)이고 반환은 <code>void</code>인가</h3>
+  <p>
+    <code>float&amp; x, float&amp; y</code>의 <code>&amp;</code>는 <strong>참조(reference)</strong> 표시입니다. 참조로 받으면
+    함수 안에서 <code>x</code>, <code>y</code>를 바꾸는 것이 <em>호출한 쪽의 원본 변수</em>를 직접 바꾸는 것이 됩니다. 그래서
+    이 함수는 값을 돌려줄 필요가 없어 반환 타입이 <code>void</code>입니다. 즉 <strong>"들어온 점을 제자리에서 회전시킨다"</strong>는
+    설계입니다. 만약 참조 없이 <code>float x</code>로 받았다면 복사본만 회전시키고 원본은 그대로 남아 아무 효과가 없었을 것입니다.
+  </p>
+  <p>
+    (참고: <code>Vec3</code>를 받아 회전한 새 <code>Vec3</code>를 <em>반환</em>하는 스타일도 흔합니다. 여기서는 x/y 두 성분만
+    다루므로 참조 인자로 in-place 갱신하는 편이 간결합니다.)
+  </p>
+
+  <h3>회전 공식은 어디서 오나 — 단위원으로 유도</h3>
+  <p>
+    <strong>1단계, 극형식으로 보기(그림글):</strong> 점 <code>(x, y)</code>를 원점에서 뻗은 화살표라고 생각합시다. 이 화살표는
+    길이 <code>r</code>과, x축에서 잰 각 <code>φ</code>로도 표현할 수 있습니다. 삼각함수 정의에 의해
+    <code>x = r·cos φ</code>, <code>y = r·sin φ</code>입니다. 즉 화살표 끝은 반지름 r인 원 위에 있고, 그 원 위 위치를 각 φ가 정합니다.
+  </p>
+  <p>
+    <strong>2단계, angle만큼 더 돌리기:</strong> 이 화살표를 반시계로 <code>angle(=θ)</code>만큼 더 돌리면 새 각은 <code>φ + θ</code>가
+    됩니다. 길이 r은 그대로입니다(회전은 길이를 바꾸지 않으니까). 그러므로 새 좌표는:
+  </p>
+  <div class="callout">
+    <span class="tag">유도</span>
+    <code>new_x = r·cos(φ + θ)</code>, &nbsp; <code>new_y = r·sin(φ + θ)</code>.
+  </div>
+  <p>
+    <strong>3단계, 덧셈정리 적용:</strong> 고등학교 삼각함수의 합각 공식을 씁니다.
+  </p>
+  <ul>
+    <li><code>cos(φ + θ) = cos φ · cos θ − sin φ · sin θ</code></li>
+    <li><code>sin(φ + θ) = sin φ · cos θ + cos φ · sin θ</code></li>
+  </ul>
+  <p>
+    양변에 r을 곱하고, <code>r·cos φ = x</code>, <code>r·sin φ = y</code>를 도로 대입하면 r과 φ가 모두 사라지고
+    <em>원래 좌표 x, y와 회전각 θ만으로</em> 깔끔하게 정리됩니다:
+  </p>
+  <div class="callout">
+    <span class="tag">결과</span>
+    <code>new_x = x·cos θ − y·sin θ</code> &nbsp;→&nbsp; 코드의 <code>nx = x*c - y*s</code><br />
+    <code>new_y = x·sin θ + y·cos θ</code> &nbsp;→&nbsp; 코드의 <code>ny = x*s + y*c</code>
+  </div>
+  <p>
+    이것이 코드의 두 줄이 나온 곳입니다. <code>c = cos θ</code>, <code>s = sin θ</code>로 이름만 줄였을 뿐 유도한 공식 그대로입니다.
+  </p>
+
+  <h3>부호와 순서: 왜 new_x에는 <code>−y·s</code>이고 new_y에는 <code>+x·s</code>인가</h3>
+  <p>
+    두 식에서 <code>sin</code> 항의 부호가 서로 반대(<code>−y·s</code> vs <code>+x·s</code>)인 것이 핵심입니다. 이 <em>비대칭</em>이
+    바로 "회전"을 만듭니다. 만약 두 식 모두 같은 부호라면 그것은 회전이 아니라 다른 변형(예: 늘리기/기울이기)이 됩니다.
+    <strong>기하학적 확인(그림글):</strong> 점 <code>(1, 0)</code>(x축 위)을 90°(θ=π/2, 즉 <code>c=0, s=1</code>) 돌려 봅시다.
+  </p>
+  <ul>
+    <li><code>nx = 1·0 − 0·1 = 0</code></li>
+    <li><code>ny = 1·1 + 0·0 = 1</code></li>
+  </ul>
+  <p>
+    결과는 <code>(0, 1)</code> — x축 위의 점이 반시계로 돌아 y축(위쪽)으로 갔습니다. 우리가 기대한 반시계 회전과 정확히 일치하죠.
+    부호가 반대로 붙어 있었다면 시계 방향(아래쪽)으로 갔을 것입니다. <strong>주의:</strong> 화면 좌표처럼 y축이 아래로 향하는
+    좌표계에서는 같은 공식이 시각적으로는 시계 방향처럼 보입니다 — 부호가 틀린 게 아니라 y축 방향이 뒤집혀 있기 때문입니다.
+  </p>
+
+  <h3>왜 <code>nx</code>, <code>ny</code> 임시 변수에 담는가 — 제자리 갱신 버그</h3>
+  <p>
+    이 부분이 초보자가 가장 많이 틀리는 지점입니다. 만약 임시 변수 없이 이렇게 쓰면:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>버그 예시 (이렇게 쓰지 마세요)</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">x = x*c - y*s;   // ① 여기서 x가 '새 x'로 바뀜
+y = x*s + y*c;   // ② 그런데 이 줄의 x는 이미 바뀐 값!  ← 버그</code></pre>
+  </div>
+  <p>
+    ①번 줄이 실행되는 순간 <code>x</code>는 즉시 <em>새 값</em>으로 덮어써집니다. 그런데 ②번 줄의 <code>new_y = x·s + y·c</code>
+    공식은 <strong>원래(회전 전) x</strong>를 써야 합니다. ②에서 읽히는 <code>x</code>는 이미 오염된 새 값이라, y가 엉뚱하게
+    계산됩니다. 이렇게 "아직 다른 계산에 쓰여야 할 값을 먼저 덮어써 버리는" 실수를 <strong>제자리 갱신(in-place update) 버그</strong>라고 합니다.
+  </p>
+  <p>
+    해결책은 코드처럼 <strong>모든 새 값을 임시 변수(<code>nx</code>, <code>ny</code>)에 먼저 다 계산한 뒤</strong>, 마지막에 한꺼번에
+    <code>x = nx; y = ny;</code>로 되쓰는 것입니다. 이 시점에는 <code>nx</code>, <code>ny</code>가 모두 <em>원래 x, y</em>로 계산되어
+    있으므로 안전합니다. 회전, 좌표 스왑, 셀룰러 오토마타 등 "한 값이 다른 값 계산에 얽혀 있는" 갱신에서는 항상 이 패턴을 씁니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>std::sin</code>과 <code>std::cos</code>는 덧셈·곱셈보다 훨씬 무거운 초월함수입니다. 그래서 <strong>같은 각도의
+    sin/cos는 한 번만 구해</strong> <code>s</code>, <code>c</code>에 담아 두 식에서 재사용합니다. 만약 식 안에 <code>std::sin(angle)</code>을
+    네 번 그냥 써 버리면 같은 값을 네 번 계산해 낭비합니다. 참고로 sin과 cos를 <em>동시에</em> 구하는 전용 API도 있습니다
+    (아래 DirectXMath 절의 <code>XMScalarSinCos</code>).
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">4. 공전 궤도: orbitPosition</h2>
+
+  <p>
+    <strong>무엇을 만드나:</strong> <code>center</code>를 중심으로 반지름 <code>radius</code>인 원 위에서, 각 <code>angle</code>에 해당하는
+    한 점의 3D 위치를 돌려줍니다. <strong>왜 필요한가:</strong> 행성이 태양 주위를 도는 공전, 카메라가 물체 주위를 도는 궤도 카메라,
+    링 모양으로 파티클을 배치하는 것 등이 전부 "원 위의 좌표 구하기"입니다.
+  </p>
+
+  <ol class="steps">
+    <li>단위원 위의 좌표 <code>(cos angle, sin angle)</code>을 구한다(반지름 1인 원 위 점).</li>
+    <li>거기에 <code>radius</code>를 곱해 원하는 크기의 원으로 키운다.</li>
+    <li><code>center</code>를 더해 원의 중심을 원점에서 원하는 위치로 옮긴다.</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>Trig.h</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// center 중심, 반지름 radius, 각 angle 위치 (XZ 평면 공전)
+inline Vec3 orbitPosition(const Vec3&amp; center, float radius, float angle){
+    return {
+        center.x + radius * std::cos(angle),   // X 성분
+        center.y,                              // Y 성분 (평면 유지, 고정)
+        center.z + radius * std::sin(angle)    // Z 성분
+    };
+}</code></pre>
+  </div>
+
+  <h3>시그니처: <code>const Vec3&amp; center</code>는 왜 참조이고 왜 const인가</h3>
+  <p>
+    <code>const Vec3&amp; center</code>에서 <strong><code>&amp;</code>(참조)</strong>는 <code>Vec3</code>(float 3개 = 12바이트, 정렬 포함하면 더)라는
+    구조체를 <em>통째로 복사하지 않고</em> 원본을 가리키게 해서 호출 비용을 줄입니다. 앞의 <code>toRadians(float)</code>가 값으로 받은 것과
+    대조되죠 — float 하나는 복사가 싸지만 구조체는 참조가 이득입니다.
+  </p>
+  <p>
+    <strong><code>const</code></strong>는 "이 함수는 <code>center</code>를 <em>읽기만 하고 절대 바꾸지 않는다</em>"는 약속입니다. 세 가지 이점이 있습니다:
+    (1) 실수로 원본을 수정하는 버그를 컴파일러가 막아 주고, (2) 함수를 읽는 사람에게 "입력을 건드리지 않는 순수 계산"임을 알려 주며,
+    (3) <code>const</code> 객체나 임시값(예: <code>orbitPosition(sunPos, ...)</code>에서 <code>sunPos</code>가 const여도)도 인자로 넘길 수 있게 합니다.
+  </p>
+  <p>
+    반환 타입 <code>Vec3</code>는 <em>값 반환</em>입니다. 새 위치는 함수 안에서 새로 만들어지는 값이므로 참조로 돌려줄 수 없습니다
+    (사라질 지역 값의 참조를 돌려주면 위험). <code>return { ... };</code>는 <strong>집합 초기화(aggregate initialization)</strong>로,
+    중괄호 안 세 값을 순서대로 <code>Vec3</code>의 <code>x, y, z</code>에 채워 넣어 그 자리에서 새 <code>Vec3</code>를 만들어 반환합니다.
+    멤버 이름을 일일이 쓰지 않아 간결합니다.
+  </p>
+
+  <h3>cos/sin이 어떻게 원 위 좌표를 만드나 — 단위원 재방문</h3>
+  <p>
+    <strong>기하학적 직관(그림글):</strong> 반지름 1인 원(단위원)의 중심을 원점에 두고, x축에서 각 <code>angle</code>만큼 반시계로
+    돌린 지점을 찍으면 그 점의 좌표가 바로 <code>(cos angle, sin angle)</code>입니다. 이것이 sin/cos의 정의 그 자체입니다.
+    <code>angle</code>이 0이면 <code>(cos 0, sin 0) = (1, 0)</code> — 오른쪽 끝. <code>angle</code>이 π/2면 <code>(0, 1)</code> — 위쪽 끝.
+    <code>angle</code>이 π면 <code>(−1, 0)</code> — 왼쪽 끝. <code>angle</code>이 계속 커지면 점이 원을 따라 빙 돕니다.
+  </p>
+  <p>
+    <strong>반지름 키우기:</strong> 단위원 위 점에 <code>radius</code>를 곱하면 <code>(radius·cos angle, radius·sin angle)</code>이 되어
+    반지름 <code>radius</code>인 원 위 점이 됩니다. 원의 모양(각 위치)은 그대로고 크기만 커진 것이죠.
+  </p>
+  <p>
+    <strong>중심 옮기기:</strong> 여기에 <code>center</code>를 더하면 원의 중심이 원점에서 <code>center</code> 위치로 평행 이동합니다.
+    그래서 최종적으로 <code>center + radius·(cos angle 방향)</code>이 되어 "center를 중심으로 반지름 radius인 원 위 점"이 완성됩니다.
+    이 세 단계(단위원 → 크기 → 위치)는 다른 많은 절차적 배치 코드에도 그대로 재활용됩니다.
+  </p>
+
+  <h3>왜 XZ 평면인가 — X와 Z에 넣고 Y는 고정한 이유</h3>
+  <p>
+    코드를 보면 <code>cos</code>는 <strong>X</strong>에, <code>sin</code>은 <strong>Z</strong>에 들어가고, <strong>Y</strong>는
+    <code>center.y</code> 그대로 둡니다. 즉 원이 <strong>XZ 평면(수평 바닥면)</strong>에 그려집니다. 이유는 게임/3D 씬의
+    관례 때문입니다: 대부분의 3D 좌표계에서 <strong>Y축이 위(up)</strong>를 가리킵니다. 행성이 태양을 도는 궤도, 캐릭터가 원을 그리며
+    걷는 경로처럼 "<em>바닥에 평행하게 도는</em>" 움직임은 높이(Y)를 고정한 채 수평면 위에서 돌아야 자연스럽습니다. 그래서 회전 성분을
+    X와 Z에 배치하고 Y를 상수로 두는 것입니다.
+  </p>
+  <div class="callout">
+    <span class="tag">응용</span>
+    평면을 바꾸고 싶으면 성분만 갈아끼우면 됩니다. <strong>XY 평면</strong>(화면에 세로로 선 원, 2D 느낌): <code>cos→X, sin→Y, Z 고정</code>.
+    <strong>YZ 평면</strong>(옆에서 본 세로 원): <code>cos→Z, sin→Y, X 고정</code>. 어느 두 축에 cos/sin을 넣느냐가 곧 회전 평면입니다.
+  </div>
+
+  <h3>손계산으로 확인</h3>
+  <p>중심 <code>(0,0,0)</code>, 반지름 8일 때:</p>
+  <ul>
+    <li><code>angle = 0</code>: <code>(0 + 8·1, 0, 0 + 8·0) = (8, 0, 0)</code> — 원의 오른쪽(+X) 끝.</li>
+    <li><code>angle = π/2</code>: <code>(0 + 8·0, 0, 0 + 8·1) = (0, 0, 8)</code> — +Z 방향으로 4분의 1바퀴.</li>
+    <li><code>angle = π</code>: <code>(−8, 0, 0)</code> — 반대편(−X).</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">5. 렌더 루프에서 공전시키기 (deltaTime 애니메이션)</h2>
+
+  <div class="code">
+    <div class="code-head"><span>main.cpp (렌더 루프 발췌)</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">float angle = 0.f;
+Vec3 sunPos{ 0, 0, 0 };
+
+// --- 매 프레임 호출되는 루프 안에서 ---
+angle += 1.0f * deltaTime;   // 초당 1라디안(약 57도/초)씩 증가
+Vec3 planetPos = orbitPosition(sunPos, 8.f, angle);
+// planetPos 위치에 행성 메시를 그린다...</code></pre>
+  </div>
+
+  <h3>deltaTime이란 무엇이고 왜 곱하나 — 프레임 독립성</h3>
+  <p>
+    <strong><code>deltaTime</code></strong>은 <em>직전 프레임을 그린 뒤 이번 프레임까지 걸린 시간(초)</em>입니다. 예를 들어 60FPS로
+    돌아가면 한 프레임에 약 <code>1/60 ≈ 0.0167</code>초가 걸리므로 <code>deltaTime ≈ 0.0167</code>입니다. 30FPS라면
+    <code>≈ 0.0333</code>이 됩니다.
+  </p>
+  <p>
+    <strong>왜 그냥 <code>angle += 1.0f</code>로 하면 안 되나?</strong> 그렇게 하면 매 프레임 각이 1라디안씩 늘어납니다. 그런데
+    프레임 수는 컴퓨터 성능에 따라 다릅니다. 빠른 PC(120FPS)는 1초에 120번 더해 초당 120라디안 회전하고, 느린 PC(30FPS)는
+    초당 30라디안만 회전합니다. <strong>같은 게임인데 컴퓨터마다 회전 속도가 달라지는</strong> 심각한 문제죠.
+  </p>
+  <p>
+    <strong>deltaTime을 곱하면 해결됩니다.</strong> "초당 얼마"라는 <em>속도</em>에 "이번 프레임이 걸린 시간"을 곱하면 이번 프레임에
+    실제로 진행해야 할 양이 나옵니다(거리 = 속도 × 시간). <code>1.0f * deltaTime</code>은 "초당 1라디안"이라는 속도입니다.
+    120FPS에서는 한 프레임에 <code>1 × 0.0083 = 0.0083</code>라디안씩 120번 = 초당 1라디안, 30FPS에서는
+    <code>1 × 0.0333 = 0.0333</code>라디안씩 30번 = 역시 초당 1라디안. <strong>프레임레이트가 달라도 결과 속도는 같습니다.</strong>
+    이것을 <em>프레임 독립(frame-rate independent) 애니메이션</em>이라고 합니다.
+  </p>
+  <p>
+    회전 속도를 바꾸고 싶으면 계수만 조절하면 됩니다: <code>angle += 2.0f * deltaTime</code>이면 초당 2라디안(약 114도/초, 두 배 빠름),
+    <code>angle += toRadians(90.f) * deltaTime</code>이면 "초당 정확히 90도"로 사람이 이해하기 쉬운 속도가 됩니다.
+  </p>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>angle</code>은 계속 커지므로 아주 오래 돌면 float 정밀도가 떨어질 수 있습니다. 필요하면 <code>2π</code>를 넘을 때
+    빼서 <code>[0, 2π)</code> 범위로 감아 주면(<code>if(angle &gt; 2*PI) angle -= 2*PI;</code>) 정밀도와 값 범위를 안정적으로 유지할 수 있습니다.
+    sin/cos는 <code>2π</code> 주기라 각을 감아도 결과는 동일합니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">6. DirectXMath 대응</h2>
+  <p>
+    학습용으로 직접 구현해 원리를 확인했으니, 실무에서는 SIMD로 최적화된 <strong>DirectXMath</strong>를 씁니다. 위에서 만든 것들이
+    각각 무엇에 대응하는지 1:1로 맞춰 봅시다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>DirectXMath 버전</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+
+// 1) 도→라디안: toRadians 대응
+float rad = XMConvertToRadians(90.f);        // = π/2
+float deg = XMConvertToDegrees(XM_PIDIV2);   // toDegrees 대응 → 90
+
+// 2) 2D 회전: rotate2D 대응 (Z축 회전 행렬로 (x,y) 평면을 돌림)
+XMVECTOR p = XMVectorSet(x, y, 0.f, 1.f);
+XMMATRIX R = XMMatrixRotationZ(angle);       // 라디안!
+p = XMVector3Transform(p, R);                // 행벡터 규약: v' = v * R
+float nx = XMVectorGetX(p), ny = XMVectorGetY(p);
+
+// sin/cos를 한 번에 (rotate2D의 s,c 재사용에 대응)
+float s, c;
+XMScalarSinCos(&amp;s, &amp;c, angle);               // s=sin, c=cos 동시 계산
+
+// 3) 공전: orbitPosition 대응 (XZ 평면)
+XMVECTOR center = XMVectorSet(0, 0, 0, 1);
+XMVECTOR planet = XMVectorAdd(
+    center,
+    XMVectorSet(radius * c, 0.f, radius * s, 0.f));</code></pre>
+  </div>
+
+  <h3>1:1 대응 표</h3>
+  <table class="impl">
+    <thead><tr><th>직접 구현</th><th>DirectXMath</th><th>대응 설명</th></tr></thead>
+    <tbody>
+      <tr><td><code>PI</code></td><td><code>XM_PI</code>, <code>XM_PIDIV2</code>, <code>XM_2PI</code></td><td>미리 정의된 π 상수들(π, π/2, 2π).</td></tr>
+      <tr><td><code>toRadians(deg)</code></td><td><code>XMConvertToRadians(deg)</code></td><td><code>deg * (π/180)</code>과 동일.</td></tr>
+      <tr><td><code>toDegrees(rad)</code></td><td><code>XMConvertToDegrees(rad)</code></td><td><code>rad * (180/π)</code>과 동일.</td></tr>
+      <tr><td><code>s=sin, c=cos</code> 개별</td><td><code>XMScalarSinCos(&amp;s,&amp;c,angle)</code></td><td>sin/cos를 <strong>한 번에</strong> 계산해 재사용(성능).</td></tr>
+      <tr><td><code>rotate2D(x,y,angle)</code></td><td><code>XMMatrixRotationZ(angle)</code> + <code>XMVector3Transform</code></td><td>Z축 회전은 XY 평면을 돌리는 것 = 우리의 2D 회전과 동일한 <code>c/-s/s/c</code> 성분.</td></tr>
+      <tr><td>공전 좌표 조립</td><td><code>XMVectorSet</code> + <code>XMVectorAdd</code></td><td><code>center + (radius·cos, 0, radius·sin)</code> 벡터 덧셈.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    DirectXMath의 회전/투영 함수도 <strong>전부 라디안</strong>입니다. <code>XMMatrixRotationZ(90.f)</code>처럼 도를 그냥 넣으면
+    "90라디안 회전"이라는 엉뚱한 결과가 나옵니다. 반드시 <code>XMMatrixRotationZ(XMConvertToRadians(90.f))</code>로 감싸세요.
+    또 이 가이드는 <strong>행벡터 규약</strong>(<code>v' = v * R</code>)이라 셰이더에서는 <code>mul(v, R)</code>이고, cbuffer로 올릴 때는
+    <code>XMMatrixTranspose</code>가 필요하다는 점도 잊지 마세요.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./01-dotcross.html">← 내적 · 외적</a>
+    <a href="./01-geometry.html">선형대수와 기하학 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: Pixel Shader — C++/DirectX 11</title>
+<meta name="description" content="픽셀(프래그먼트) 셰이더를 HLSL로 한 줄씩 해부 — 램버트 조명·절차적 무늬·SV_Target·좌표계 규약을 입문자 눈높이로 극한까지 상세하게." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./04-shaders.html">4장. GPU · 셰이더</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">Pixel Shader</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 4</span>
+  <h1 style="font-size:32px; margin:0 0 12px;">Pixel Shader — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead" style="font-size:16px;">
+    픽셀 셰이더(Direct3D에서는 <em>프래그먼트 셰이더</em>와 같은 것)는 화면에 찍힐
+    <strong>후보 픽셀 하나하나마다 실행되어 최종 색을 결정</strong>하는 GPU 프로그램입니다.
+    이 페이지에서는 두 개의 픽셀 셰이더(램버트 조명 · 순수 절차적 무늬)를 가져와서,
+    <strong>시그니처·입력 구조체·시맨틱·각 내장 함수·수식의 성분 하나까지</strong> 남김없이 해부합니다.
+    원본 코드 로직은 그대로 두고 설명만 극한으로 확장했습니다. 규약은 이 책 전체와 동일하게
+    <strong>왼손 좌표계·클립 z [0,1]·텍스처 V 위→아래·행벡터(<code>mul(v, M)</code>)</strong>를 씁니다.
+  </p>
+
+  <!-- ===================================================================== -->
+  <section id="what-is-ps">
+    <h2>1. 픽셀 셰이더가 하는 일: "이 점을 무슨 색으로 칠할까?"</h2>
+    <p>
+      래스터라이저(rasterizer)는 삼각형을 화면의 픽셀 격자에 얹어, 삼각형이 덮는 픽셀마다
+      <strong>프래그먼트(fragment)</strong>라는 "색칠 후보"를 하나씩 만들어 냅니다. 픽셀 셰이더는 바로 이
+      프래그먼트마다 <em>딱 한 번씩</em> 호출되며, 이 함수가 반환하는 <code>float4</code> 하나가 그 픽셀의
+      최종 색(RGBA)이 됩니다. 1920×1080 화면을 꽉 채우면 프레임당 200만 번 이상 실행되므로,
+      픽셀 셰이더는 거의 항상 <strong>파이프라인에서 가장 무거운 단계</strong>가 됩니다.
+    </p>
+    <ol class="steps">
+      <li>버텍스 셰이더가 정점마다 출력한 값(월드 좌표·법선·UV 등)이 삼각형 표면을 따라 <strong>보간(interpolate)</strong>됩니다.</li>
+      <li>보간된 값이 픽셀 셰이더의 <strong>입력 구조체</strong>로 들어옵니다 (버텍스 출력과 <em>같은 시맨틱</em>으로 맞춰야 함).</li>
+      <li>픽셀 셰이더가 그 값 + 상수 버퍼(cbuffer)를 써서 색을 계산합니다.</li>
+      <li>반환한 <code>float4</code>가 <code>: SV_Target</code> 시맨틱을 통해 렌더 타깃(백버퍼)의 해당 픽셀에 써집니다.</li>
+    </ol>
+    <p>
+      비유하자면, 버텍스 셰이더는 "삼각형의 <em>꼭짓점</em>이 화면 어디에 놓이는가"를 정하고,
+      픽셀 셰이더는 "그 삼각형 <em>내부의 각 점</em>이 무슨 색인가"를 정합니다. 꼭짓점 세 개에서
+      정한 값이 그 사이 수천 개 픽셀로 매끄럽게 퍼지는 것이 <strong>보간</strong>입니다.
+    </p>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      "프래그먼트"와 "픽셀"은 엄밀히는 다릅니다. <strong>프래그먼트</strong>는 아직 최종 확정되지 않은
+      "픽셀 후보"입니다. 같은 화면 픽셀 위치에 여러 삼각형이 겹치면 프래그먼트가 여러 개 생기고,
+      깊이 테스트·블렌딩을 거쳐 그중 하나(또는 섞인 결과)가 최종 <strong>픽셀</strong>이 됩니다. Direct3D는
+      스테이지 이름을 "픽셀 셰이더(PS)"라고 부르지만, 하는 일은 OpenGL의 "프래그먼트 셰이더"와 같습니다.
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="lambert">
+    <h2>2. 기본 픽셀 셰이더: 램버트 확산 조명</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 표면의 법선(normal)과 광원 방향을 비교해, "이 면이 빛을 얼마나
+      정면으로 받는가"에 따라 밝기를 정하는 가장 기초적인 조명입니다. <strong>왜 필요한가:</strong> 이것만으로도
+      평평한 색 덩어리가 입체감 있는 3D 물체처럼 보입니다. 실사 조명의 출발점이자, 거의 모든 조명 모델의
+      기본 항(diffuse term)입니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>shaders/basic_ps.hlsl</span><span class="lang">hlsl</span></div>
+      <pre><code class="language-hlsl">// 버텍스 셰이더의 VSOut 과 시맨틱이 일치해야 한다.
+struct PSIn {
+    float4 clipPos  : SV_Position;
+    float3 worldPos : TEXCOORD0;
+    float3 normal   : TEXCOORD1;
+    float2 uv       : TEXCOORD2;
+};
+
+cbuffer Lighting : register(b1) {
+    float3 uLightDir;   // 정규화된 광원 방향
+    float  _pad0;
+    float3 uBaseColor;
+    float  _pad1;
+};
+
+float4 PSMain(PSIn i) : SV_Target {   // 이 픽셀의 최종 색 (RGBA)
+    float3 N = normalize(i.normal);
+    // 램버트 확산: 법선과 광원 방향의 내적(음수는 0으로 클램프)
+    float diff = max(dot(N, normalize(-uLightDir)), 0.0);
+    float3 color = uBaseColor * (0.15 + 0.85 * diff);  // 약간의 앰비언트 + 확산
+    return float4(color, 1.0);
+}</code></pre>
+    </div>
+
+    <h3>2-1. 입력 구조체 <code>PSIn</code> — 보간되어 들어오는 값들</h3>
+    <p>
+      픽셀 셰이더의 입력은 "버텍스 셰이더가 정점마다 내보낸 값을, 래스터라이저가 삼각형 내부 위치에 맞게
+      섞어(보간해) 넘겨준 것"입니다. 그래서 <code>PSIn</code>의 각 멤버 시맨틱은 버텍스 출력(<code>VSOut</code>)과
+      <strong>글자 하나까지 똑같아야</strong> 합니다. 시맨틱이 곧 두 스테이지를 잇는 "배선도"이기 때문입니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>멤버</th><th>시맨틱</th><th>의미 / 보간되는가?</th></tr></thead>
+      <tbody>
+        <tr><td><code>float4 clipPos</code></td><td><code>SV_Position</code></td><td>시스템 값. 픽셀 셰이더에서는 <strong>화면 픽셀 좌표</strong>로 바뀌어 들어옵니다(다음 절 참고).</td></tr>
+        <tr><td><code>float3 worldPos</code></td><td><code>TEXCOORD0</code></td><td>이 픽셀이 대응하는 <strong>월드 공간 위치</strong>. 삼각형 표면을 따라 선형 보간됩니다.</td></tr>
+        <tr><td><code>float3 normal</code></td><td><code>TEXCOORD1</code></td><td>표면 법선. 정점 3개의 법선이 보간되어 <em>중간 방향</em>이 들어옵니다.</td></tr>
+        <tr><td><code>float2 uv</code></td><td><code>TEXCOORD2</code></td><td>텍스처 좌표. 텍스처를 붙일 때 이 값으로 샘플링합니다.</td></tr>
+      </tbody>
+    </table>
+    <p>
+      <strong>수학적 의미 → 기하 직관 → 코드 매핑.</strong> 보간이란, 삼각형의 세 꼭짓점 A·B·C에서 정한 값
+      \(v_A, v_B, v_C\)를, 삼각형 내부 임의 점 P에 대해 <em>무게중심 좌표</em>(barycentric) \((\alpha,\beta,\gamma)\)로
+      섞는 것입니다: \(v_P = \alpha v_A + \beta v_B + \gamma v_C\) (단 \(\alpha+\beta+\gamma=1\)).
+      기하적으로는 "P가 A에 가까울수록 A의 값이 세게 반영된다"는 뜻입니다. 그림으로 상상하면, 삼각형
+      한 꼭짓점만 빨강이고 나머지가 검정이면 그 꼭짓점 주변만 붉고 멀어질수록 검게 그라데이션이 지는 모습입니다.
+      코드 상으로는 우리가 이 보간을 <em>직접 하지 않습니다</em> — 래스터라이저가 자동으로 해서 <code>PSIn i</code>의
+      각 멤버에 이미 보간된 값을 채워 줍니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      법선처럼 "방향"을 나타내는 벡터는 보간하면 <strong>길이가 1이 아니게</strong> 됩니다. 두 단위벡터의 중간을
+      선형으로 섞으면(선분의 중점) 그 벡터는 원보다 안쪽으로 들어가 길이가 1보다 짧아지기 때문입니다.
+      그래서 픽셀 셰이더 첫 줄에서 반드시 <code>normalize(i.normal)</code>로 다시 단위벡터로 되돌립니다.
+      이걸 빠뜨리면 조명이 은근히 어두워지거나 얼룩덜룩해집니다.
+    </div>
+
+    <h3>2-2. 상수 버퍼 <code>Lighting</code> — 왜 패딩이 붙는가</h3>
+    <p>
+      <code>cbuffer</code>는 드로우콜 동안 <em>모든 픽셀이 공유하는 상수</em>입니다(OpenGL의 uniform에 해당).
+      여기서는 광원 방향 <code>uLightDir</code>과 물체 기본색 <code>uBaseColor</code>를 담습니다.
+      눈에 띄는 건 값 사이에 낀 <code>float _pad0;</code>, <code>float _pad1;</code>라는 <strong>패딩 멤버</strong>입니다.
+    </p>
+    <p>
+      <strong>왜 패딩이 필요한가.</strong> HLSL cbuffer에는 엄격한 정렬 규칙이 있습니다: <strong>하나의 값이
+      16바이트 경계(4개의 float 폭)를 가로질러 걸치면 안 됩니다.</strong> <code>float3</code>은 12바이트라서,
+      바로 뒤에 또 <code>float3</code>을 붙이면 두 번째 것이 12~24바이트에 걸쳐 경계를 침범합니다.
+      그래서 <code>float3</code> 뒤에 <code>float</code> 하나(4바이트)를 끼워 딱 16바이트로 채운 뒤, 다음 값을
+      새 16바이트 줄의 처음부터 시작시키는 것입니다. 메모리 배치를 그림으로 그리면 이렇습니다:
+    </p>
+    <div class="code">
+      <div class="code-head"><span>cbuffer Lighting 의 16바이트 슬롯 배치</span><span class="lang">text</span></div>
+      <pre><code class="language-text">바이트 오프셋:  0        4        8        12       16(경계)
+슬롯 0 [0..15]  | uLightDir.x | .y | .z |  _pad0  |
+슬롯 1 [16..31] | uBaseColor.x | .y | .z |  _pad1  |
+                 └── float3 ──────────┘ └ float ┘
+총 32바이트 = 16의 배수  → createConstantBuffer 의 static_assert 통과</code></pre>
+    </div>
+    <p>
+      C++ 쪽에서도 이 레이아웃과 <strong>바이트 단위로 똑같은</strong> 구조체를 정의해야 합니다.
+      아래처럼 패딩까지 맞춰 줍니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>src/lighting_cb.h (C++ 대응 구조체)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+
+// HLSL cbuffer Lighting 과 바이트 단위로 일치해야 한다.
+struct LightingCB {
+    XMFLOAT3 lightDir;   // 12바이트 (register b1, offset 0)
+    float    _pad0;      //  4바이트 → 여기까지 16
+    XMFLOAT3 baseColor;  // 12바이트 (offset 16)
+    float    _pad1;      //  4바이트 → 총 32 (16의 배수)
+};
+static_assert(sizeof(LightingCB) == 32, "cbuffer 레이아웃 불일치");</code></pre>
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      C++ 컴파일러는 <code>XMFLOAT3</code>(그냥 float 3개) 뒤에 자동으로 패딩을 <em>넣지 않습니다</em>. 반면 HLSL은
+      16바이트 정렬을 강제합니다. 그래서 C++ 구조체에서 <code>_pad</code>를 손으로 넣지 않으면, <code>baseColor</code>가
+      offset 12에 놓여 셰이더가 기대하는 offset 16과 <strong>4바이트 어긋나</strong> 색이 엉뚱하게 나옵니다.
+      "값이 한 칸씩 밀려 보이면 패딩부터 의심"이 철칙입니다.
+    </div>
+
+    <h3>2-3. 함수 시그니처 <code>float4 PSMain(PSIn i) : SV_Target</code></h3>
+    <p>
+      이 한 줄에 픽셀 셰이더의 계약이 모두 담겨 있습니다. 조각조각 뜯어봅니다.
+    </p>
+    <ul>
+      <li><strong><code>float4</code> (반환 타입):</strong> 이 픽셀의 색을 <code>(R, G, B, A)</code> 4채널로 돌려줍니다.
+        각 채널은 보통 0.0~1.0 범위의 정규화된 값입니다. 예를 들어 <code>(1,0,0,1)</code>은 불투명한 빨강입니다.</li>
+      <li><strong><code>PSMain</code> (진입점 이름):</strong> C++ 쪽 <code>compileShader(psSrc, "PSMain", "ps_5_0")</code>의
+        <code>entry</code> 인자와 <em>글자까지 일치</em>해야 합니다. 이름이 안 맞으면 컴파일 단계에서 진입점을 못 찾아 실패합니다.</li>
+      <li><strong><code>PSIn i</code> (입력):</strong> 보간되어 들어온 값 묶음. <code>i.normal</code>, <code>i.uv</code>처럼 점으로 접근합니다.</li>
+      <li><strong><code>: SV_Target</code> (출력 시맨틱):</strong> "이 반환값을 <em>렌더 타깃 0번</em>(대개 백버퍼)에 써라"는 뜻입니다.
+        <code>SV_</code> 접두사는 "System Value"로, 파이프라인이 특별하게 취급하는 예약 시맨틱임을 나타냅니다.
+        여러 타깃에 동시에 쓰려면(MRT) <code>SV_Target0</code>, <code>SV_Target1</code>처럼 번호를 붙입니다.</li>
+    </ul>
+
+    <h3>2-4. 첫 줄 <code>float3 N = normalize(i.normal);</code></h3>
+    <p>
+      <strong>수학적 의미:</strong> 벡터 \(\vec{n}\)을 자기 길이로 나눠 길이 1의 단위벡터로 만듭니다:
+      \(\hat{N} = \vec{n} / \lVert \vec{n} \rVert\), 여기서 \(\lVert \vec{n} \rVert = \sqrt{n_x^2 + n_y^2 + n_z^2}\).
+      <strong>기하 직관:</strong> 우리는 법선을 "표면이 어느 <em>방향</em>을 향하는가"로만 쓰지, 그 길이는 의미가 없습니다.
+      방향만 남기고 길이를 1로 통일해 두면 뒤이은 내적이 곧바로 코사인 값이 됩니다(다음 절).
+      <strong>코드 매핑:</strong> 앞서 말했듯 보간 때문에 길이가 흐트러진 <code>i.normal</code>을 여기서 재정규화합니다.
+    </p>
+    <p>
+      <strong>손계산 예:</strong> <code>i.normal = (0, 3, 4)</code>라면 길이는 \(\sqrt{0+9+16}=\sqrt{25}=5\).
+      정규화하면 \((0/5, 3/5, 4/5) = (0,\,0.6,\,0.8)\). 길이를 다시 재보면 \(\sqrt{0.36+0.64}=1\)로 확인됩니다.
+    </p>
+
+    <h3>2-5. 핵심 줄 <code>float diff = max(dot(N, normalize(-uLightDir)), 0.0);</code></h3>
+    <p>
+      이 한 줄이 램버트 조명의 심장입니다. 안에서 밖으로 세 겹을 벗겨 봅니다.
+    </p>
+    <p>
+      <strong>① <code>normalize(-uLightDir)</code> — 광원을 "향하는" 방향.</strong>
+      <code>uLightDir</code>은 "빛이 <em>진행하는</em> 방향"(예: 태양이 아래로 내리쬐면 \((0,-1,0)\))입니다.
+      그런데 조명 계산에서 필요한 건 표면에서 <em>광원 쪽을 바라보는</em> 방향 \(\vec{L}\)입니다. 그래서 부호를 뒤집습니다:
+      빛이 아래로 가면(\((0,-1,0)\)), 표면에서 광원 쪽은 위(\((0,+1,0)\))입니다. cbuffer에서 이미 정규화된 값이 온다고
+      가정하지만, 안전하게 다시 <code>normalize</code>를 겁니다.
+    </p>
+    <p>
+      <strong>② <code>dot(N, L)</code> — 두 방향 사이 각도의 코사인.</strong>
+      두 단위벡터의 내적은 정확히 그 사이각의 코사인입니다: \(\hat{N}\cdot\vec{L} = \cos\theta\).
+      성분으로 풀면 \(N_x L_x + N_y L_y + N_z L_z\)입니다.
+      <strong>기하 직관:</strong> 표면이 광원을 <em>정면</em>으로 마주 보면(\(\theta=0\)) 코사인은 1로 가장 밝고,
+      빛과 <em>나란</em>하면(\(\theta=90^\circ\)) 0으로 어두워지며, <em>등지면</em>(\(\theta&gt;90^\circ\)) 음수가 됩니다.
+      이것이 현실에서 "빛을 비스듬히 받는 면일수록 어둡다"는 램버트 코사인 법칙과 똑같습니다.
+    </p>
+    <p>
+      <strong>③ <code>max(&hellip;, 0.0)</code> — 뒷면은 어둠으로 클램프.</strong>
+      내적이 음수라는 건 표면이 광원을 <em>등지고</em> 있다는 뜻입니다. 빛이 안 드는 뒷면인데 음수 밝기를 그대로 쓰면
+      색이 음수가 되어 계산이 망가집니다. 그래서 0으로 잘라(clamp) "빛이 아예 안 든다"로 처리합니다.
+    </p>
+    <p>
+      <strong>손계산 예:</strong> \(\hat{N}=(0,1,0)\)(위를 향한 바닥), <code>uLightDir</code>\(=(0,-1,0)\)(정수리 위 태양).
+      \(\vec{L}=\text{normalize}(-(0,-1,0))=(0,1,0)\). \(\text{dot}=0\cdot0+1\cdot1+0\cdot0=1\) → <code>diff = max(1,0)=1</code>(최대 밝기).
+      만약 태양이 지평선 쪽 \((1,0,0)\)로 진행한다면 \(\vec{L}=(-1,0,0)\), \(\text{dot}=0\) → 바닥은 빛을 스치듯 받아 <code>diff=0</code>.
+    </p>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      내적이 코사인이 되려면 <strong>두 벡터가 모두 단위벡터</strong>여야 합니다. 그래서 <code>N</code>도 <code>L</code>도
+      <code>normalize</code>를 거칩니다. 한쪽이라도 길이가 1이 아니면 밝기가 그 길이만큼 뻥튀기/축소되어 조명이 틀어집니다.
+    </div>
+
+    <h3>2-6. 색 합성 <code>uBaseColor * (0.15 + 0.85 * diff)</code></h3>
+    <p>
+      최종 밝기 계수를 만드는 부분입니다. <code>0.15</code>는 <strong>앰비언트(ambient) 항</strong>으로,
+      "빛을 직접 안 받는 그늘도 완전한 칠흑은 아니다"를 흉내 내는 최소 밝기입니다(간접광의 아주 거친 근사).
+      <code>0.85 * diff</code>는 <strong>확산(diffuse) 항</strong>으로, 앞에서 구한 방향 의존 밝기입니다.
+      두 계수의 합이 <code>diff=1</code>일 때 정확히 <code>0.15 + 0.85 = 1.0</code>이 되도록 맞춰, 가장 밝은 곳이
+      기본색 그대로 나오고 넘치지(오버플로우) 않게 설계했습니다.
+    </p>
+    <p>
+      <strong>성분별로:</strong> <code>uBaseColor</code>가 \((0.8, 0.2, 0.2)\)(붉은 물체)이고 <code>diff=0.5</code>라면
+      계수는 \(0.15+0.85\times0.5=0.575\). 색은 \((0.8\times0.575,\,0.2\times0.575,\,0.2\times0.575)=(0.46,\,0.115,\,0.115)\).
+      즉 원래 붉은색이 절반쯤 어두워진, 그늘진 붉은색이 됩니다. 채널마다 같은 계수를 곱하므로 <em>색조는 그대로,
+      밝기만</em> 변합니다.
+    </p>
+    <p>
+      마지막 <code>return float4(color, 1.0);</code>는 RGB 3채널에 알파 <code>1.0</code>(완전 불투명)을 붙여
+      4채널 색으로 만들어 <code>SV_Target</code>으로 내보냅니다. <code>float4(color, 1.0)</code>은 "<code>float3</code>과
+      스칼라를 이어 붙여 <code>float4</code>를 만드는" HLSL의 벡터 생성 문법입니다.
+    </p>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      이 셰이더의 <code>normalize</code>·<code>dot</code>·<code>max</code>는 모두 GPU가 한두 사이클에 처리하는 값싼 연산입니다.
+      반면 <code>pow</code>(스페큘러의 광택 지수)나 나눗셈은 상대적으로 비쌉니다. 확산 조명만으로 충분한 표면에는
+      스페큘러를 넣지 않는 것이 픽셀당 수백만 번 반복되는 이 단계에서 실질적인 절약이 됩니다.
+    </div>
+
+    <h3>2-7. DirectXMath / D3D API 대응 (1:1)</h3>
+    <p>
+      셰이더 안 HLSL 함수와, 만약 같은 계산을 CPU(DirectXMath)에서 검증용으로 해본다면 무엇에 대응하는지 짚습니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>HLSL (셰이더 안)</th><th>DirectXMath (CPU 검증용)</th><th>역할</th></tr></thead>
+      <tbody>
+        <tr><td><code>normalize(v)</code></td><td><code>XMVector3Normalize(XMLoadFloat3(&amp;v))</code></td><td>단위벡터화</td></tr>
+        <tr><td><code>dot(a, b)</code></td><td><code>XMVector3Dot(a, b)</code> (결과는 전 성분에 복제됨)</td><td>내적 = 코사인</td></tr>
+        <tr><td><code>max(x, 0.0)</code></td><td><code>XMVectorMax(v, XMVectorZero())</code></td><td>음수 클램프</td></tr>
+        <tr><td><code>float4(color, 1.0)</code></td><td><code>XMVectorSetW(color, 1.0f)</code></td><td>알파 부여</td></tr>
+        <tr><td><code>cbuffer &hellip; : register(b1)</code></td><td><code>PSSetConstantBuffers(1, 1, cb.GetAddressOf())</code></td><td>슬롯 b1에 상수 바인딩</td></tr>
+      </tbody>
+    </table>
+    <p>
+      바인딩 슬롯 번호가 중요합니다. 셰이더가 <code>register(b1)</code>이라고 선언했으면, C++에서도
+      <code>PSSetConstantBuffers</code>의 <em>첫 인자(StartSlot)를 1</em>로 맞춰야 합니다. 버텍스 셰이더의 변환 행렬이
+      b0을 쓰고 조명이 b1을 쓰는 식으로 슬롯을 나눠 두면, 자주 바뀌는 값과 거의 안 바뀌는 값을 분리해 <code>Map</code>
+      횟수를 줄일 수 있습니다.
+    </p>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="procedural">
+    <h2>3. 순수 절차적 픽셀: 좌표만으로 무늬 그리기</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 텍스처도, 3D 메시도 없이 <em>화면 좌표와 시간</em>만으로 원·체커보드·플라스마
+      무늬를 계산으로 그려 내는 셰이더입니다. <strong>왜 필요한가:</strong> 픽셀 셰이더가 "좌표를 색으로 바꾸는 함수"임을
+      가장 순수하게 보여 주고, 셰이더 아트(ShaderToy류)·포스트프로세싱·프로시저럴 텍스처의 기본기가 됩니다.
+      화면 전체를 덮는 사각형 하나에 이 셰이더를 씌우면 전 화면에 무늬가 깔립니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>shaders/procedural_ps.hlsl</span><span class="lang">hlsl</span></div>
+      <pre><code class="language-hlsl">cbuffer ScreenCB : register(b0) {
+    float  uTime;
+    float2 uResolution;   // (width, height) 픽셀 단위
+    float  _pad;
+};
+
+// 픽셀 화면 좌표를 시스템이 SV_Position 으로 넘겨준다 (원점: 좌상단).
+float4 PSMain(float4 fragCoord : SV_Position) : SV_Target {
+    // 화면 좌표를 0..1 로 정규화, 종횡비 보정해 -1..1 로
+    float2 uv = (fragCoord.xy * 2.0 - uResolution) / uResolution.y;
+
+    // (1) 원: 중심까지의 거리로 안/밖 판정 (smoothstep 으로 부드러운 경계)
+    float d = length(uv);
+    float circle = 1.0 - smoothstep(0.48, 0.50, d);
+
+    // (2) 체커: 좌표를 정수 격자로 나눠 짝/홀 판정
+    float2 g = floor(uv * 4.0);
+    float checker = fmod(g.x + g.y, 2.0);
+
+    // (3) 플라스마: 여러 사인파를 시간과 함께 합성
+    float plasma = sin(uv.x * 10.0 + uTime)
+                 + sin(uv.y * 10.0 + uTime * 1.3)
+                 + sin((uv.x + uv.y) * 8.0 - uTime);
+    float3 plasmaCol = 0.5 + 0.5 * cos(float3(0.0, 2.0, 4.0) + plasma);
+
+    // 세 무늬를 섞어 데모용으로 합친다
+    float3 col = lerp(plasmaCol, float3(checker, checker, checker), 0.25);
+    col = lerp(col, float3(1.0, 1.0, 1.0), circle * 0.6);
+
+    return float4(col, 1.0);
+}</code></pre>
+    </div>
+
+    <h3>3-1. 입력이 <code>float4 fragCoord : SV_Position</code> 하나뿐인 이유</h3>
+    <p>
+      앞의 램버트 셰이더는 구조체 <code>PSIn</code>을 받았지만, 여기서는 <code>SV_Position</code> 하나만 받습니다.
+      픽셀 셰이더 단계에서 <code>SV_Position</code>은 <strong>현재 픽셀의 화면 좌표</strong>로 채워져 들어옵니다.
+      <code>fragCoord.x</code>는 왼쪽에서 몇 번째 픽셀인지, <code>fragCoord.y</code>는 위에서 몇 번째 픽셀인지입니다.
+      즉 "지금 내가 칠하는 픽셀이 화면 어디에 있는가"를 공짜로 알려 주는 값이라, 좌표 기반 무늬에 이것만 있으면 충분합니다.
+    </p>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      D3D11의 <code>SV_Position</code> 원점은 <strong>화면 좌상단</strong>이고, 픽셀 중심은 정수가 아니라
+      <code>(x+0.5, y+0.5)</code>입니다. 즉 맨 왼쪽 위 픽셀의 좌표는 \((0.5, 0.5)\)입니다.
+      OpenGL의 <code>gl_FragCoord</code>는 <em>좌하단</em> 원점이라 Y축이 반대입니다. GLSL 셰이더를 옮겨올 때
+      Y를 뒤집지(<code>y = height - y</code> 또는 <code>v = 1 - v</code>) 않으면 무늬가 위아래로 뒤집힙니다.
+      이 책 규약(텍스처 V 위→아래)과 D3D의 좌상단 원점은 서로 일관됩니다.
+    </div>
+
+    <h3>3-2. 좌표 정규화: <code>(fragCoord.xy * 2.0 - uResolution) / uResolution.y</code></h3>
+    <p>
+      픽셀 좌표(예: 0~1920)는 그대로 쓰기 불편합니다. 무늬는 화면 크기와 무관하게 <em>중앙 기준·비율 유지</em>로
+      그려야 하므로, 좌표를 "중앙이 원점, 위아래가 대략 \(-1\)~\(+1\)"인 편한 좌표로 바꿉니다.
+      한 줄에 세 가지 변환이 압축돼 있어 단계별로 풉니다.
+    </p>
+    <ol class="steps">
+      <li><code>fragCoord.xy * 2.0 - uResolution</code>: 좌표 범위 \([0, W]\times[0, H]\)를 <strong>중앙이 0</strong>이 되도록 옮깁니다.
+        \(x=0\)이면 \(-W\), \(x=W\)이면 \(+W\), 중앙 \(x=W/2\)에서 정확히 0. (\(\times2 - W\) = \(2x - W\)이므로 중앙에서 0)</li>
+      <li><code>/ uResolution.y</code>: <strong>세로 높이 H로 나눠</strong> 스케일을 맞춥니다. 세로로는 대략 \(-1\)~\(+1\) 범위가 됩니다.</li>
+      <li>가로도 <em>같은 H로</em> 나누는 것이 핵심입니다. 가로를 W로 나누면 넓은 화면에서 원이 타원으로 찌그러지는데,
+        가로·세로를 <strong>둘 다 H로</strong> 나누면 픽셀의 실제 비율이 보존돼 원이 원으로 유지됩니다. 이것이 <strong>종횡비 보정</strong>입니다.</li>
+    </ol>
+    <p>
+      <strong>손계산 예 (1920×1080):</strong> 화면 정중앙 픽셀 <code>fragCoord=(960.5, 540.5)</code>.
+      \(x: (960.5\times2 - 1920)/1080 = (1921-1920)/1080 \approx 0.0009 \approx 0\).
+      \(y: (540.5\times2 - 1080)/1080 = (1081-1080)/1080 \approx 0\). → 중앙이 거의 정확히 원점 \((0,0)\).
+      맨 오른쪽 \(x=1920\)이면 \((3840-1920)/1080 = 1.78\)로, 16:9 화면의 가로 절반이 \(\approx1.78\)임을 보여 줍니다(세로 절반은 1).
+    </p>
+
+    <h3>3-3. (1) 원 — <code>length</code> + <code>smoothstep</code></h3>
+    <p>
+      <code>float d = length(uv);</code>는 정규화 좌표에서 <strong>원점(화면 중앙)까지의 거리</strong>입니다.
+      \(\lVert uv \rVert = \sqrt{uv_x^2 + uv_y^2}\). 기하적으로, <code>d</code>가 같은 점들은 중앙을 중심으로 한 동심원을 이룹니다.
+      그러니 "<code>d</code>가 어떤 반지름보다 작으면 원 안"이라는 판정으로 원을 그릴 수 있습니다.
+    </p>
+    <p>
+      <code>1.0 - smoothstep(0.48, 0.50, d)</code>를 해부합니다. <code>smoothstep(a, b, x)</code>는
+      <em>x가 a보다 작으면 0, b보다 크면 1, 그 사이는 매끄러운 S자 곡선</em>을 반환합니다(계단 <code>step</code>과 달리 경계가 부드러움).
+    </p>
+    <ul>
+      <li><code>d &lt; 0.48</code> (중앙에 가까움): <code>smoothstep=0</code> → <code>1 - 0 = 1</code> (원 안, 완전히 켜짐)</li>
+      <li><code>d &gt; 0.50</code> (반지름 밖): <code>smoothstep=1</code> → <code>1 - 1 = 0</code> (원 밖, 꺼짐)</li>
+      <li><code>0.48 ≤ d ≤ 0.50</code> (경계 폭 0.02): 0→1로 매끄럽게 변해, <code>1 - (&hellip;)</code>는 1→0으로 부드럽게 사라짐 → <strong>안티에일리어싱된 원 테두리</strong></li>
+    </ul>
+    <p>
+      결과 <code>circle</code>은 원 안이 1, 밖이 0, 경계가 부드러운 마스크입니다. 만약 <code>step(0.5, d)</code>를 썼다면
+      경계가 계단처럼 각져 톱니(에일리어싱)가 보였을 텐데, <code>smoothstep</code>의 0.02 폭 전이가 그걸 매끈하게 없애 줍니다.
+    </p>
+
+    <h3>3-4. (2) 체커보드 — <code>floor</code> + <code>fmod</code></h3>
+    <p>
+      <code>float2 g = floor(uv * 4.0);</code>는 좌표에 4를 곱해 격자를 잘게 나눈 뒤 <code>floor</code>로 <strong>정수 칸 번호</strong>를
+      얻습니다. 예를 들어 <code>uv.x</code>가 0.0~0.25면 <code>uv.x*4</code>는 0.0~1.0, <code>floor</code>하면 칸 <code>0</code>;
+      0.25~0.5면 칸 <code>1</code>&hellip; 이렇게 연속 좌표가 "몇 번째 칸에 속하는가"라는 정수 인덱스로 바뀝니다.
+      <code>float2</code>에 함수를 적용하면 x·y 성분에 <em>각각</em> 적용됩니다(성분별 연산).
+    </p>
+    <p>
+      <code>float checker = fmod(g.x + g.y, 2.0);</code>는 칸의 x·y 번호를 더한 뒤 2로 나눈 나머지를 봅니다.
+      체스판처럼 인접한 칸의 색이 번갈아 바뀌는 원리입니다: 두 인덱스의 합이 <strong>짝수면 나머지 0(검정), 홀수면 1(흰색)</strong>.
+      <code>(0,0)→0</code>, <code>(1,0)→1</code>, <code>(1,1)→0</code>, <code>(2,1)→1</code>&hellip; 대각으로 인접한 칸마다 0/1이 뒤집혀 격자 무늬가 나옵니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      HLSL의 <code>fmod</code>는 GLSL의 <code>mod</code>와 <strong>음수에서 결과 부호가 다릅니다</strong>. <code>fmod</code>는
+      나머지가 피제수(첫 인자)의 부호를 따르므로 <code>fmod(-1, 2) = -1</code>인데, GLSL <code>mod(-1, 2) = 1</code>입니다.
+      화면 중앙을 원점으로 삼아 <code>uv</code>가 음수 영역까지 가는 이 코드에서는, 원점 부근 격자가 대칭이 깨져 보일 수 있으니
+      정확한 체커가 필요하면 <code>abs</code>를 씌우거나 항상 양수 좌표계에서 계산하세요.
+    </div>
+
+    <h3>3-5. (3) 플라스마 — 사인파 합성 + 코사인 팔레트</h3>
+    <p>
+      <code>plasma</code>는 세 개의 사인파를 더한 값입니다. 각 <code>sin</code>은 좌표(공간)와 <code>uTime</code>(시간)을
+      함께 위상으로 받으므로, 공간적으로 물결치면서 시간에 따라 흐르는 파동이 됩니다.
+    </p>
+    <ul>
+      <li><code>sin(uv.x * 10.0 + uTime)</code>: <strong>가로 방향</strong> 줄무늬 파동. <code>*10.0</code>은 주파수(줄무늬 촘촘함), <code>+uTime</code>은 시간에 따라 옆으로 흐르게 함.</li>
+      <li><code>sin(uv.y * 10.0 + uTime * 1.3)</code>: <strong>세로 방향</strong> 파동. 시간 계수가 1.3이라 가로와 <em>다른 속도</em>로 흘러 두 파가 어긋나며 복잡해짐.</li>
+      <li><code>sin((uv.x + uv.y) * 8.0 - uTime)</code>: <strong>대각선</strong> 파동. <code>-uTime</code>이라 반대 방향으로 흘러 간섭 무늬를 만듦.</li>
+    </ul>
+    <p>
+      세 파의 합 <code>plasma</code>는 대략 \(-3\)~\(+3\) 범위를 오갑니다. 이걸 색으로 바꾸는 것이 다음 줄입니다:
+    </p>
+    <p>
+      <code>float3 plasmaCol = 0.5 + 0.5 * cos(float3(0.0, 2.0, 4.0) + plasma);</code>
+      — <strong>코사인 팔레트</strong>라 부르는 유명한 기법입니다. <code>plasma</code>라는 스칼라를 R·G·B 세 채널에
+      <em>서로 다른 위상 오프셋</em>(0, 2, 4 라디안)을 주어 <code>cos</code>에 넣습니다. 채널마다 코사인의 위상이 어긋나므로,
+      같은 <code>plasma</code> 값이라도 R·G·B가 서로 다른 밝기가 되어 <strong>무지개빛 색상</strong>이 나옵니다.
+      <code>cos</code>의 출력 범위 \([-1,1]\)을 <code>0.5 + 0.5 * (&hellip;)</code>로 감싸 \([0,1]\)의 유효한 색 범위로 옮깁니다.
+    </p>
+    <p>
+      <code>float3(0.0, 2.0, 4.0) + plasma</code>에서 스칼라 <code>plasma</code>가 <code>float3</code>에 더해질 때는
+      <strong>세 성분 모두에 같은 값이 브로드캐스트</strong>됩니다. 즉 실제 인자는 \((\text{plasma}+0,\ \text{plasma}+2,\ \text{plasma}+4)\)입니다.
+    </p>
+
+    <h3>3-6. 세 무늬 합성 — <code>lerp</code> 두 번</h3>
+    <p>
+      <code>lerp(a, b, t)</code>는 선형 보간으로, 수식은 정확히 <code>a*(1-t) + b*t</code>입니다.
+      <code>t=0</code>이면 <code>a</code>, <code>t=1</code>이면 <code>b</code>, 중간이면 둘의 혼합입니다.
+      분기(<code>if</code>) 없이 두 값을 섞기 때문에 GPU에서 발산 없이 빠릅니다.
+    </p>
+    <ul>
+      <li><code>col = lerp(plasmaCol, float3(checker,checker,checker), 0.25);</code> — 플라스마 색을 바탕으로, 회색 체커 무늬를 <strong>25%만</strong> 섞습니다.
+        결과는 "무지개 플라스마 위에 은은한 체커가 겹친" 느낌입니다. <code>float3(checker,&hellip;)</code>는 흑백값을 회색 색상으로 만든 것입니다.</li>
+      <li><code>col = lerp(col, float3(1,1,1), circle * 0.6);</code> — 앞 결과에 흰색을 섞되, <strong>섞는 비율이 <code>circle*0.6</code></strong>입니다.
+        원 밖(<code>circle=0</code>)에서는 흰색이 안 섞이고, 원 안(<code>circle=1</code>)에서는 60%만큼 흰색이 섞여 <strong>중앙에 밝은 원이 떠오릅니다</strong>.</li>
+    </ul>
+    <p>
+      즉 세 무늬가 "플라스마(바탕) → 체커(약하게 겹침) → 원(중앙 하이라이트)" 순서로 층층이 쌓입니다.
+      마지막 <code>return float4(col, 1.0);</code>로 알파 1을 붙여 불투명 색을 출력합니다.
+    </p>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      이 셰이더는 <code>sin</code>을 세 번, <code>cos</code>를 (벡터로) 한 번 호출합니다. 삼각함수는 픽셀당 반복되면
+      상당한 비용입니다. 무늬가 화면 크기와 무관하게 매 프레임 전 화면에서 도므로, 실사용에서는 저해상도 렌더 타깃에
+      그린 뒤 확대하거나, 가능한 항(예: 정적인 체커)은 미리 텍스처로 구워(bake) 두는 최적화를 고려하세요.
+      또 무거운 연산은 픽셀 셰이더보다 <strong>버텍스 셰이더</strong>로 옮겨 보간에 맡기는 편이 좋습니다(정점 수 &lt;&lt; 픽셀 수).
+    </div>
+
+    <h3>3-7. 이 셰이더를 띄우는 C++ 쪽 (전체 화면 사각형)</h3>
+    <p>
+      절차적 픽셀 셰이더는 3D 메시가 필요 없고, <strong>화면을 꽉 채우는 삼각형/사각형 하나</strong>만 그리면 됩니다.
+      상수 버퍼 <code>ScreenCB</code>를 만들어 매 프레임 시간과 해상도를 갱신하고, <code>b0</code> 슬롯에 바인딩합니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>src/procedural.cpp (요지)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+// HLSL cbuffer ScreenCB 와 바이트 단위로 일치 (총 16바이트)
+struct ScreenCB {
+    float    time;        // offset 0
+    XMFLOAT2 resolution;  // offset 4  (float2 = 8바이트)
+    float    _pad;        // offset 12 → 총 16 (16의 배수)
+};
+static_assert(sizeof(ScreenCB) == 16, "cbuffer 레이아웃 불일치");
+
+// ── 매 프레임 ──
+ScreenCB s{};
+s.time       = elapsedSeconds;                     // 앱 시작 후 경과 시간(초)
+s.resolution = XMFLOAT2((float)width, (float)height);
+updateConstantBuffer(context.Get(), screenCB.Get(), s);  // Map/Unmap 헬퍼
+
+fullscreenShader.use(context.Get());               // VS(패스스루)+PS 바인딩
+context-&gt;PSSetConstantBuffers(0, 1, screenCB.GetAddressOf());  // b0 슬롯
+
+// 전체 화면 삼각형: 정점 버퍼 없이 SV_VertexID 로 3개 정점 생성하는 기법이 흔하다.
+context-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+context-&gt;Draw(3, 0);                                // 화면을 덮는 큰 삼각형 하나</code></pre>
+    </div>
+    <p>
+      <strong>줄별 매핑.</strong> <code>s.time</code>은 셰이더의 <code>uTime</code>이 되어 애니메이션을 굴립니다.
+      <code>s.resolution</code>은 <code>uResolution</code>으로, 좌표 정규화·종횡비 보정에 쓰입니다.
+      <code>PSSetConstantBuffers(0, &hellip;)</code>의 첫 인자 <code>0</code>이 셰이더의 <code>register(b0)</code>와 짝입니다.
+      <code>Draw(3, 0)</code>은 정점 3개짜리 삼각형 하나를 그리라는 뜻인데, 이 삼각형을 화면보다 크게 잡아
+      화면 전체를 덮게 하는 것이 "풀스크린 삼각형" 기법입니다(사각형 2개보다 픽셀 셰이더 호출이 덜 겹쳐 약간 유리).
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>uTime</code>을 float로 오래 누적하면(앱을 몇 시간 켜 두면) 값이 커져 <code>sin</code>의 정밀도가 떨어지고
+      무늬가 뚝뚝 끊겨 보일 수 있습니다. 시간을 적당한 주기(예: <code>fmod(elapsed, 3600.0)</code>)로 감싸 큰 수를 피하세요.
+      또 <code>_pad</code>를 빼먹으면 C++ 구조체가 12바이트가 되어 16바이트 정렬을 어기고, <code>createConstantBuffer</code>의
+      <code>static_assert</code>에서 컴파일이 막힙니다(그 assert가 바로 이런 실수를 잡아 주는 안전장치입니다).
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="wrapup">
+    <h2>4. 정리: 픽셀 셰이더를 읽는 눈</h2>
+    <p>
+      두 셰이더를 관통하는 뼈대는 같습니다. 픽셀 셰이더는 결국 <strong>"입력(보간값·좌표·상수) → 계산 → <code>float4</code> 색"</strong>이라는
+      순수 함수이고, 그 함수가 픽셀마다 병렬로 수백만 번 돕니다. 조명이든 절차적 무늬든, 하는 일은 "이 점을 무슨 색으로 칠할지"
+      한 가지입니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>기억할 규약</th><th>이 페이지에서의 예</th></tr></thead>
+      <tbody>
+        <tr><td>출력은 <code>: SV_Target</code> 붙인 <code>float4</code></td><td>두 셰이더 모두 <code>return float4(col, 1.0);</code></td></tr>
+        <tr><td>입력 시맨틱은 버텍스 출력과 일치</td><td><code>PSIn</code>의 TEXCOORD0/1/2가 <code>VSOut</code>과 짝</td></tr>
+        <tr><td>방향 벡터는 쓰기 전에 <code>normalize</code></td><td><code>normalize(i.normal)</code></td></tr>
+        <tr><td>cbuffer는 16바이트 정렬 + 슬롯 번호로 바인딩</td><td><code>register(b1)</code> ↔ <code>PSSetConstantBuffers(1, &hellip;)</code></td></tr>
+        <tr><td><code>SV_Position</code> 원점은 좌상단, 중심은 (x+0.5)</td><td>절차적 셰이더의 <code>fragCoord</code></td></tr>
+        <tr><td>분기보다 <code>lerp</code>/<code>smoothstep</code>/<code>step</code></td><td>무늬 합성과 원 경계</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      실무에서는 조명·색공간(감마/sRGB)·톤매핑을 직접 구현하기보다 검증된 라이브러리·표준 파이프라인을 따르는 것이
+      안전합니다. 이 페이지의 셰이더는 <strong>원리를 손으로 따라가 보는 학습용</strong>이며, 실제 렌더러에서는
+      감마 보정과 물리 기반(PBR) 조명 모델로 확장하게 됩니다.
+    </div>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./04-vertexshader.html">← Vertex Shader</a>
+    <a href="./04-computeshader.html">Compute Shader →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

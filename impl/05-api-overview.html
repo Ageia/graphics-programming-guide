@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: D3D11의 두 축 — 디바이스와 즉시 컨텍스트 — C++/DirectX 11</title>
+<meta name="description" content="Direct3D 11의 디바이스(팩토리)와 즉시 컨텍스트(실행기) 모델, 리소스 생성·바인딩·드로우·Present로 이어지는 표준 렌더 루프를 코드 한 줄, 인자 하나까지 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./05-api.html">5장. 그래픽스 API</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">D3D11의 두 축 — 디바이스와 즉시 컨텍스트</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 5</span>
+  <h1>D3D11의 두 축 — 디바이스와 즉시 컨텍스트 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    Direct3D 11을 처음 열어 보면 <code>ID3D11Device</code>와 <code>ID3D11DeviceContext</code>라는 두 인터페이스가 나옵니다.
+    이름이 비슷해서 헷갈리기 쉽지만, 둘은 <strong>역할이 완전히 다릅니다.</strong> 디바이스는 리소스를 <em>만드는</em> 공장이고,
+    컨텍스트는 그 리소스를 <em>파이프라인에 꽂고 그림을 그리는</em> 작업자입니다. 이 두 축을 확실히 구분하는 순간,
+    D3D11 코드가 왜 "만들기 → 꽂기 → 그리기"라는 리듬을 반복하는지 한눈에 보이기 시작합니다.
+    이 페이지에서는 그 리듬을 이루는 표준 렌더 루프를, 함수 시그니처와 인자 하나하나까지 입문자 눈높이로 해부합니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>1. 두 인터페이스: 공장과 작업자</h2>
+  <p>
+    D3D11의 API 표면은 크게 두 덩어리로 나뉩니다. 하나는 <strong>디바이스(<code>ID3D11Device</code>)</strong>,
+    다른 하나는 <strong>즉시 컨텍스트(<code>ID3D11DeviceContext</code>)</strong>입니다. 이 둘의 이름은 비슷하지만
+    담당하는 일이 겹치지 않도록 설계되어 있습니다.
+  </p>
+  <ul>
+    <li><strong>디바이스는 팩토리입니다.</strong> 메서드 이름이 거의 다 <code>Create*</code>로 시작합니다
+      (<code>CreateBuffer</code>, <code>CreateInputLayout</code>, <code>CreateVertexShader</code> …). GPU 위에 실제 리소스를 할당하고,
+      그 리소스를 가리키는 COM 객체 포인터를 돌려줍니다. "무엇을 만들지"를 <code>D3D11_*_DESC</code> 구조체에 적어 넘기면,
+      디바이스가 그 스펙대로 메모리를 확보해 줍니다.</li>
+    <li><strong>즉시 컨텍스트는 실행기입니다.</strong> 메서드 이름이 <code>*Set*</code>(바인딩), <code>Draw*</code>(드로우),
+      <code>Clear*</code>(초기화), <code>Map</code>/<code>Unmap</code>(CPU↔GPU 데이터 전송)으로 이뤄집니다. 이미 만들어진 리소스를
+      파이프라인의 각 스테이지 슬롯에 <em>꽂고</em>, 지금까지 꽂힌 상태로 GPU에게 "그려!"라고 명령합니다.</li>
+  </ul>
+  <p>
+    OpenGL을 먼저 배운 분이라면 이 분리가 낯설 수 있습니다. OpenGL은 <code>glBindBuffer</code>로 "현재 바인딩된 대상"을 바꾸고
+    <code>glBufferData</code>로 그 대상을 채우는, 이른바 <strong>전역 상태 머신(global state machine)</strong>입니다.
+    "지금 무엇이 바인딩되어 있느냐"라는 숨은 문맥에 의존하죠. 반면 D3D11은 <strong>객체를 명시적으로 만든 뒤,
+    그 객체 포인터를 컨텍스트의 슬롯에 직접 꽂는</strong> 모델입니다. 숨은 전역 상태가 적어 코드가 길어지는 대신,
+    "지금 무엇이 바인딩되어 있는가"가 코드에 그대로 드러나 추적하기 쉽습니다.
+  </p>
+
+  <ol class="steps">
+    <li><strong>생성(<code>device-&gt;Create*</code>)</strong> — <code>D3D11_*_DESC</code>로 리소스 스펙을 채워 넘기면 완성된 COM 객체(<code>ID3D11Buffer</code> 등)를 돌려받습니다. 이 시점에 메모리·내용이 확정됩니다.</li>
+    <li><strong>바인딩(<code>context-&gt;*Set*</code>)</strong> — 그 객체 포인터를 파이프라인 스테이지 슬롯(IA/VS/PS/RS/OM …)에 꽂습니다.</li>
+    <li><strong>드로우(<code>context-&gt;Draw*</code>)</strong> — 지금까지 꽂힌 상태 스냅샷으로 GPU가 그립니다.</li>
+    <li><strong>해제(COM 참조 카운트)</strong> — <code>ComPtr</code>가 스코프를 벗어나면 <code>Release()</code>가 자동 호출됩니다. OpenGL의 <code>glDelete*</code> 같은 명시적 삭제가 필요 없습니다.</li>
+  </ol>
+
+  <h3>파이프라인 스테이지와 슬롯이라는 개념</h3>
+  <p>
+    바인딩을 이해하려면 <strong>파이프라인 스테이지(stage)</strong>라는 그림을 먼저 머릿속에 그려야 합니다.
+    GPU가 삼각형 하나를 화면 픽셀로 바꾸는 과정은 컨베이어 벨트처럼 여러 단계로 나뉩니다. 대표적으로:
+  </p>
+  <ul>
+    <li><strong>IA (Input Assembler)</strong> — 정점 버퍼의 바이트들을 읽어 "정점"이라는 단위로 조립하는 입구 단계. 여기에 정점 버퍼·인덱스 버퍼·입력 레이아웃·토폴로지를 꽂습니다.</li>
+    <li><strong>VS (Vertex Shader)</strong> — 정점마다 실행되어 위치를 변환하는 단계. 정점 셰이더와 그 상수 버퍼를 꽂습니다.</li>
+    <li><strong>RS (Rasterizer)</strong> — 삼각형을 픽셀 조각(fragment)으로 쪼개는 단계. 래스터라이저 상태·뷰포트를 꽂습니다.</li>
+    <li><strong>PS (Pixel Shader)</strong> — 픽셀마다 실행되어 최종 색을 계산하는 단계. 픽셀 셰이더·텍스처·상수 버퍼를 꽂습니다.</li>
+    <li><strong>OM (Output Merger)</strong> — 계산된 색을 렌더 타깃에 합성하는 출구 단계. 렌더 타깃(RTV)·깊이 타깃(DSV)·블렌드/뎁스 상태를 꽂습니다.</li>
+  </ul>
+  <p>
+    <strong>슬롯(slot)</strong>은 각 스테이지가 가진 번호가 매겨진 꽂이 구멍입니다. 예를 들어 정점 버퍼는 IA 스테이지의 슬롯 0, 1, 2…에
+    여러 개를 동시에 꽂을 수 있고, 상수 버퍼는 셰이더 스테이지마다 <code>b0</code>, <code>b1</code> … 이라는 슬롯을 가집니다.
+    <code>*Set*</code> 계열 함수의 첫 번째 인자가 대부분 "슬롯 시작 번호"인 이유가 바로 이것입니다. HLSL 셰이더 쪽에서
+    <code>register(b0)</code>이라고 선언한 상수 버퍼는, C++ 쪽에서 슬롯 0에 <code>PSSetConstantBuffers(0, ...)</code>로 꽂은 버퍼와 짝을 이룹니다.
+  </p>
+
+  <h3>상태 객체: 전역 플래그 대신 불변 블록</h3>
+  <p>
+    D3D11의 또 하나의 철학은 대부분의 렌더 상태를 <strong>불변(immutable) 상태 객체</strong>로 미리 굳혀 둔다는 점입니다.
+    OpenGL은 <code>glEnable(GL_BLEND)</code>, <code>glBlendFunc(...)</code>처럼 전역 플래그를 하나씩 토글합니다.
+    이렇게 하면 "지금 블렌딩이 켜져 있나? 함수는 뭐로 설정돼 있나?"를 추적하기 어렵고, 어떤 코드가 몰래 상태를 바꿔 놓으면 버그를 찾기 힘듭니다.
+  </p>
+  <p>
+    D3D11은 래스터·블렌드·뎁스스텐실 설정을 통째로 하나의 객체로 만들어 둡니다.
+    <code>ID3D11RasterizerState</code>, <code>ID3D11BlendState</code>, <code>ID3D11DepthStencilState</code>가 그것입니다.
+    한 번 만들면 내용이 바뀌지 않는(immutable) 블록이라, 드로우 직전에 <code>RSSetState</code> / <code>OMSetBlendState</code> /
+    <code>OMSetDepthStencilState</code>로 통째로 <em>교체</em>만 하면 됩니다. "이 오브젝트는 알파 블렌딩 상태 A로, 저 오브젝트는 불투명 상태 B로"처럼
+    상태 세트를 미리 만들어 두고 드로우마다 갈아 끼우는 방식이라, 상태 관리가 명확하고 GPU 내부에서도 최적화하기 쉽습니다.
+  </p>
+
+  <h3>주요 객체 종류</h3>
+  <table class="impl">
+    <thead><tr><th>객체</th><th>바인딩 API</th><th>역할</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Buffer</strong> (Vertex/Index/Constant)</td><td><code>IASetVertexBuffers</code> / <code>IASetIndexBuffer</code> / <code>VSSetConstantBuffers</code></td><td>정점·인덱스·상수(유니폼) 데이터를 담는 GPU 메모리 덩어리</td></tr>
+      <tr><td><strong>Input Layout</strong></td><td><code>IASetInputLayout</code></td><td>정점 버퍼의 바이트 배치를 셰이더 입력 시맨틱에 매핑(OpenGL의 VAO+VertexAttribPointer 역할)</td></tr>
+      <tr><td><strong>Texture2D + SRV</strong></td><td><code>PSSetShaderResources</code></td><td>이미지 데이터. 셰이더에서 읽으려면 <code>ShaderResourceView</code>로 감싸 바인딩</td></tr>
+      <tr><td><strong>RTV / DSV</strong></td><td><code>OMSetRenderTargets</code></td><td>렌더 결과를 받는 컬러 타깃(RTV)과 깊이/스텐실 타깃(DSV)</td></tr>
+      <tr><td><strong>Shader</strong> (VS/PS/…)</td><td><code>VSSetShader</code> / <code>PSSetShader</code></td><td>스테이지별 컴파일된 셰이더. OpenGL의 링크된 Program 대신 스테이지마다 독립 객체</td></tr>
+      <tr><td><strong>State object</strong></td><td><code>RSSetState</code> / <code>OMSetBlendState</code> / <code>OMSetDepthStencilState</code></td><td>래스터·블렌드·뎁스스텐실 설정을 굳힌 불변 상태 블록</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>2. 표준 렌더 루프 골격</h2>
+  <p>
+    이제 앞의 개념들을 실제 코드로 꿰어 봅시다. 거의 모든 D3D11 프로그램은 아래 순서를 프레임마다 반복합니다.
+  </p>
+  <ol class="steps">
+    <li><strong>지우기</strong> — 컬러 타깃(RTV)과 깊이 타깃(DSV)을 초기화해 이전 프레임 흔적을 없앱니다.</li>
+    <li><strong>셰이더·입력 레이아웃 바인딩</strong> — 어떤 셰이더로, 정점을 어떻게 해석할지 정합니다.</li>
+    <li><strong>정점 버퍼·상수 버퍼 바인딩</strong> — 그릴 데이터와 유니폼 값을 슬롯에 꽂습니다.</li>
+    <li><strong>드로우</strong> — 지금까지 꽂힌 상태로 GPU에게 그리라고 명령합니다.</li>
+    <li><strong>Present</strong> — 다 그린 백버퍼를 화면에 표시합니다.</li>
+  </ol>
+  <p>
+    코드는 <strong>루프 밖에서 한 번만 하는 초기화(생성)</strong>와 <strong>매 프레임 반복하는 루프(바인딩·드로우)</strong>로 나뉩니다.
+    이 구분이 곧 "디바이스로 만들고 → 컨텍스트로 그린다"라는 두 축의 분업을 그대로 보여줍니다.
+    (디바이스·스왑체인 자체를 만드는 부분은 지면상 생략하고 이후 절에서 다룹니다.)
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">using Microsoft::WRL::ComPtr;
+
+// ── 초기화(루프 밖, 한 번만) ─────────────────────────────
+ComPtr&lt;ID3D11Buffer&gt; vbo, cbuffer;
+ComPtr&lt;ID3D11InputLayout&gt; layout;
+ComPtr&lt;ID3D11VertexShader&gt; vs;
+ComPtr&lt;ID3D11PixelShader&gt;  ps;
+
+// 1) 정점 버퍼 생성: DESC를 채워 device->CreateBuffer
+D3D11_BUFFER_DESC vbd{};
+vbd.ByteWidth = sizeof(verts);
+vbd.Usage     = D3D11_USAGE_DEFAULT;
+vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+D3D11_SUBRESOURCE_DATA vinit{ verts, 0, 0 };
+device->CreateBuffer(&amp;vbd, &amp;vinit, &amp;vbo);
+
+// 2) 입력 레이아웃: 정점 바이트 배치를 셰이더 시맨틱에 매핑 (OpenGL의 VAO 역할)
+D3D11_INPUT_ELEMENT_DESC elems[] = {
+    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+};
+device->CreateInputLayout(elems, 1, vsBlob->GetBufferPointer(),
+                          vsBlob->GetBufferSize(), &amp;layout);
+
+// 3) 셰이더 생성 (D3DCompile 결과 blob에서, 4장 참고)
+device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &amp;vs);
+device->CreatePixelShader (psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &amp;ps);
+
+// 4) 상수 버퍼(유니폼): 매 프레임 갱신할 색상 하나
+D3D11_BUFFER_DESC cbd{};
+cbd.ByteWidth      = 16;                       // float4, 16바이트 정렬
+cbd.Usage          = D3D11_USAGE_DYNAMIC;      // CPU가 Map으로 갱신
+cbd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+device->CreateBuffer(&amp;cbd, nullptr, &amp;cbuffer);
+
+// 깊이 테스트는 뎁스스텐실 상태 객체 + DSV로 (뒤에서 상세히)
+
+// ── 프레임 루프 (Win32 메시지 펌프) ──────────────────────
+MSG msg{};
+while (msg.message != WM_QUIT) {
+    if (PeekMessage(&amp;msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&amp;msg); DispatchMessage(&amp;msg); continue; }
+
+    // (a) 지우기: 컬러 타깃(RTV) + 깊이 타깃(DSV)를 초기화
+    const float clear[4] = { 0.06f, 0.07f, 0.10f, 1.0f };
+    context->ClearRenderTargetView(rtv.Get(), clear);
+    context->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    context->OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());
+
+    // (b) 셰이더 + 입력 레이아웃 바인딩
+    context->IASetInputLayout(layout.Get());
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(vs.Get(), nullptr, 0);
+    context->PSSetShader(ps.Get(), nullptr, 0);
+
+    // (c) 상수 버퍼 갱신: Map으로 색상 값을 밀어 넣고 슬롯 b0에 바인딩
+    D3D11_MAPPED_SUBRESOURCE m{};
+    context->Map(cbuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;m);
+    float color[4] = { 0.9f, 0.4f, 0.2f, 1.0f };
+    memcpy(m.pData, color, sizeof(color));
+    context->Unmap(cbuffer.Get(), 0);
+    context->PSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+
+    // (d) 정점 버퍼 바인딩: stride/offset과 함께 슬롯 0에
+    UINT stride = 3 * sizeof(float), offset = 0;
+    context->IASetVertexBuffers(0, 1, vbo.GetAddressOf(), &amp;stride, &amp;offset);
+
+    // (e) 드로우: 지금까지 꽂힌 상태 스냅샷으로 GPU가 그린다
+    context->Draw(3, 0);
+
+    // (f) Present: 백버퍼 ↔ 프론트버퍼 교체 → 화면에 표시
+    swapChain->Present(1, 0);  // 첫 인자 = SyncInterval (1 = V-Sync ON)
+}</code></pre>
+  </div>
+
+  <p>
+    이 코드는 길어 보이지만, 실은 <strong>"디바이스로 만든다 → 컨텍스트로 꽂고 그린다"</strong>라는 한 문장의 구체화입니다.
+    앞부분(1~4번)은 전부 <code>device->Create*</code>이고, 루프 안(a~f)은 전부 <code>context-></code>·<code>swapChain-></code>입니다.
+    이제 이 두 덩어리를 한 줄씩 뜯어봅시다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>3. 초기화 파트 해부 — 디바이스가 만드는 것들</h2>
+
+  <h3>3-1. ComPtr — 잊어도 새지 않는 스마트 포인터</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">using Microsoft::WRL::ComPtr;
+
+ComPtr&lt;ID3D11Buffer&gt; vbo, cbuffer;
+ComPtr&lt;ID3D11InputLayout&gt; layout;
+ComPtr&lt;ID3D11VertexShader&gt; vs;
+ComPtr&lt;ID3D11PixelShader&gt;  ps;</code></pre>
+  </div>
+  <p>
+    D3D11 객체는 모두 <strong>COM(Component Object Model)</strong> 객체입니다. COM 객체는 내부에 <strong>참조 카운트(reference count)</strong>라는
+    숫자를 하나 들고 있어서, 이 객체를 참조하는 곳이 늘면 <code>AddRef()</code>로 +1, 참조를 놓으면 <code>Release()</code>로 -1을 합니다.
+    카운트가 0이 되면 객체가 스스로 메모리를 해제합니다. 문제는 <code>Release()</code>를 손으로 정확히 짝 맞춰 호출하기가 무척 까다롭다는 점입니다.
+    한 번 빠뜨리면 메모리 누수, 두 번 부르면 크래시죠.
+  </p>
+  <p>
+    <code>ComPtr&lt;T&gt;</code>는 이 참조 카운트 관리를 자동으로 해 주는 스마트 포인터입니다. <code>Microsoft::WRL</code>(Windows Runtime Library) 네임스페이스에
+    들어 있고, <code>&lt;wrl/client.h&gt;</code>를 포함하면 씁니다. <code>using Microsoft::WRL::ComPtr;</code>은 매번 긴 네임스페이스를 쓰지 않도록
+    이름만 현재 스코프로 끌어오는 선언입니다(<code>using namespace</code>로 통째로 끌어오는 것보다 안전합니다). C++ 표준의 <code>std::shared_ptr</code>이
+    자기만의 카운터로 일반 객체를 관리한다면, <code>ComPtr</code>은 <strong>COM 객체가 <em>스스로 들고 있는</em> 참조 카운트</strong>를 이용한다는 점이 다릅니다.
+  </p>
+  <ul>
+    <li><code>ComPtr&lt;ID3D11Buffer&gt; vbo, cbuffer;</code> — 아직 아무 객체도 안 가리키는 빈 포인터 두 개를 선언합니다. 내부 원시 포인터는 <code>nullptr</code>입니다.</li>
+    <li>이 변수가 <strong>스코프를 벗어나 소멸</strong>하면 소멸자가 자동으로 <code>Release()</code>를 호출합니다. 그래서 OpenGL의 <code>glDeleteBuffers</code> 같은 명시적 삭제가 필요 없습니다.</li>
+    <li>대입(<code>a = b</code>) 시에는 <code>AddRef()</code>(b가 가리키던 객체의 카운트 +1)와 기존 a가 가리키던 객체의 <code>Release()</code>가 알아서 일어납니다.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag">함정</span>
+    <code>ComPtr</code>에서 값을 받을 때 자주 쓰는 두 메서드를 헷갈리면 안 됩니다.
+    <code>.Get()</code>은 <strong>원시 포인터(<code>T*</code>)를 그대로 꺼내</strong> "읽기용"으로 넘길 때(예: <code>context->VSSetShader(vs.Get(), ...)</code>) 쓰고,
+    <code>.GetAddressOf()</code>는 <strong>포인터의 주소(<code>T**</code>)를 넘겨</strong> "여기에 결과를 채워 달라" 하거나 배열 시작 주소로 쓸 때 씁니다.
+    <code>&amp;vbo</code>처럼 <code>ComPtr</code>에 직접 <code>&amp;</code>를 붙이면 내부적으로 기존 참조를 <code>Release()</code>하고 <code>T**</code>를 돌려주므로, 새로 만든 객체를 받는 <code>Create*</code>의 마지막 인자로 적합합니다.
+  </div>
+
+  <h3>3-2. 정점 버퍼 생성 — DESC로 스펙을 적어 CreateBuffer</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">D3D11_BUFFER_DESC vbd{};
+vbd.ByteWidth = sizeof(verts);
+vbd.Usage     = D3D11_USAGE_DEFAULT;
+vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+D3D11_SUBRESOURCE_DATA vinit{ verts, 0, 0 };
+device->CreateBuffer(&amp;vbd, &amp;vinit, &amp;vbo);</code></pre>
+  </div>
+  <p>
+    <strong>무엇을 만드나:</strong> 삼각형의 정점 좌표들이 담긴 배열 <code>verts</code>를 GPU 메모리로 올려 정점 버퍼를 만듭니다.
+    <strong>왜 필요한가:</strong> GPU는 CPU 메모리의 배열을 직접 못 읽습니다. 반드시 GPU가 접근 가능한 버퍼로 복사해 두어야
+    정점 셰이더가 정점들을 읽어 화면에 그릴 수 있습니다.
+  </p>
+  <p>
+    D3D11에서 리소스를 만드는 방식은 항상 똑같습니다. <strong>① <code>*_DESC</code> 구조체에 "어떤 리소스인지"를 적고 →
+    ② 초기 데이터가 있으면 <code>SUBRESOURCE_DATA</code>에 담고 → ③ <code>device->Create*</code>에 둘 다 넘긴다.</strong> 한 줄씩 봅시다.
+  </p>
+  <ul>
+    <li><code>D3D11_BUFFER_DESC vbd{};</code> — 버퍼 스펙 구조체를 선언합니다. 끝의 <code>{}</code>는 <strong>값 초기화(value-initialization)</strong>로,
+      구조체의 모든 멤버를 0으로 채웁니다. 이게 중요한 이유는 뒤에서 명시적으로 안 건드린 멤버들(<code>CPUAccessFlags</code>, <code>MiscFlags</code> 등)이
+      <strong>쓰레기 값이 아니라 0</strong>으로 보장되기 때문입니다. 0이 곧 "해당 기능 안 씀"을 의미하는 경우가 많아, 이 습관이 미묘한 버그를 막아 줍니다.</li>
+    <li><code>vbd.ByteWidth = sizeof(verts);</code> — 버퍼의 <strong>전체 크기(바이트)</strong>입니다. <code>sizeof(verts)</code>는 배열 전체 크기(정점 개수 × 정점 하나 크기)를
+      컴파일 타임에 계산합니다. 예를 들어 <code>float verts[9]</code>(정점 3개 × xyz 3개)라면 <code>9 × 4 = 36</code>바이트입니다.</li>
+    <li><code>vbd.Usage = D3D11_USAGE_DEFAULT;</code> — 이 버퍼는 <strong>GPU가 주로 쓰고, CPU는 만든 뒤 손대지 않는</strong> 정적 데이터라는 뜻입니다.
+      삼각형 정점처럼 한 번 올리면 안 바뀌는 데이터에 적합하고, GPU 접근이 가장 빠릅니다.</li>
+    <li><code>vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;</code> — 이 버퍼를 <strong>정점 버퍼 용도</strong>로 쓰겠다고 선언합니다.
+      D3D11은 용도를 미리 알아야 그에 맞게 메모리를 배치합니다. 같은 버퍼를 인덱스 버퍼로도 쓰려면 <code>| D3D11_BIND_INDEX_BUFFER</code>처럼 플래그를 OR로 결합합니다.</li>
+    <li><code>D3D11_SUBRESOURCE_DATA vinit{ verts, 0, 0 };</code> — 버퍼를 만들면서 <strong>동시에 채울 초기 데이터</strong>를 지정합니다.
+      세 멤버는 순서대로 <code>{ pSysMem, SysMemPitch, SysMemSlicePitch }</code>입니다. <code>pSysMem = verts</code>는 복사해 올 CPU 메모리 주소이고,
+      뒤의 두 값(행 간격·슬라이스 간격)은 <strong>1차원 버퍼에서는 의미가 없어 0</strong>입니다(2D/3D 텍스처에서만 씁니다).</li>
+    <li><code>device->CreateBuffer(&amp;vbd, &amp;vinit, &amp;vbo);</code> — 실제 생성입니다. 세 인자를 하나씩 보면:
+      <br>· <code>&amp;vbd</code> — "무엇을 만들지" 스펙 구조체의 주소.
+      <br>· <code>&amp;vinit</code> — "무엇으로 채울지" 초기 데이터의 주소. (초기 데이터 없이 빈 버퍼를 만들려면 <code>nullptr</code>.)
+      <br>· <code>&amp;vbo</code> — "만든 결과를 어디에 받을지". <code>ComPtr</code>에 <code>&amp;</code>를 붙였으므로 <code>ID3D11Buffer**</code>가 넘어가 완성된 객체 포인터가 여기에 채워집니다.</li>
+  </ul>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>D3D11_USAGE_DEFAULT</code> 버퍼는 <code>Map</code>으로 CPU가 매 프레임 갱신할 수 없습니다.
+    갱신하려 하면 실패합니다. CPU가 자주 바꾸는 데이터(상수 버퍼 등)는 뒤의 상수 버퍼처럼 <code>D3D11_USAGE_DYNAMIC</code> + <code>D3D11_CPU_ACCESS_WRITE</code>로 만들어야 합니다.
+  </div>
+
+  <h3>3-3. 입력 레이아웃 — 바이트를 시맨틱에 매핑</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">D3D11_INPUT_ELEMENT_DESC elems[] = {
+    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+};
+device->CreateInputLayout(elems, 1, vsBlob->GetBufferPointer(),
+                          vsBlob->GetBufferSize(), &amp;layout);</code></pre>
+  </div>
+  <p>
+    <strong>무엇을 만드나:</strong> 정점 버퍼 안의 <em>납작한 바이트 나열</em>이 셰이더 입장에서 어떤 필드(위치·색·노멀 …)인지 알려 주는 "지도"를 만듭니다.
+    <strong>왜 필요한가:</strong> GPU는 <code>0x3F800000 0x00000000 ...</code>라는 바이트만 볼 뿐, 이게 위치인지 색인지 모릅니다.
+    입력 레이아웃이 "처음 12바이트는 POSITION이고 float 3개다"라고 알려 줘야 정점 셰이더가 올바르게 읽습니다. OpenGL의 <code>VAO</code> + <code>glVertexAttribPointer</code>와 정확히 같은 역할입니다.
+  </p>
+  <p>
+    <code>D3D11_INPUT_ELEMENT_DESC</code>의 일곱 멤버를, 예제의 <code>{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 }</code>에 대입해 봅시다.
+  </p>
+  <table class="impl">
+    <thead><tr><th>멤버</th><th>예제 값</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td><code>SemanticName</code></td><td><code>"POSITION"</code></td><td>HLSL 정점 셰이더 입력의 <code>: POSITION</code> 시맨틱과 이름으로 짝을 맺습니다.</td></tr>
+      <tr><td><code>SemanticIndex</code></td><td><code>0</code></td><td>같은 시맨틱을 여러 개 쓸 때 구분(<code>TEXCOORD0</code>, <code>TEXCOORD1</code> …). 하나뿐이면 0.</td></tr>
+      <tr><td><code>Format</code></td><td><code>R32G32B32_FLOAT</code></td><td>이 필드가 <strong>32비트 float 3개</strong>(=12바이트)임을 뜻합니다. R/G/B는 색이 아니라 그냥 "채널 3개"의 관례적 이름입니다.</td></tr>
+      <tr><td><code>InputSlot</code></td><td><code>0</code></td><td>어느 정점 버퍼 슬롯에서 읽을지. <code>IASetVertexBuffers</code>로 꽂은 슬롯 번호와 맞춥니다.</td></tr>
+      <tr><td><code>AlignedByteOffset</code></td><td><code>0</code></td><td>정점 구조체 안에서 이 필드가 시작하는 바이트 위치. 첫 필드라 0입니다.</td></tr>
+      <tr><td><code>InputSlotClass</code></td><td><code>PER_VERTEX_DATA</code></td><td>정점마다 다른 데이터(대부분 이것). 인스턴싱에서는 <code>PER_INSTANCE_DATA</code>를 씁니다.</td></tr>
+      <tr><td><code>InstanceDataStepRate</code></td><td><code>0</code></td><td>인스턴스 데이터 갱신 주기. 정점 단위 데이터면 0입니다.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>CreateInputLayout</code>의 인자도 봅시다. <code>elems</code>는 방금 만든 원소 배열, <code>1</code>은 원소 개수입니다.
+    그다음 <code>vsBlob->GetBufferPointer()</code>와 <code>GetBufferSize()</code>가 중요한데, D3D11은 <strong>컴파일된 정점 셰이더 바이트코드</strong>를
+    함께 받아 "이 레이아웃이 실제 셰이더 입력과 맞는지" 검증합니다. 그래서 레이아웃 생성에 셰이더 blob이 필요합니다.
+    마지막 <code>&amp;layout</code>이 완성된 <code>ID3D11InputLayout</code>을 받습니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>Format</code>과 실제 정점 데이터의 크기가 어긋나면 삼각형이 찌그러지거나 안 나옵니다.
+    <code>R32G32B32_FLOAT</code>는 정확히 12바이트를 소비합니다. 정점에 위치(12) + 색(12)이 있는데 <code>AlignedByteOffset</code>을 색에 12로 안 적으면
+    색이 위치 바이트를 겹쳐 읽습니다. 여러 필드를 쓸 땐 오프셋을 <code>D3D11_APPEND_ALIGNED_ELEMENT</code>로 두면 자동 누적돼 실수를 줄일 수 있습니다.
+  </div>
+
+  <h3>3-4. 셰이더 생성 — blob에서 스테이지 객체로</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &amp;vs);
+device->CreatePixelShader (psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &amp;ps);</code></pre>
+  </div>
+  <p>
+    <strong>무엇을 만드나:</strong> 4장에서 <code>D3DCompile</code>로 얻은 컴파일 결과(바이트코드 blob)를, 파이프라인에 꽂을 수 있는
+    <strong>스테이지별 셰이더 객체</strong>로 변환합니다. <strong>왜 필요한가:</strong> blob은 그냥 바이트 덩어리라 그대로는 못 꽂습니다.
+    디바이스가 이를 GPU용 셰이더 객체로 등록해 줘야 <code>VSSetShader</code>로 바인딩할 수 있습니다.
+  </p>
+  <p>
+    OpenGL과의 큰 차이가 여기 드러납니다. OpenGL은 정점·픽셀 셰이더를 <strong>하나의 Program으로 링크</strong>해서 씁니다. D3D11은
+    <strong>스테이지마다 독립된 객체</strong>(<code>ID3D11VertexShader</code>, <code>ID3D11PixelShader</code> …)라, 정점 셰이더는 그대로 두고 픽셀 셰이더만 갈아 끼우는 조합이 자유롭습니다.
+    인자를 보면: 앞의 두 개는 blob의 시작 주소와 크기, 세 번째 <code>nullptr</code>은 <strong>클래스 링키지(동적 셰이더 링킹)</strong> 자리로 안 쓰면 <code>nullptr</code>,
+    마지막 <code>&amp;vs</code>/<code>&amp;ps</code>가 완성된 객체를 받습니다.
+  </p>
+
+  <h3>3-5. 상수 버퍼 — 매 프레임 바뀌는 유니폼</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">D3D11_BUFFER_DESC cbd{};
+cbd.ByteWidth      = 16;                       // float4, 16바이트 정렬
+cbd.Usage          = D3D11_USAGE_DYNAMIC;      // CPU가 Map으로 갱신
+cbd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+device->CreateBuffer(&amp;cbd, nullptr, &amp;cbuffer);</code></pre>
+  </div>
+  <p>
+    <strong>무엇을 만드나:</strong> 셰이더에 넘길 "유니폼" 값(여기서는 색상 <code>float4</code> 하나)을 담을, <strong>매 프레임 CPU가 갱신할 수 있는</strong> 버퍼입니다.
+    <strong>왜 필요한가:</strong> 시간에 따라 변하는 값(색, 변환 행렬, 카메라 위치 …)을 셰이더에 전달하려면, 상수로 하드코딩할 수 없으니
+    CPU가 매 프레임 값을 밀어 넣을 수 있는 통로가 필요합니다. 그게 상수 버퍼입니다.
+  </p>
+  <p>
+    정점 버퍼와 <code>Usage</code>·플래그가 다른 점에 주목하세요. 이 버퍼는 <strong>"만든 뒤에도 CPU가 계속 쓴다"</strong>가 핵심입니다.
+  </p>
+  <ul>
+    <li><code>cbd.ByteWidth = 16;</code> — <code>float4</code>(float 4개 × 4바이트 = 16바이트)입니다. <strong>상수 버퍼는 크기가 반드시 16바이트의 배수</strong>여야 한다는 규칙이 있어,
+      정확히 딱 맞습니다. 색이 <code>float3</code>(12바이트)여도 16으로 올림(패딩)해야 합니다. 이 16바이트 정렬 규칙은 GPU가 상수를 16바이트 레지스터 단위로 읽기 때문입니다.</li>
+    <li><code>cbd.Usage = D3D11_USAGE_DYNAMIC;</code> — <strong>CPU가 자주 쓰고 GPU가 읽는</strong> 용도입니다. 매 프레임 <code>Map</code>으로 값을 갱신하려면 이 Usage여야 합니다.</li>
+    <li><code>cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;</code> — 상수 버퍼 용도임을 선언합니다.</li>
+    <li><code>cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;</code> — <strong>CPU가 쓰기 접근</strong>을 하겠다는 허가입니다. <code>DYNAMIC</code> + <code>WRITE</code>가 <code>Map</code>을 쓰기 위한 짝입니다.</li>
+    <li><code>device->CreateBuffer(&amp;cbd, nullptr, &amp;cbuffer);</code> — 두 번째 인자가 <code>nullptr</code>인 점에 주목하세요. 정점 버퍼와 달리 <strong>초기 데이터 없이 빈 버퍼</strong>로 만듭니다. 어차피 매 프레임 <code>Map</code>으로 채울 것이기 때문입니다.</li>
+  </ul>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    상수 버퍼 크기를 16의 배수로 안 맞추면 <code>CreateBuffer</code>가 실패하거나 셰이더가 값을 어긋나게 읽습니다.
+    또한 HLSL의 <code>cbuffer</code> 안에서 <code>float3</code> 뒤에 <code>float</code>를 붙이면 16바이트 경계를 넘지 않게 <strong>같은 16바이트 슬롯에 묶이는(packing)</strong> 규칙이 있어,
+    C++ 구조체와 HLSL <code>cbuffer</code>의 메모리 배치를 정확히 일치시키지 않으면 값이 밀립니다. C++ 쪽 구조체에 명시적 패딩 멤버를 넣어 맞추는 습관이 안전합니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. 프레임 루프 파트 해부 — 컨텍스트가 그리는 순서</h2>
+  <p>
+    이제 매 프레임 반복되는 루프를 (a)~(f) 순서대로 봅니다. 이 순서에는 이유가 있습니다.
+    <strong>지운 뒤에 그려야</strong> 이전 프레임이 안 남고, <strong>바인딩한 뒤에 드로우해야</strong> GPU가 무엇으로 그릴지 알며,
+    <strong>다 그린 뒤에 Present해야</strong> 완성된 화면이 나갑니다.
+  </p>
+
+  <h3>4-0. Win32 메시지 펌프 — 창을 살아 있게 유지</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">MSG msg{};
+while (msg.message != WM_QUIT) {
+    if (PeekMessage(&amp;msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&amp;msg); DispatchMessage(&amp;msg); continue; }
+    // ... 렌더링 ...
+}</code></pre>
+  </div>
+  <p>
+    이 부분은 D3D가 아니라 <strong>Win32 윈도우 시스템</strong>의 코드입니다. 운영체제는 창에 일어나는 사건(마우스 클릭, 크기 변경, 닫기 버튼 …)을
+    <strong>메시지 큐</strong>에 쌓아 둡니다. 프로그램이 이 큐를 주기적으로 비워 주지 않으면 창이 "응답 없음"으로 얼어붙습니다.
+  </p>
+  <ul>
+    <li><code>PeekMessage(&amp;msg, ..., PM_REMOVE)</code> — 큐에 메시지가 있으면 하나 꺼내(<code>PM_REMOVE</code>) <code>msg</code>에 담고 <code>true</code>를 반환합니다.
+      <strong>없으면 즉시 <code>false</code>를 반환하고 넘어갑니다</strong>(블로킹하는 <code>GetMessage</code>와 다른 핵심 차이). 그래서 메시지가 없는 대부분의 프레임에는 곧장 렌더링으로 갑니다.</li>
+    <li><code>TranslateMessage</code>는 키 입력을 문자 메시지로 변환하고, <code>DispatchMessage</code>는 메시지를 창 프로시저(<code>WndProc</code>)로 전달합니다.</li>
+    <li><code>continue;</code> — 메시지를 처리한 프레임은 렌더링을 건너뛰고 다음 반복으로 갑니다. 큐를 다 비운 뒤에야 렌더링이 돌아, 입력 반응성이 유지됩니다.</li>
+    <li>사용자가 창을 닫으면 <code>WM_QUIT</code>가 들어와 <code>while</code> 조건이 거짓이 되어 루프가 끝납니다.</li>
+  </ul>
+
+  <h3>4-1. (a) 지우기와 렌더 타깃 바인딩</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">const float clear[4] = { 0.06f, 0.07f, 0.10f, 1.0f };
+context->ClearRenderTargetView(rtv.Get(), clear);
+context->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+context->OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());</code></pre>
+  </div>
+  <p>
+    <strong>무엇을 하나:</strong> 이번 프레임을 그리기 전에 캔버스를 깨끗이 지우고, 그림이 담길 타깃을 OM 스테이지에 꽂습니다.
+  </p>
+  <ul>
+    <li><code>const float clear[4] = { 0.06f, 0.07f, 0.10f, 1.0f };</code> — 배경으로 채울 색을 <strong>RGBA 순서</strong>로 지정합니다.
+      각 값은 0.0~1.0 범위로, 여기서는 어두운 남색(R=0.06, G=0.07, B=0.10)에 알파 1.0(완전 불투명)입니다.
+      숫자를 그대로 읽으면 "거의 검정에 가까운 짙은 청회색"입니다.</li>
+    <li><code>ClearRenderTargetView(rtv.Get(), clear)</code> — 컬러 타깃(RTV)의 모든 픽셀을 위 색으로 덮어씁니다. <code>rtv.Get()</code>은 앞서 설명한 대로 원시 포인터를 읽기용으로 넘기는 것입니다.</li>
+    <li><code>ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0)</code> — 깊이 타깃(DSV)을 초기화합니다.
+      세 번째 인자 <code>1.0f</code>는 <strong>깊이 버퍼를 "가장 먼 값" 1.0으로 채우라</strong>는 뜻입니다. 규약상 클립 z는 [0, 1] 범위이고 <strong>1.0이 가장 멂</strong>이라,
+      이렇게 초기화해야 이후 그려질 모든 오브젝트가 "이보다는 가깝다"며 깊이 테스트를 통과합니다. 마지막 <code>0</code>은 스텐실 초기값입니다.
+      두 번째 인자 <code>D3D11_CLEAR_DEPTH</code>는 "깊이만 지우고 스텐실은 건드리지 마라"는 플래그입니다.</li>
+    <li><code>OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get())</code> — <strong>결과를 받을 타깃</strong>을 OM 스테이지에 꽂습니다.
+      첫 인자 <code>1</code>은 컬러 타깃 개수, 둘째 <code>rtv.GetAddressOf()</code>는 RTV 배열의 시작 주소(<code>ID3D11RenderTargetView* const*</code>), 셋째 <code>dsv.Get()</code>은 깊이 타깃입니다.
+      여러 개의 RTV를 동시에 쓰는 MRT(Multiple Render Targets)에서는 첫 인자가 2, 3…이 됩니다.</li>
+  </ul>
+  <p>
+    참고로 순서상 <code>Clear</code>가 <code>OMSetRenderTargets</code>보다 앞에 있어도 됩니다. <code>Clear*</code> 함수는 인자로 받은 타깃을 직접 지우지,
+    "현재 바인딩된 타깃"을 지우는 게 아니기 때문입니다. 이것도 D3D11이 전역 상태에 덜 의존한다는 증거입니다.
+  </p>
+
+  <h3>4-2. (b) 셰이더와 입력 레이아웃 바인딩</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">context->IASetInputLayout(layout.Get());
+context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+context->VSSetShader(vs.Get(), nullptr, 0);
+context->PSSetShader(ps.Get(), nullptr, 0);</code></pre>
+  </div>
+  <ul>
+    <li><code>IASetInputLayout(layout.Get())</code> — 앞서 만든 입력 레이아웃을 IA 스테이지에 꽂아, 정점 바이트를 어떻게 해석할지 정합니다.</li>
+    <li><code>IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)</code> — 정점들을 어떻게 이어 도형을 만들지 정합니다.
+      <code>TRIANGLELIST</code>는 <strong>정점 3개마다 독립된 삼각형 하나</strong>로 묶습니다(0,1,2가 첫 삼각형, 3,4,5가 둘째 …).
+      선을 그리려면 <code>LINELIST</code>, 삼각형들이 변을 공유하면 <code>TRIANGLESTRIP</code>을 씁니다.</li>
+    <li><code>VSSetShader(vs.Get(), nullptr, 0)</code> / <code>PSSetShader(ps.Get(), nullptr, 0)</code> — 각각 정점·픽셀 셰이더를 해당 스테이지에 꽂습니다.
+      뒤의 두 인자(<code>nullptr, 0</code>)는 클래스 인스턴스 배열과 개수로, 동적 셰이더 링킹을 안 쓰면 항상 <code>nullptr, 0</code>입니다.</li>
+  </ul>
+
+  <h3>4-3. (c) 상수 버퍼 갱신 — Map / memcpy / Unmap</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">D3D11_MAPPED_SUBRESOURCE m{};
+context->Map(cbuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;m);
+float color[4] = { 0.9f, 0.4f, 0.2f, 1.0f };
+memcpy(m.pData, color, sizeof(color));
+context->Unmap(cbuffer.Get(), 0);
+context->PSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());</code></pre>
+  </div>
+  <p>
+    <strong>무엇을 하나:</strong> GPU 메모리에 있는 상수 버퍼를 CPU가 잠깐 "열어(Map)" 새 색상 값을 써넣고 다시 "닫는(Unmap)" 과정입니다.
+    <strong>왜 이렇게 하나:</strong> GPU 버퍼는 CPU가 직접 포인터로 못 만집니다. <code>Map</code>이 <strong>임시로 CPU가 접근 가능한 주소를 빌려주면</strong>,
+    거기에 데이터를 복사한 뒤 <code>Unmap</code>으로 반납해야 GPU가 안전하게 그 버퍼를 읽습니다.
+  </p>
+  <ul>
+    <li><code>D3D11_MAPPED_SUBRESOURCE m{};</code> — <code>Map</code> 결과를 받을 구조체입니다. 핵심 멤버는 <code>m.pData</code>(빌린 메모리의 시작 주소)입니다.</li>
+    <li><code>Map(cbuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;m)</code> — 인자 순서대로:
+      <br>· <code>cbuffer.Get()</code> — 열 버퍼.
+      <br>· <code>0</code> — 서브리소스 인덱스(버퍼는 서브리소스가 하나뿐이라 0).
+      <br>· <code>D3D11_MAP_WRITE_DISCARD</code> — <strong>"기존 내용은 버리고 통째로 새로 쓰겠다"</strong>는 모드. 이게 중요한 성능 힌트입니다.
+        GPU가 아직 이전 버퍼를 읽는 중이어도, 드라이버가 새 메모리 블록을 즉석에서 내줘 CPU가 기다리지 않게 해 줍니다.
+      <br>· <code>0</code> — 추가 플래그(없음).
+      <br>· <code>&amp;m</code> — 결과(빌린 주소)를 받을 구조체.</li>
+    <li><code>float color[4] = { 0.9f, 0.4f, 0.2f, 1.0f };</code> — 셰이더에 넘길 색상. RGBA로 읽으면 (R=0.9, G=0.4, B=0.2) → <strong>따뜻한 주황색</strong>, 알파 1.0(불투명)입니다.</li>
+    <li><code>memcpy(m.pData, color, sizeof(color))</code> — 빌린 GPU 메모리(<code>m.pData</code>)에 CPU의 색 배열을 16바이트(<code>sizeof(float[4])</code>) 복사합니다.</li>
+    <li><code>Unmap(cbuffer.Get(), 0)</code> — 접근을 끝내고 버퍼를 GPU에 반납합니다. <strong>이걸 빠뜨리면 GPU가 버퍼를 못 읽어</strong> 값이 반영되지 않거나 디버그 레이어가 경고합니다.</li>
+    <li><code>PSSetConstantBuffers(0, 1, cbuffer.GetAddressOf())</code> — 이 상수 버퍼를 <strong>픽셀 셰이더의 슬롯 0(<code>b0</code>)</strong>에 꽂습니다.
+      첫 인자 <code>0</code>이 시작 슬롯, <code>1</code>이 개수입니다. HLSL 쪽에서 <code>cbuffer Params : register(b0)</code>로 선언한 것과 이 슬롯 0이 짝을 이룹니다.</li>
+  </ul>
+
+  <h3>4-4. HLSL 쪽 — 상수 버퍼를 받는 픽셀 셰이더</h3>
+  <p>
+    위 C++가 슬롯 <code>b0</code>에 꽂은 색을, HLSL에서는 아래처럼 받습니다. C++의 <code>register(b0)</code> ↔ <code>PSSetConstantBuffers(0, ...)</code> 대응을 눈으로 확인하세요.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>solid_color.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">// C++에서 PSSetConstantBuffers(0, ...)로 꽂은 버퍼가 여기 b0에 들어옵니다.
+cbuffer Params : register(b0)
+{
+    float4 uColor;   // C++의 color[4] = {0.9, 0.4, 0.2, 1.0} 가 그대로 들어옴
+};
+
+float4 PSMain(float4 pos : SV_Position) : SV_Target
+{
+    return uColor;   // 모든 픽셀을 이 색으로 칠함
+}</code></pre>
+  </div>
+  <ul>
+    <li><code>cbuffer Params : register(b0)</code> — 상수 버퍼 블록을 슬롯 <code>b0</code>에 바인딩합니다. C++가 <code>PSSetConstantBuffers(0, ...)</code>로 꽂은 슬롯 0과 일치해야 값이 들어옵니다.</li>
+    <li><code>float4 uColor;</code> — 16바이트짜리 float 4개. C++에서 <code>memcpy</code>로 채운 <code>{0.9, 0.4, 0.2, 1.0}</code>이 이 변수에 그대로 매핑됩니다. <strong>메모리 배치가 1:1로 일치</strong>하기에 별도 파싱 없이 곧장 읽힙니다.</li>
+    <li><code>float4 PSMain(float4 pos : SV_Position) : SV_Target</code> — 픽셀 셰이더의 진입점입니다. 입력 <code>SV_Position</code>은 래스터라이저가 채워 주는 픽셀의 화면 좌표,
+      반환의 <code>: SV_Target</code>은 "이 값을 렌더 타깃(RTV)에 쓰라"는 시스템 시맨틱입니다. <code>SV_</code> 접두사는 <strong>System-Value</strong>, 즉 파이프라인이 의미를 아는 특수 시맨틱을 뜻합니다.</li>
+    <li><code>return uColor;</code> — 픽셀 위치와 무관하게 모든 픽셀을 같은 색으로 칠합니다. 그래서 삼각형이 단색 주황으로 나옵니다.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    이 페이지는 행벡터 규약(<code>v' = v * M</code>, HLSL <code>mul(v, M)</code>), 행 우선 저장, 왼손 좌표계, 클립 z [0, 1], 텍스처 V 위→아래를 따릅니다.
+    이 예제에는 행렬이 없지만, 상수 버퍼로 변환 행렬을 넘길 때는 DirectXMath가 행벡터를 쓰므로 cbuffer 업로드 전에 <code>XMMatrixTranspose</code>로 전치해 주어야 HLSL <code>mul(v, M)</code>과 맞습니다. 이 규약은 다음 절들에서 반복됩니다.
+  </div>
+
+  <h3>4-5. (d) 정점 버퍼 바인딩 — stride와 offset</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">UINT stride = 3 * sizeof(float), offset = 0;
+context->IASetVertexBuffers(0, 1, vbo.GetAddressOf(), &amp;stride, &amp;offset);</code></pre>
+  </div>
+  <ul>
+    <li><code>UINT stride = 3 * sizeof(float)</code> — <strong>정점 하나의 바이트 크기</strong>입니다. 정점이 float 3개(xyz)라 <code>3 × 4 = 12</code>바이트입니다.
+      GPU가 다음 정점으로 넘어갈 때 포인터를 12바이트씩 전진시키라는 뜻입니다. 위치 뒤에 색까지 있다면 <code>6 * sizeof(float) = 24</code>가 되어야 합니다.</li>
+    <li><code>UINT offset = 0</code> — 버퍼 안에서 <strong>첫 정점이 시작하는 바이트 위치</strong>입니다. 버퍼 맨 앞부터 읽으므로 0입니다.
+      한 버퍼에 여러 메시를 몰아 넣고 뒤쪽 메시부터 읽을 때만 0이 아닌 값을 씁니다.</li>
+    <li><code>IASetVertexBuffers(0, 1, vbo.GetAddressOf(), &amp;stride, &amp;offset)</code> — 정점 버퍼를 IA 슬롯 0에 꽂습니다.
+      인자 순서: 시작 슬롯 <code>0</code>, 버퍼 개수 <code>1</code>, 버퍼 배열 주소, stride 배열 주소, offset 배열 주소.
+      <strong>stride/offset을 배열 주소(<code>&amp;</code>)로 넘기는 이유</strong>는 여러 버퍼를 동시에 꽂을 때 각 버퍼가 자기 stride/offset을 갖도록 배열로 받기 때문입니다.</li>
+  </ul>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>stride</code>를 실제 정점 크기와 다르게 주면 GPU가 정점 경계를 잘못 잡아 삼각형이 어긋나거나 화면이 깨집니다.
+    입력 레이아웃의 <code>Format</code> 합계(여기선 12바이트)와 <code>stride</code>가 일치해야 합니다. 이 두 곳을 따로 관리하다 어긋나는 게 흔한 버그입니다.
+  </div>
+
+  <h3>4-6. (e) 드로우 — 상태 스냅샷으로 그리기</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">context->Draw(3, 0);</code></pre>
+  </div>
+  <p>
+    <strong>무엇을 하나:</strong> 지금까지 꽂아 둔 모든 상태(입력 레이아웃·셰이더·정점 버퍼·상수 버퍼·타깃)를 하나의 <strong>스냅샷</strong>으로 확정하고,
+    GPU에게 그리라고 명령합니다. 인자를 봅시다.
+  </p>
+  <ul>
+    <li>첫 인자 <code>3</code> — <strong>그릴 정점 개수</strong>입니다. 삼각형 하나 = 정점 3개.</li>
+    <li>둘째 인자 <code>0</code> — <strong>시작 정점 인덱스</strong>입니다. 버퍼의 0번 정점부터 읽습니다.</li>
+    <li>토폴로지가 <code>TRIANGLELIST</code>이므로, GPU는 정점 3개(0,1,2)를 한 삼각형으로 조립해 래스터라이즈하고, 각 픽셀마다 픽셀 셰이더를 실행해 주황색을 칠합니다.</li>
+  </ul>
+  <p>
+    구체적으로 세어 봅시다. 화면에 삼각형이 대략 <code>N</code>개의 픽셀을 덮는다면, 정점 셰이더는 <strong>3번</strong>(정점마다),
+    픽셀 셰이더는 <strong>약 N번</strong>(덮은 픽셀마다) 실행됩니다. 정점 대비 픽셀 셰이더 실행 횟수가 압도적으로 많아, 픽셀 셰이더 비용이 성능을 좌우하는 이유가 여기 있습니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    드로우 순서를 헷갈리면 화면이 검게 나옵니다. 대표 원인 3가지:
+    ① <code>OMSetRenderTargets</code>를 안 해 RTV가 안 꽂혀 아무 데도 안 그려짐,
+    ② <code>IASetInputLayout</code>/<code>IASetPrimitiveTopology</code>를 빠뜨려 정점 해석이 안 됨,
+    ③ <code>ClearDepthStencilView</code>를 빠뜨려 이전 프레임 깊이가 남아 새 오브젝트가 전부 깊이 테스트에서 탈락.
+    검은 화면이면 이 3개부터 확인하세요.
+  </div>
+
+  <h3>4-7. (f) Present — 완성된 화면 내보내기</h3>
+  <div class="code">
+    <div class="code-head"><span>render_loop.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">swapChain->Present(1, 0);  // 첫 인자 = SyncInterval (1 = V-Sync ON)</code></pre>
+  </div>
+  <p>
+    다 그린 <strong>백버퍼</strong>를 <strong>프론트버퍼</strong>(모니터가 표시 중인 버퍼)와 교체해 화면에 내보냅니다.
+    첫 인자 <code>1</code>이 SyncInterval(V-Sync 제어), 둘째 <code>0</code>이 추가 플래그입니다. 이 부분은 아래 더블 버퍼링 절에서 더 자세히 다룹니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>5. 더블 버퍼링과 V-Sync</h2>
+  <p>
+    화면에 <strong>그리는 중인 버퍼(백버퍼)</strong>와 <strong>모니터에 표시 중인 버퍼(프론트버퍼)</strong>를 분리한 것이 더블 버퍼링입니다.
+    만약 버퍼가 하나뿐이라면, 그리는 도중의 반쯤 완성된 화면이 모니터에 그대로 나가 깜빡임과 찢김이 생깁니다.
+    D3D11에서는 <strong>DXGI 스왑체인</strong>이 이 버퍼들을 관리하고, 그리기가 끝나면 <code>swapChain->Present</code>로 통째로 교체하므로
+    사용자는 반쯤 그려진 화면(테어링)을 보지 않습니다.
+  </p>
+  <p>
+    교체 <em>타이밍</em>을 모니터 주사율에 맞추는 것이 V-Sync입니다. 모니터는 초당 정해진 횟수(예: 60Hz = 초당 60번)만 화면을 갱신하는데,
+    그 갱신과 무관한 타이밍에 버퍼를 바꾸면 한 화면에 두 프레임이 섞여 <strong>테어링(tearing, 가로로 찢긴 선)</strong>이 보입니다.
+    D3D11에서는 <code>Present</code>의 첫 인자 SyncInterval로 이 타이밍을 제어합니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>vsync.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">swapChain->Present(1, 0);  // 1 = V-Sync ON  (60Hz 모니터면 ~60fps로 상한)
+swapChain->Present(0, 0);  // 0 = V-Sync OFF (무제한 fps, 테어링 가능 — 벤치마크용)
+swapChain->Present(2, 0);  // 2 = 주사율의 1/2 (60Hz → 30fps)</code></pre>
+  </div>
+  <ul>
+    <li><code>Present(1, 0)</code> — SyncInterval 1. <strong>모니터 갱신 1번마다 1번 교체</strong>합니다. 60Hz면 최대 60fps로 상한이 걸리고 테어링이 없습니다. 가장 흔한 배포 설정입니다.</li>
+    <li><code>Present(0, 0)</code> — SyncInterval 0. <strong>갱신을 안 기다리고 즉시 교체</strong>합니다. fps가 무제한이라 성능 측정에 좋지만 테어링이 생깁니다.</li>
+    <li><code>Present(2, 0)</code> — SyncInterval 2. <strong>모니터 갱신 2번마다 1번 교체</strong>. 60Hz에서 30fps로 상한이 걸립니다. 무거운 씬을 안정적인 30fps로 고정할 때 씁니다.</li>
+  </ul>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    성능 측정 중이라면 V-Sync를 꺼야 실제 프레임 비용이 보입니다(켜져 있으면 Present에서 대기하느라 CPU가 놀아 측정값이 왜곡됨).
+    반대로 배포 빌드는 V-Sync ON이 기본입니다 — GPU를 불필요하게 100% 돌려 발열·전력을 낭비하지 않으려면요.
+    (테어링 없는 무제한 fps가 필요하면 플립 모델 스왑체인 + <code>DXGI_PRESENT_ALLOW_TEARING</code>을 씁니다.)
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6. DirectXMath / D3D API 1:1 대응 정리</h2>
+  <p>
+    이 페이지의 핵심 호출들을, 실무에서 함께 쓰는 API·개념과 짝지어 정리합니다. 직접 만들며 원리를 이해한 뒤에는
+    검증된 라이브러리와 표준 헬퍼를 쓰는 것이 안전합니다.
+  </p>
+  <table class="impl">
+    <thead><tr><th>이 페이지의 호출</th><th>대응 개념 / API</th><th>비고</th></tr></thead>
+    <tbody>
+      <tr><td><code>device->CreateBuffer</code></td><td>OpenGL <code>glGenBuffers</code>+<code>glBufferData</code></td><td>D3D는 DESC로 스펙을 미리 확정, OpenGL은 바인딩 후 채움</td></tr>
+      <tr><td><code>CreateInputLayout</code></td><td>OpenGL <code>VAO</code>+<code>glVertexAttribPointer</code></td><td>바이트 배치를 셰이더 시맨틱에 매핑</td></tr>
+      <tr><td><code>Map</code>/<code>Unmap</code>(DYNAMIC)</td><td>OpenGL <code>glMapBufferRange</code> / <code>glBufferSubData</code></td><td>매 프레임 유니폼 갱신 통로</td></tr>
+      <tr><td><code>cbuffer : register(b0)</code></td><td><code>PSSetConstantBuffers(0, ...)</code></td><td>HLSL 슬롯 번호 ↔ C++ 슬롯 번호가 일치해야 함</td></tr>
+      <tr><td>상수 버퍼에 담을 행렬</td><td><code>XMMatrixTranspose</code> 후 업로드</td><td>DirectXMath는 행벡터, HLSL <code>mul(v,M)</code>과 맞추려면 전치</td></tr>
+      <tr><td><code>float4</code>/16바이트 정렬</td><td><code>XMFLOAT4</code> / <code>XMVECTOR</code></td><td><code>XMVECTOR</code>는 16바이트 SIMD 정렬 타입</td></tr>
+      <tr><td><code>ComPtr</code> 자동 해제</td><td>COM <code>AddRef</code>/<code>Release</code></td><td><code>std::shared_ptr</code>과 달리 객체 자체의 참조 카운트 이용</td></tr>
+      <tr><td><code>swapChain->Present</code></td><td>OpenGL <code>SwapBuffers</code> / EGL <code>eglSwapBuffers</code></td><td>SyncInterval이 V-Sync 제어</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    이 예제 코드들은 <strong>학습용</strong>으로 최소 뼈대만 담았습니다. 실무에서는 모든 <code>Create*</code>·<code>Map</code>의 <code>HRESULT</code>를
+    반드시 검사하고(다음 절 "디버깅과 검증"에서 다룹니다), 디바이스·스왑체인 생성과 리사이즈 처리, 리소스 수명 관리를 더 견고하게 갖춰야 합니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./05-api.html">← 5장 허브</a>
+    <a href="./05-debug.html">디버깅과 검증 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

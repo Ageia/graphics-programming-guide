@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 벡터 — Vec3 — C++/DirectX 11</title>
+<meta name="description" content="위치·방향·색을 담는 Vec3 구조체를 C++로 한 줄 한 줄 직접 구현: 생성자·연산자 오버로딩·내적·외적·길이·정규화를 성분 하나까지 해부하고 DirectXMath로 매핑." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./01-math.html">1장. 기초 수학</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">벡터 — Vec3</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 1</span>
+  <h1>벡터 — Vec3 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    그래픽스에서 <strong>위치</strong>(점이 어디 있나), <strong>방향</strong>(어느 쪽을 보나),
+    <strong>색</strong>(RGB) — 이 세 가지는 모두 <strong>숫자 세 개</strong>로 표현됩니다. 이 세 개를 하나로 묶은 것이
+    <strong>3차원 벡터 <code>Vec3</code></strong>입니다. 이 페이지에서는 <code>Vec3</code> 구조체를 C++로 직접 만들고,
+    <strong>덧셈·뺄셈·스칼라 곱·단항 부호·내적·외적·길이·정규화</strong>를 <strong>코드 한 줄, 성분 하나까지</strong>
+    해부한 뒤, 실무 표준인 <strong>DirectXMath</strong>로 똑같이 옮겨 봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    <strong>왼손 좌표계</strong>. 이 페이지의 <code>Vec3</code> 연산(덧셈·내적·길이 등)은 규약과 무관하게 동일하지만,
+    <strong>외적의 방향</strong>만은 좌표계(왼손/오른손)에 따라 의미가 달라집니다. 아래 외적 절에서 다시 짚습니다.
+  </div>
+
+  <!-- =========================================================
+       0. 무엇을 만드나 / 전체 그림
+       ========================================================= -->
+  <h2 style="margin-top:40px;">0. 무엇을, 왜 만드나</h2>
+  <p>
+    <code>Vec3</code>는 <strong>float 세 개(x, y, z)를 담는 아주 작은 구조체</strong>입니다. 하지만 이 위에
+    덧셈·내적·외적 같은 <strong>연산</strong>을 얹는 순간, 그래픽스의 거의 모든 계산을 표현할 수 있게 됩니다.
+  </p>
+  <ul>
+    <li><strong>위치(point)</strong>: 정점의 좌표 <code>(1, 2, 3)</code>.</li>
+    <li><strong>방향(direction)</strong>: 빛이 나아가는 방향, 카메라가 보는 방향 <code>(0, 0, 1)</code>.</li>
+    <li><strong>색(color)</strong>: 빨강·초록·파랑 세기 <code>(1, 0, 0)</code> = 빨강.</li>
+  </ul>
+  <p>
+    같은 세 숫자라도 "점"이냐 "방향"이냐에 따라 의미가 다릅니다. 예를 들어 <strong>두 점을 더하는 것</strong>은 대개 의미가 없지만
+    (뉴욕 좌표 + 서울 좌표 = ?), <strong>점 + 방향</strong>은 "그 점에서 그 방향으로 이동한 새 점"이라는 뚜렷한 의미가 있습니다.
+    구조체 하나로 이 셋을 모두 표현하되, 의미는 우리가 코드로 구분해서 씁니다.
+  </p>
+
+  <!-- =========================================================
+       1. 구조체 + 생성자
+       ========================================================= -->
+  <h2 style="margin-top:40px;">1. 구조체와 생성자 — 뼈대 만들기</h2>
+  <p>
+    먼저 세 개의 float을 담을 <strong>그릇</strong>을 정의합니다. 그리고 그 그릇을 "빈 채로" 또는 "값을 채워서" 만드는
+    두 가지 방법(생성자)을 마련합니다.
+  </p>
+
+  <ol class="steps">
+    <li>float 세 개 <code>x, y, z</code>를 멤버로 선언하고 <strong>0으로 기본 초기화</strong>합니다.</li>
+    <li>인자 없는 <strong>기본 생성자</strong>로 <code>(0,0,0)</code> 벡터를 만들 수 있게 합니다.</li>
+    <li>값 세 개를 받는 <strong>생성자</strong>로 <code>Vec3 a(1,2,3)</code> 처럼 채워서 만들 수 있게 합니다.</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>math/Vec3.h — ①구조체 · 생성자</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#pragma once
+#include &lt;cmath&gt;
+
+struct Vec3 {
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    Vec3() = default;
+    Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+};</code></pre>
+  </div>
+
+  <h3>한 줄씩 해부</h3>
+  <p>
+    <code>#pragma once</code> — 이 헤더가 여러 <code>.cpp</code>에서 <code>#include</code>돼도 <strong>딱 한 번만</strong> 컴파일에 포함되게
+    막아 주는 지시문입니다. 없으면 같은 구조체가 두 번 정의됐다는 오류가 납니다. <code>#include &lt;cmath&gt;</code>는 뒤에서 쓸
+    <code>std::sqrt</code>(제곱근) 때문에 필요합니다.
+  </p>
+  <p>
+    <code>struct Vec3 { ... };</code> — 새 자료형 <code>Vec3</code>를 정의합니다. C++에서 <code>struct</code>와 <code>class</code>는
+    기본 접근 권한만 다릅니다(<code>struct</code>는 기본 <code>public</code>). 데이터를 그대로 노출하는 수학 타입에는 <code>struct</code>가 관례입니다.
+  </p>
+  <p>
+    <code>float x = 0.0f, y = 0.0f, z = 0.0f;</code> — 세 멤버 변수입니다. 뒤의 <code>= 0.0f</code>는
+    <strong>기본 멤버 초기화(default member initializer)</strong>로, 어떤 생성자를 타든 값을 안 주면 자동으로 0이 됩니다.
+    "쓰레기 값(초기화 안 된 메모리)"이 들어가는 실수를 원천 차단합니다. <code>f</code> 접미사는 이 리터럴이 <code>double</code>이 아니라
+    <code>float</code>임을 뜻합니다(GPU/그래픽스는 대부분 32비트 float을 씁니다).
+  </p>
+  <p>
+    <code>Vec3() = default;</code> — <strong>기본 생성자</strong>를 컴파일러가 자동으로 만들게 명시합니다. 위에서 멤버에
+    <code>= 0.0f</code>를 줬으므로 이 생성자로 만든 벡터는 <code>(0,0,0)</code>입니다. 사실 아래에 인자 있는 생성자를 하나라도 직접
+    선언하면 컴파일러가 기본 생성자를 자동으로 안 만들어 주기 때문에, <code>= default;</code>로 <strong>되살려</strong> 두는 것입니다.
+    이게 없으면 <code>Vec3 v;</code>가 컴파일 오류가 납니다.
+  </p>
+  <p>
+    <code>Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}</code> — 값 세 개를 받는 생성자입니다.
+    <code>: x(x_), y(y_), z(z_)</code> 부분이 <strong>멤버 초기화 리스트</strong>로, 멤버 <code>x</code>를 인자 <code>x_</code>로 초기화합니다.
+    본문(<code>{}</code>) 안에서 <code>x = x_;</code>로 대입하는 것보다 <strong>초기화 리스트가 더 효율적이고 정석</strong>입니다
+    (대입은 "일단 기본값 생성 → 다시 대입" 2단계, 초기화는 1단계). 인자 이름에 밑줄(<code>x_</code>)을 붙인 건 멤버 <code>x</code>와
+    이름이 겹쳐 헷갈리는 것을 피하기 위한 흔한 관례입니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">함정</span>
+    멤버 초기화 <code>= 0.0f</code>가 없으면 <code>Vec3 v;</code>의 <code>v.x</code>는 <strong>정의되지 않은 값(쓰레기)</strong>입니다.
+    특히 스택에 잡힌 로컬 변수는 0으로 초기화되지 <em>않습니다</em>. "가끔 검은 화면, 가끔 정상"처럼 재현이 어려운 버그의 단골 원인이니,
+    수학 타입은 반드시 기본값을 0으로 두세요.
+  </div>
+
+  <h3>집합 초기화(aggregate init) 한 마디</h3>
+  <p>
+    아래 연산자들에서 <code>return { x + b.x, y + b.y, z + b.z };</code> 처럼 <strong>중괄호로 값 세 개를 나열</strong>하는 문법을 자주 씁니다.
+    이건 <code>Vec3</code>의 세 멤버를 순서대로(x, y, z) 채워 새 객체를 만드는 <strong>중괄호 초기화</strong>입니다. 반환 타입이
+    <code>Vec3</code>임을 컴파일러가 알기에 <code>return Vec3{...}</code>를 <code>return {...}</code>로 줄여 쓸 수 있습니다.
+  </p>
+
+  <!-- =========================================================
+       2. 덧셈 / 뺄셈
+       ========================================================= -->
+  <h2 style="margin-top:40px;">2. 덧셈과 뺄셈 — 이동과 "차이"</h2>
+  <p>
+    <strong>무엇을 만드나</strong>: 두 벡터를 성분끼리 더하거나 빼는 연산입니다.
+    <strong>왜 필요한가</strong>: 덧셈은 "점을 방향만큼 이동"(<code>새위치 = 위치 + 속도</code>), 뺄셈은
+    "A에서 B로 가는 방향"(<code>목표 - 현재</code>)을 구하는 데 매일 쓰입니다. 벡터 뺄셈 <code>b - a</code>는 그래픽스에서
+    <strong>"a에서 b를 향하는 화살표"</strong>라고 외워 두면 두고두고 편합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Vec3.h — ②+ , -</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">    Vec3 operator+(const Vec3&amp; b) const { return { x + b.x, y + b.y, z + b.z }; }
+    Vec3 operator-(const Vec3&amp; b) const { return { x - b.x, y - b.y, z - b.z }; }</code></pre>
+  </div>
+
+  <h3>시그니처 해부</h3>
+  <p>
+    <code>Vec3 operator+(const Vec3&amp; b) const</code> — 앞에서부터 뜯어봅니다.
+  </p>
+  <ul>
+    <li><strong>반환 타입 <code>Vec3</code></strong>: 더한 결과는 새 벡터이므로 <code>Vec3</code>를 값으로 돌려줍니다.
+        원본 두 벡터는 건드리지 않고 <strong>새 벡터를 만들어</strong> 반환합니다.</li>
+    <li><strong><code>operator+</code></strong>: 이름이 <code>operator+</code>인 멤버 함수를 정의하면
+        <code>a + b</code>라고 쓸 때 컴파일러가 이걸 <code>a.operator+(b)</code>로 바꿔 호출합니다. 이것이
+        <strong>연산자 오버로딩</strong>입니다. 덕분에 <code>Vec3 c = a + b;</code>처럼 수학 그대로 읽히는 코드를 쓸 수 있습니다.</li>
+    <li><strong><code>const Vec3&amp; b</code></strong>: 오른쪽 피연산자입니다.
+        <ul>
+          <li><code>&amp;</code>(참조): <code>Vec3</code>를 <strong>복사하지 않고</strong> 원본을 가리킵니다. float 3개라 복사가 싸긴 하지만,
+              참조로 받는 것이 관례이며 큰 타입일수록 이득이 큽니다.</li>
+          <li><code>const</code>: 이 함수는 <code>b</code>를 <strong>읽기만</strong> 하고 바꾸지 않겠다는 약속입니다. 호출자에게 안전을 보장하고,
+              <code>const</code> 벡터도 인자로 넘길 수 있게 합니다.</li>
+        </ul></li>
+    <li><strong>맨 끝 <code>const</code></strong>: "이 멤버 함수는 <strong>자기 자신(왼쪽 피연산자)</strong>도 바꾸지 않는다"는 약속입니다.
+        <code>a + b</code>에서 <code>a</code>는 그대로 있어야 하므로 반드시 <code>const</code>를 붙입니다. 이게 없으면 <code>const Vec3 a; a + b;</code>가
+        컴파일되지 않습니다.</li>
+  </ul>
+
+  <h3>성분별 계산 — 수학 → 코드</h3>
+  <p>
+    수학적으로 <code>(x, y, z) + (bx, by, bz) = (x+bx, y+by, z+bz)</code> 입니다. 즉 <strong>같은 축끼리만</strong> 더합니다
+    (x는 x끼리, y는 y끼리). 코드의 세 항이 정확히 이에 대응합니다:
+  </p>
+  <table class="impl">
+    <tr><th>결과 성분</th><th>코드</th><th>의미</th></tr>
+    <tr><td>x'</td><td><code>x + b.x</code></td><td>내 x + 상대 x</td></tr>
+    <tr><td>y'</td><td><code>y + b.y</code></td><td>내 y + 상대 y</td></tr>
+    <tr><td>z'</td><td><code>z + b.z</code></td><td>내 z + 상대 z</td></tr>
+  </table>
+  <p>
+    <strong>기하 직관</strong>: 덧셈은 화살표를 <strong>이어 붙이기</strong>입니다. 벡터 a의 화살촉 끝에서 벡터 b를 다시 그리면,
+    출발점에서 b의 화살촉까지가 <code>a + b</code>입니다(평행사변형 법칙). 뺄셈 <code>a - b</code>는 <strong>b의 화살촉에서 a의 화살촉으로
+    향하는 화살표</strong>입니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>b - a</code>는 "a에서 b로 가는 방향"입니다. 순서가 바뀌면 정반대 방향이 되니 주의하세요.
+    카메라에서 물체로 향하는 시선은 <code>물체위치 - 카메라위치</code>, 반대는 아닙니다.
+  </div>
+
+  <h3>손계산 예제</h3>
+  <p>
+    <code>a = (1, 2, 3)</code>, <code>b = (4, 0, 0)</code> 이면
+    <code>a + b = (1+4, 2+0, 3+0) = (5, 2, 3)</code>,
+    <code>a - b = (1-4, 2-0, 3-0) = (-3, 2, 3)</code> 입니다.
+  </p>
+
+  <!-- =========================================================
+       3. 스칼라 곱 (v*s, s*v)
+       ========================================================= -->
+  <h2 style="margin-top:40px;">3. 스칼라 곱 — 길이 늘이고 줄이기</h2>
+  <p>
+    <strong>무엇을 만드나</strong>: 벡터에 실수 하나(스칼라)를 곱해 <strong>세 성분 모두를 같은 배율로</strong> 키우거나 줄이는 연산입니다.
+    <strong>왜 필요한가</strong>: <code>속도 * deltaTime</code>(프레임당 이동량), <code>방향 * 거리</code>(그 방향으로 얼마만큼), 색 밝기 조절 등
+    끝없이 쓰입니다. 스칼라를 곱해도 <strong>방향은 그대로, 길이만</strong> 바뀝니다(음수를 곱하면 방향이 뒤집힙니다).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Vec3.h — ③스칼라 곱 (멤버 + 자유 함수)</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">    // 멤버: v * s  (벡터 * 스칼라)
+    Vec3 operator*(float s) const { return { x * s, y * s, z * s }; }
+};  // struct 끝
+
+// 자유 함수: s * v  (스칼라 * 벡터) — v * s 로 되돌려 재사용
+inline Vec3 operator*(float s, const Vec3&amp; v) { return v * s; }</code></pre>
+  </div>
+
+  <h3>왜 두 개나 필요한가 — v*s 와 s*v</h3>
+  <p>
+    수학에서는 <code>v * s</code>든 <code>s * v</code>든 같은 뜻이지만, C++에서는 <strong>둘이 서로 다른 함수 호출</strong>입니다.
+  </p>
+  <ul>
+    <li><code>v * s</code> → <code>v.operator*(s)</code>: 왼쪽이 <code>Vec3</code>이므로 <strong>멤버 함수</strong>로 처리됩니다.</li>
+    <li><code>s * v</code> → <code>operator*(s, v)</code>: 왼쪽이 <code>float</code>입니다. float에는 우리가 멤버 함수를 추가할 수 없으므로,
+        구조체 <strong>바깥의 자유 함수(free function)</strong>로 정의해야 합니다. 이게 없으면 <code>2.0f * v</code>가 컴파일 오류입니다.</li>
+  </ul>
+  <p>
+    <code>inline Vec3 operator*(float s, const Vec3&amp; v) { return v * s; }</code> — 이 자유 함수는 스스로 계산하지 않고
+    <strong><code>return v * s;</code>로 멤버 버전을 재사용</strong>합니다. 로직을 한 곳(멤버)에만 두어 중복과 실수를 줄이는 좋은 습관입니다.
+    <code>inline</code>은 이 함수가 헤더에 정의돼 여러 <code>.cpp</code>에 포함될 때 <strong>"중복 정의" 링크 오류를 막아</strong> 줍니다
+    (헤더에 함수 본문을 쓸 때는 붙이는 게 안전합니다).
+  </p>
+  <p>
+    참고로 멤버 <code>operator*</code>는 구조체 <strong>안</strong>이라 <code>inline</code>이 필요 없습니다(클래스 안 정의 함수는 자동으로 inline 취급).
+  </p>
+
+  <h3>성분별 계산 & 기하 직관</h3>
+  <p>
+    <code>(x, y, z) * s = (x·s, y·s, z·s)</code>. 세 성분에 <strong>똑같은 배율 s</strong>를 곱합니다.
+    <code>s = 2</code>면 화살표가 두 배 길어지고, <code>s = 0.5</code>면 절반, <code>s = -1</code>이면 길이는 그대로인데 <strong>정반대 방향</strong>이 됩니다.
+  </p>
+  <p>
+    <strong>손계산</strong>: <code>a = (1,2,3)</code>, <code>s = 2</code> → <code>a * 2 = (2, 4, 6)</code>. <code>2 * a</code>도 결과는 같은 <code>(2,4,6)</code>.
+  </p>
+
+  <!-- =========================================================
+       4. 단항 마이너스
+       ========================================================= -->
+  <h2 style="margin-top:40px;">4. 단항 마이너스 — 방향 뒤집기</h2>
+  <p>
+    <strong>무엇을 만드나</strong>: <code>-v</code>처럼 벡터 하나 앞에 마이너스를 붙여 <strong>모든 성분의 부호를 바꾸는</strong> 연산입니다.
+    <strong>왜 필요한가</strong>: 반대 방향(카메라의 "뒤", 빛의 반대 방향 등)을 구할 때 씁니다. 사실상 <code>v * -1.0f</code>과 같지만,
+    <code>-v</code>가 훨씬 읽기 좋습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Vec3.h — ④단항 -</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">    Vec3 operator-() const { return { -x, -y, -z }; }</code></pre>
+  </div>
+
+  <h3>이항 뺄셈과 어떻게 구분되나</h3>
+  <p>
+    앞서 <code>operator-(const Vec3&amp; b)</code>(인자 1개)는 <strong>이항 뺄셈</strong> <code>a - b</code>였습니다.
+    여기 <code>operator-()</code>는 <strong>인자가 0개</strong>입니다. 컴파일러는 인자 개수로 둘을 구분합니다:
+    <code>a - b</code>는 이항(뺄셈), <code>-a</code>는 단항(부호 반전). 같은 기호 <code>-</code>지만 다른 함수입니다.
+  </p>
+  <p>
+    <code>{ -x, -y, -z }</code> — 세 성분 각각에 마이너스를 붙여 새 벡터를 만듭니다.
+    <code>a = (1,2,3)</code>이면 <code>-a = (-1, -2, -3)</code>. 길이는 그대로, 방향만 정반대입니다.
+    맨 끝 <code>const</code>는 앞서와 같은 이유로 "자기 자신을 바꾸지 않는다"는 약속입니다.
+  </p>
+
+  <!-- =========================================================
+       5. 내적 dot
+       ========================================================= -->
+  <h2 style="margin-top:40px;">5. 내적 <code>dot</code> — 두 벡터가 얼마나 "같은 쪽"을 보나</h2>
+  <p>
+    <strong>무엇을 만드나</strong>: 두 벡터의 <strong>성분끼리 곱해 모두 더한</strong> 하나의 <strong>실수(스칼라)</strong>를 돌려주는 연산입니다.
+    결과가 벡터가 아니라 <strong>숫자 하나</strong>라는 점이 핵심입니다.
+    <strong>왜 필요한가</strong>: 내적은 그래픽스의 심장입니다. <strong>두 방향의 사잇각</strong>, <strong>표면이 빛을 얼마나 받는지</strong>(램버트 조명),
+    <strong>앞/뒤 판별</strong>, <strong>투영</strong> 등 거의 모든 조명·기하 계산의 출발점입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Vec3.h — ⑤dot</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">inline float dot(const Vec3&amp; a, const Vec3&amp; b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}</code></pre>
+  </div>
+
+  <h3>시그니처: 왜 <code>float</code>을 돌려주나</h3>
+  <p>
+    <code>inline float dot(const Vec3&amp; a, const Vec3&amp; b)</code> — 반환 타입이 <code>Vec3</code>가 아니라 <strong><code>float</code></strong>입니다.
+    내적의 결과는 <strong>스칼라 하나</strong>이기 때문입니다. 두 인자 모두 <code>const Vec3&amp;</code>로 받아 읽기 전용·복사 없이 처리합니다.
+    구조체 바깥의 자유 함수이며(멤버가 아니어도 두 인자를 대칭으로 받는 편이 자연스러움), 헤더 정의라 <code>inline</code>을 붙였습니다.
+  </p>
+
+  <h3>수식 → 기하 직관 → 코드 3단</h3>
+  <p>
+    <strong>① 수식</strong>: <code>a · b = ax·bx + ay·by + az·bz</code>. 같은 축끼리 곱해서 전부 더합니다.
+  </p>
+  <p>
+    <strong>② 기하 직관</strong>: 내적은 또한 <code>a · b = |a| |b| cos θ</code> 와 같습니다(<code>θ</code>는 두 벡터 사잇각,
+    <code>|a|</code>는 길이). 여기서 어마어마하게 유용한 사실이 나옵니다:
+  </p>
+  <ul>
+    <li><code>a · b &gt; 0</code> → 사잇각이 90°보다 작음 = <strong>대체로 같은 쪽</strong>을 봄.</li>
+    <li><code>a · b = 0</code> → 정확히 <strong>수직(직교)</strong>.</li>
+    <li><code>a · b &lt; 0</code> → 사잇각이 90°보다 큼 = <strong>반대쪽</strong>을 봄.</li>
+  </ul>
+  <p>
+    특히 <strong>두 벡터가 모두 단위 길이(정규화됨)</strong>라면 <code>|a| = |b| = 1</code>이므로 <code>a · b = cos θ</code>가 되어,
+    <strong>내적 값이 곧 코사인</strong>입니다. 조명에서 "표면 법선 <code>N</code> 과 빛 방향 <code>L</code> 의 <code>dot(N, L)</code>"이 바로 이 원리로
+    "정면으로 받으면 1(가장 밝음), 옆이면 0, 뒤면 음수(빛 안 닿음 → 0으로 클램프)"를 계산합니다.
+  </p>
+  <p>
+    <strong>③ 코드 매핑</strong>: <code>a.x*b.x</code>(x축 곱) <code>+ a.y*b.y</code>(y축 곱) <code>+ a.z*b.z</code>(z축 곱). 수식과 1:1입니다.
+  </p>
+
+  <h3>손계산 예제</h3>
+  <p>
+    <code>a = (1, 2, 3)</code>, <code>b = (4, 0, 0)</code> 이면
+    <code>dot(a, b) = 1·4 + 2·0 + 3·0 = 4</code>. b가 x축만 가리키므로, 내적은 결국 <strong>a의 x성분(1)에 b의 크기(4)를 곱한 값</strong>과 같습니다.
+    이는 "a를 b(=x축) 방향으로 <strong>투영</strong>했을 때의 크기"라는 내적의 또 다른 의미를 그대로 보여 줍니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">함정</span>
+    <code>dot(N, L)</code>로 조명을 계산할 때 <strong>두 벡터를 반드시 정규화</strong>해야 <code>= cos θ</code>가 성립합니다.
+    정규화하지 않으면 길이가 값에 섞여 들어가 조명이 이상하게 밝거나 어두워집니다. 또 음수가 나올 수 있으니
+    <code>max(dot(N, L), 0.0f)</code>로 <strong>0 아래를 잘라</strong> 주는 것이 보통입니다.
+  </div>
+
+  <!-- =========================================================
+       6. 외적 cross
+       ========================================================= -->
+  <h2 style="margin-top:40px;">6. 외적 <code>cross</code> — 두 벡터에 <strong>수직</strong>인 벡터</h2>
+  <p>
+    <strong>무엇을 만드나</strong>: 두 벡터 a, b에 <strong>동시에 수직</strong>인 <strong>새 벡터</strong>를 돌려줍니다.
+    내적과 달리 결과가 <strong>벡터</strong>입니다.
+    <strong>왜 필요한가</strong>: 삼각형의 두 변에서 <strong>면의 법선(수직 방향)</strong>을 구할 때, 카메라의 오른쪽·위 축을 만들 때 등
+    "수직 방향이 필요한 모든 곳"에 씁니다. 조명·컬링·좌표계 구축의 핵심입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Vec3.h — ⑥cross</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">inline Vec3 cross(const Vec3&amp; a, const Vec3&amp; b) {
+    return {
+        a.y*b.z - a.z*b.y,   // x 성분
+        a.z*b.x - a.x*b.z,   // y 성분
+        a.x*b.y - a.y*b.x    // z 성분
+    };
+}</code></pre>
+  </div>
+
+  <h3>왜 이렇게 복잡한가 — 성분별로 하나씩</h3>
+  <p>
+    외적의 각 성분은 <strong>"자기 축을 뺀 나머지 두 축"의 교차 곱셈</strong>이라는 규칙을 따릅니다. 외우기보다 <strong>패턴</strong>으로 보세요.
+    각 결과 성분마다, 나머지 두 축을 <strong>순환 순서(x→y→z→x)</strong>로 "앞·뒤"를 곱해 뺍니다.
+  </p>
+  <table class="impl">
+    <tr><th>결과 성분</th><th>코드</th><th>사용하는 두 축</th><th>규칙(앞·뒤 곱 − 뒤·앞 곱)</th></tr>
+    <tr><td><strong>x</strong></td><td><code>a.y*b.z - a.z*b.y</code></td><td>y, z (x를 뺀 나머지)</td><td>a<sub>y</sub>b<sub>z</sub> − a<sub>z</sub>b<sub>y</sub></td></tr>
+    <tr><td><strong>y</strong></td><td><code>a.z*b.x - a.x*b.z</code></td><td>z, x (y를 뺀 나머지)</td><td>a<sub>z</sub>b<sub>x</sub> − a<sub>x</sub>b<sub>z</sub></td></tr>
+    <tr><td><strong>z</strong></td><td><code>a.x*b.y - a.y*b.x</code></td><td>x, y (z를 뺀 나머지)</td><td>a<sub>x</sub>b<sub>y</sub> − a<sub>y</sub>b<sub>x</sub></td></tr>
+  </table>
+  <p>
+    <strong>x 성분</strong> <code>a.y*b.z - a.z*b.y</code>: x를 만들 때는 x를 <strong>빼고</strong> 남은 <strong>y와 z</strong>만 씁니다.
+    순환 순서 x→<strong>y</strong>→<strong>z</strong>를 따라 "앞(y)·뒤(z)"를 곱한 <code>a.y*b.z</code>에서 "뒤(z)·앞(y)"를 곱한 <code>a.z*b.y</code>를 뺍니다.
+  </p>
+  <p>
+    <strong>y 성분</strong> <code>a.z*b.x - a.x*b.z</code>: y를 빼고 남은 <strong>z와 x</strong>를 씁니다. 순환에서 y 다음은 z→x이므로
+    "앞(z)·뒤(x)" <code>a.z*b.x</code>에서 "뒤(x)·앞(z)" <code>a.x*b.z</code>를 뺍니다. <strong>주의</strong>: 여기서 순서가 <code>z, x</code>지
+    <code>x, z</code>가 아니라는 점이 초보자가 가장 많이 틀리는 곳입니다(부호가 뒤집혀 법선이 반대로 나옵니다).
+  </p>
+  <p>
+    <strong>z 성분</strong> <code>a.x*b.y - a.y*b.x</code>: z를 빼고 남은 <strong>x와 y</strong>를 씁니다. 순환에서 z 다음은 x→y이므로
+    "앞(x)·뒤(y)" <code>a.x*b.y</code>에서 "뒤(y)·앞(x)" <code>a.y*b.x</code>를 뺍니다. 이 z 성분만 따로 떼면 <strong>2D 외적</strong>
+    (감김 방향/삼각형 넓이 부호 판정)에 그대로 쓰입니다.
+  </p>
+
+  <h3>기하 직관과 방향(오른손/왼손)</h3>
+  <p>
+    <strong>결과의 방향</strong>: <code>cross(a, b)</code>는 a와 b가 이루는 평면에 <strong>수직</strong>입니다.
+    구체적으로 어느 쪽(위/아래)인지는 <strong>손 규칙</strong>으로 정해집니다. 수학의 기본 공식(위 코드)은 <strong>오른손 법칙</strong>을 따릅니다:
+    오른손 손가락을 a에서 b로 감아쥐면 엄지가 <code>cross(a, b)</code> 방향입니다.
+  </p>
+  <p>
+    <strong>결과의 길이</strong>: <code>|cross(a, b)| = |a| |b| sin θ</code>로, 이는 <strong>a, b가 만드는 평행사변형의 넓이</strong>와 같습니다
+    (삼각형 넓이는 그 절반). 두 벡터가 평행하면 <code>sin θ = 0</code>이라 외적이 <strong>영벡터</strong>가 됩니다 — "수직 방향이 정의되지 않음".
+  </p>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    이 공식은 <strong>오른손 좌표계 기준</strong>입니다. 우리 가이드는 <strong>왼손 좌표계(D3D)</strong>를 쓰므로, 삼각형 법선을 만들 때
+    "정점 감김 순서(CW/CCW)"에 따라 <strong>a, b를 어떤 변으로 잡을지</strong>로 최종 방향을 맞춰야 합니다. 법선이 뒤집혀 보이면
+    <code>cross(a, b)</code>와 <code>cross(b, a)</code>를 바꿔 보세요(두 결과는 <strong>부호만 반대</strong>: <code>cross(b,a) = -cross(a,b)</code>).
+    외적은 <strong>교환법칙이 성립하지 않습니다</strong>.
+  </div>
+
+  <h3>손계산 예제</h3>
+  <p>
+    <code>a = (1, 2, 3)</code>, <code>b = (4, 0, 0)</code> 로 계산해 봅니다.
+  </p>
+  <ul>
+    <li>x: <code>a.y*b.z - a.z*b.y = 2·0 - 3·0 = 0</code></li>
+    <li>y: <code>a.z*b.x - a.x*b.z = 3·4 - 1·0 = 12</code></li>
+    <li>z: <code>a.x*b.y - a.y*b.x = 1·0 - 2·4 = -8</code></li>
+  </ul>
+  <p>
+    → <code>cross(a, b) = (0, 12, -8)</code>. 검산으로 <strong>내적이 0이면 수직</strong>임을 확인합니다:
+    <code>dot((0,12,-8), a) = 0·1 + 12·2 + (-8)·3 = 24 - 24 = 0</code> ✓,
+    <code>dot((0,12,-8), b) = 0·4 + 0 + 0 = 0</code> ✓. 결과가 a, b 둘 다에 수직임이 확인됩니다.
+  </p>
+
+  <!-- =========================================================
+       7. 길이 length
+       ========================================================= -->
+  <h2 style="margin-top:40px;">7. 길이 <code>length</code> — 벡터의 크기</h2>
+  <p>
+    <strong>무엇을 만드나</strong>: 벡터의 <strong>크기(원점에서 화살촉까지의 거리)</strong>를 실수로 돌려줍니다.
+    <strong>왜 필요한가</strong>: 두 점 사이 거리(<code>length(b - a)</code>), 속력, 정규화의 재료 등에 쓰입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Vec3.h — ⑦length</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">inline float length(const Vec3&amp; v) { return std::sqrt(dot(v, v)); }</code></pre>
+  </div>
+
+  <h3>왜 <code>dot(v, v)</code>인가</h3>
+  <p>
+    피타고라스로 <code>|v| = √(x² + y² + z²)</code> 입니다. 그런데 <code>dot(v, v) = x·x + y·y + z·z = x² + y² + z²</code>이므로,
+    <strong>제곱합이 곧 자기 자신과의 내적</strong>입니다. 그래서 <code>dot(v, v)</code>에 <code>std::sqrt</code>(제곱근)를 씌우면 길이가 됩니다.
+    이미 만든 <code>dot</code>를 재사용하니 코드가 짧고 실수가 줄어듭니다.
+  </p>
+  <p>
+    <code>std::sqrt</code>는 <code>&lt;cmath&gt;</code>에 있는 제곱근 함수입니다(그래서 맨 위에서 <code>#include &lt;cmath&gt;</code> 했습니다).
+    <strong>손계산</strong>: <code>a = (1,2,3)</code> → <code>dot(a,a) = 1+4+9 = 14</code> → <code>length(a) = √14 ≈ 3.742</code>.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>std::sqrt</code>는 상대적으로 <strong>비싼</strong> 연산입니다. "가장 가까운 물체 찾기"처럼 <strong>거리끼리 비교만</strong> 하는 경우엔
+    실제 거리 대신 <strong>거리의 제곱 <code>dot(v, v)</code></strong>으로 비교하세요. <code>√</code>는 단조 증가라
+    "제곱이 더 작으면 실제로도 더 가깝다"가 항상 성립하므로, <code>sqrt</code>를 통째로 생략할 수 있습니다.
+    수천~수만 번 반복되는 루프에서 체감 차이가 큽니다.
+  </div>
+
+  <!-- =========================================================
+       8. 정규화 normalize
+       ========================================================= -->
+  <h2 style="margin-top:40px;">8. 정규화 <code>normalize</code> — 길이만 1로, 방향은 그대로</h2>
+  <p>
+    <strong>무엇을 만드나</strong>: 방향은 유지하되 <strong>길이를 정확히 1</strong>로 맞춘 <strong>단위 벡터</strong>를 돌려줍니다.
+    <strong>왜 필요한가</strong>: 조명(<code>dot(N, L) = cos θ</code>가 성립하려면 둘 다 단위여야 함), 방향 비교, 이동 방향 등
+    "크기는 필요 없고 <strong>방향만</strong> 필요한" 거의 모든 곳에서 먼저 정규화합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Vec3.h — ⑧normalize</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">inline Vec3 normalize(const Vec3&amp; v) {
+    float len = length(v);
+    if (len &lt; 1e-8f) return { 0.0f, 0.0f, 0.0f };
+    return v * (1.0f / len);
+}</code></pre>
+  </div>
+
+  <h3>한 줄씩</h3>
+  <p>
+    <code>float len = length(v);</code> — 먼저 현재 길이를 구합니다. 이걸로 나눠 주면 길이가 1이 됩니다.
+  </p>
+  <p>
+    <code>if (len &lt; 1e-8f) return { 0.0f, 0.0f, 0.0f };</code> — <strong>0으로 나누기 방어</strong>입니다. 영벡터(또는 거의 영)에는
+    "방향"이 없어 정규화가 정의되지 않습니다. 그대로 나누면 <code>len</code>이 0이라 <strong>결과가 <code>inf</code>/<code>NaN</code></strong>이 되어
+    화면 전체가 깨질 수 있습니다. <code>1e-8f</code>(= 0.00000001)은 "이보다 작으면 사실상 0으로 본다"는 <strong>엡실론(허용 오차)</strong>입니다.
+    <strong>정확히 <code>== 0.0f</code>로 비교하지 않는 이유</strong>는 float 계산에는 미세 오차가 있어, 이론상 0이어야 할 값이
+    아주 작은 값으로 남을 수 있기 때문입니다. 엡실론으로 "충분히 작으면 0 취급"하는 것이 안전합니다.
+  </p>
+  <p>
+    <code>return v * (1.0f / len);</code> — 각 성분을 길이로 나눠 단위 벡터를 만듭니다. <code>v / len</code> 대신
+    <strong><code>1.0f / len</code>을 한 번 구해 곱하는</strong> 이유는 성능입니다: 나눗셈은 곱셈보다 느리므로, 나눗셈 <strong>한 번</strong> +
+    곱셈 세 번이 나눗셈 세 번보다 빠릅니다. (여기서 앞서 만든 <code>v * s</code> 스칼라 곱이 재사용됩니다.)
+  </p>
+
+  <h3>손계산 예제</h3>
+  <p>
+    <code>b = (4, 0, 0)</code> → <code>length(b) = 4</code> → <code>normalize(b) = (4/4, 0/4, 0/4) = (1, 0, 0)</code>.
+    방향(x축 양의 방향)은 그대로, 길이만 1이 됐습니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    엡실론 방어를 빼먹고 영벡터를 정규화하면 <code>NaN</code>이 퍼져 <strong>이후 모든 계산이 오염</strong>됩니다.
+    (<code>NaN</code>은 어떤 연산과 만나도 <code>NaN</code>이 되고, 렌더 결과가 검거나 사라집니다.) 방향이 확실치 않은 벡터를
+    정규화할 때는 항상 길이 0 방어를 넣으세요.
+  </div>
+
+  <!-- =========================================================
+       9. 전체 사용 예
+       ========================================================= -->
+  <h2 style="margin-top:40px;">9. 전체를 한 번에 — 사용 예</h2>
+  <div class="code">
+    <div class="code-head"><span>main.cpp — 사용 예</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">Vec3 a{1, 2, 3};
+Vec3 b{4, 0, 0};
+
+Vec3 sum = a + b;         // (5, 2, 3)
+Vec3 dir = normalize(b);  // (1, 0, 0)  — x축 단위 벡터
+float d  = dot(a, b);     // 4
+Vec3 c   = cross(a, b);   // (0, 12, -8) — a, b 에 수직
+float la = length(a);     // sqrt(14) ≈ 3.742</code></pre>
+  </div>
+  <p>
+    앞에서 손으로 계산한 값들이 그대로 나옵니다. 여기까지가 <strong>직접 구현</strong>입니다. 내부 동작을 손으로 확인했으니,
+    이제 실무 표준으로 넘어갑니다.
+  </p>
+
+  <!-- =========================================================
+       10. DirectXMath 버전
+       ========================================================= -->
+  <h2 style="margin-top:40px;">10. 실무 버전 — DirectXMath로 옮기기</h2>
+  <p>
+    실제 D3D 프로젝트에서는 <code>Vec3</code>를 직접 만들지 않고 <strong>DirectXMath</strong>를 씁니다. SIMD(한 번에 4개 float을
+    병렬 계산)로 최적화돼 있고, 행렬·쿼터니언까지 일관된 API를 제공합니다. 직접 구현은 <strong>원리 학습용</strong>,
+    DirectXMath는 <strong>실전용</strong>이라고 생각하세요.
+  </p>
+  <p>
+    핵심 개념 하나만 잡으면 됩니다: <strong>저장은 <code>XMFLOAT3</code>, 계산은 <code>XMVECTOR</code></strong>.
+  </p>
+  <ul>
+    <li><strong><code>XMFLOAT3</code></strong>: 우리 <code>Vec3</code>처럼 float 3개를 담는 <strong>평범한 저장용 구조체</strong>.
+        정점 버퍼·멤버 변수 등 메모리에 담아 둘 때 씁니다.</li>
+    <li><strong><code>XMVECTOR</code></strong>: SIMD 레지스터에 올라가는 <strong>계산 전용 타입</strong>. 실제 연산은 이걸로 합니다.</li>
+  </ul>
+  <p>
+    그래서 흐름이 항상 <strong>"로드(<code>XMLoadFloat3</code>) → 계산 → 저장(<code>XMStoreFloat3</code>)"</strong> 입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>DirectXMath 버전</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+
+XMFLOAT3 aS{1, 2, 3};      // 저장용(storage)
+XMFLOAT3 bS{4, 0, 0};
+
+// 1) 로드: 저장용 → 계산용
+XMVECTOR a = XMLoadFloat3(&amp;aS);
+XMVECTOR b = XMLoadFloat3(&amp;bS);
+
+// 2) 계산: 전부 XMVECTOR 로
+XMVECTOR sum  = XMVectorAdd(a, b);          // a + b
+XMVECTOR diff = XMVectorSubtract(a, b);     // a - b
+XMVECTOR sc   = XMVectorScale(a, 2.0f);     // a * 2
+XMVECTOR ndir = XMVector3Normalize(b);      // normalize(b)
+XMVECTOR cx   = XMVector3Cross(a, b);       // cross(a, b)
+
+// 내적/길이는 결과가 스칼라지만 XMVECTOR(4채널에 복제)로 나옴 → Get 으로 추출
+float d  = XMVectorGetX(XMVector3Dot(a, b));    // dot(a, b) = 4
+float la = XMVectorGetX(XMVector3Length(a));    // length(a) ≈ 3.742
+
+// 3) 저장: 계산용 → 저장용 (메모리에 다시 담기)
+XMFLOAT3 sumS;
+XMStoreFloat3(&amp;sumS, sum);   // 이제 sumS.x = 5, ...</code></pre>
+  </div>
+
+  <h3>원본 ↔ DirectXMath 1:1 매핑</h3>
+  <table class="impl">
+    <tr><th>직접 구현</th><th>DirectXMath</th><th>메모</th></tr>
+    <tr><td><code>Vec3 v{...}</code> (저장)</td><td><code>XMFLOAT3</code></td><td>메모리 저장용 구조체</td></tr>
+    <tr><td>(계산할 벡터)</td><td><code>XMVECTOR</code> + <code>XMLoadFloat3(&amp;s)</code></td><td>계산 전 반드시 로드</td></tr>
+    <tr><td><code>a + b</code></td><td><code>XMVectorAdd(a, b)</code></td><td>성분별 덧셈</td></tr>
+    <tr><td><code>a - b</code></td><td><code>XMVectorSubtract(a, b)</code></td><td>성분별 뺄셈</td></tr>
+    <tr><td><code>a * s</code></td><td><code>XMVectorScale(a, s)</code></td><td>스칼라 곱</td></tr>
+    <tr><td><code>-v</code></td><td><code>XMVectorNegate(v)</code></td><td>부호 반전</td></tr>
+    <tr><td><code>dot(a, b)</code></td><td><code>XMVector3Dot(a, b)</code> → <code>XMVectorGetX(...)</code></td><td>결과가 XMVECTOR라 X채널 추출</td></tr>
+    <tr><td><code>cross(a, b)</code></td><td><code>XMVector3Cross(a, b)</code></td><td>결과는 XMVECTOR(방향)</td></tr>
+    <tr><td><code>length(v)</code></td><td><code>XMVector3Length(v)</code> → <code>XMVectorGetX(...)</code></td><td>스칼라 추출 필요</td></tr>
+    <tr><td><code>normalize(v)</code></td><td><code>XMVector3Normalize(v)</code></td><td>영벡터 방어는 내부 처리(구현별 상이)</td></tr>
+    <tr><td>결과를 메모리에 저장</td><td><code>XMStoreFloat3(&amp;s, v)</code></td><td>계산 끝나면 다시 저장</td></tr>
+  </table>
+
+  <p>
+    한 가지 낯선 점: <strong><code>XMVector3Dot</code>·<code>XMVector3Length</code>의 결과가 <code>float</code>이 아니라 <code>XMVECTOR</code></strong>라는 것입니다.
+    SIMD 특성상 스칼라 하나도 4개 채널(x, y, z, w)에 <strong>같은 값으로 복제</strong>해 담기 때문입니다. 그래서
+    <code>XMVectorGetX(...)</code>로 첫 채널을 꺼내 진짜 <code>float</code>으로 씁니다. 우리 직접 구현이 곧바로 <code>float</code>을 돌려주던 것과의
+    유일한 사용법 차이입니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    DirectXMath는 <strong>행벡터 규약</strong>입니다: <code>v' = v * M</code>, HLSL에서 <code>mul(v, M)</code>. GLM(OpenGL)의 <strong>열벡터</strong>
+    <code>v' = M * v</code>와 곱 순서가 <strong>반대</strong>이니, 다른 자료의 행렬 곱 순서를 그대로 옮기지 마세요. 이 차이는 다음
+    <a href="./01-matrix.html">행렬 — Mat4</a> 페이지에서 본격적으로 다룹니다(그리고 cbuffer 업로드 시 전치가 필요한 이유도).
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>XMLoadFloat3</code>/<code>XMStoreFloat3</code>는 SIMD 레지스터와 메모리 사이 <strong>이사 비용</strong>이 있습니다.
+    루프 안에서 여러 연산을 한다면 <strong>한 번 로드해서 <code>XMVECTOR</code>로 쭉 계산</strong>하고, 필요할 때만 저장하세요.
+    성분마다 로드/저장을 반복하면 SIMD의 이점이 사라집니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./01-math.html">← 1장 허브</a>
+    <a href="./01-matrix.html">행렬 — Mat4 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

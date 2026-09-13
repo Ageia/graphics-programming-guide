@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 행렬 — Mat4 — C++/DirectX 11</title>
+<meta name="description" content="4×4 행렬을 행 우선으로 저장하는 Mat4 구조체와 항등·곱셈·전치를 한 줄 한 줄 해부하고, cbuffer 업로드 시 전치가 필요한 이유와 DirectXMath 대응까지 정리한 구현 가이드." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./01-math.html">1장. 기초 수학</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">행렬 — Mat4</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 1</span>
+  <h1>행렬 — Mat4 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    벡터가 <em>점 하나</em>라면, 행렬은 <em>공간 전체를 한 번에 바꾸는 규칙</em>입니다. 이동·회전·크기·투영이
+    전부 4×4 행렬 하나로 표현되고, 정점 하나를 그 행렬에 곱하면 화면 위 어디로 갈지 결정됩니다.
+    이 페이지에서는 <strong>4×4 행렬을 float 16개로 저장하는 <code>Mat4</code> 구조체</strong>를 만들고,
+    <strong>항등행렬 · 행렬 곱 · 전치</strong>를 성분 하나까지 손으로 따라가며, 마지막으로 이 행렬을
+    <strong>GPU 상수 버퍼(cbuffer)에 올릴 때 왜 전치해야 하는지</strong>까지 파헤칩니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행렬은 <strong>행 우선(row-major)</strong> 저장, <strong>왼손 좌표계</strong>, 클립 공간 z 범위 <strong>[0, 1]</strong>.
+    OpenGL/GLM(열벡터, <code>M * v</code>)과는 곱 순서가 반대이니 다른 자료의 곱을 그대로 옮기지 마세요.
+  </div>
+
+  <h2 style="margin-top:40px;">무엇을, 왜 만드나</h2>
+  <p>
+    <strong>무엇을:</strong> 4×4 실수 행렬을 <strong>행 우선(row-major)</strong>으로 저장하는 구조체 <code>Mat4</code>와,
+    그 위에서 동작하는 <strong>항등행렬 생성 · 행렬 곱셈 · 전치</strong> 세 가지 연산을 만듭니다.
+  </p>
+  <p>
+    <strong>왜:</strong> 그래픽스에서 하나의 정점은 보통 <em>모델→월드→뷰→투영</em>이라는 여러 단계를 거칩니다.
+    각 단계가 행렬 하나이고, 이들을 <strong>미리 곱해 하나의 MVP 행렬</strong>로 합쳐 두면 정점마다 곱셈 한 번으로 끝납니다.
+    그래서 <em>행렬 곱</em>이 핵심입니다. 또 저장 순서를 <strong>행 우선</strong>으로 잡은 이유는
+    DirectXMath의 <code>XMFLOAT4X4</code>와 <strong>메모리 배치를 똑같이</strong> 맞춰, 나중에 상수 버퍼로 올릴 때
+    <code>memcpy</code> 한 번으로 재사용하기 위함입니다.
+  </p>
+
+  <ol class="steps">
+    <li><strong>저장 구조</strong> — <code>float m[16]</code> 하나로 4×4를 표현하고, <code>(행 r, 열 c)</code>를 <code>m[r*4+c]</code>로 접근합니다.</li>
+    <li><strong>접근자 <code>at(r,c)</code></strong> — 2차원 좌표를 1차원 인덱스로 바꿔 주는 통로. 읽기용/쓰기용 두 버전.</li>
+    <li><strong>항등행렬 <code>identity()</code></strong> — 대각선만 1, 나머지 0. "아무것도 안 바꾸는" 곱셈의 기준점.</li>
+    <li><strong>행렬 곱 <code>operator*</code></strong> — <code>C(r,c) = Σ A(r,k)·B(k,c)</code>. 3중 루프로 16개 성분을 채웁니다.</li>
+    <li><strong>전치 <code>transpose</code></strong> — 행과 열을 뒤바꿔 <code>(r,c) ↔ (c,r)</code>. cbuffer 업로드용.</li>
+    <li><strong>cbuffer 업로드</strong> — 전치한 행렬을 GPU로 복사하고, 전치를 빠뜨렸을 때 생기는 대표적 버그를 짚습니다.</li>
+  </ol>
+
+  <!-- ===================== 저장 구조 ===================== -->
+  <h2 style="margin-top:44px;">1. 4×4를 float 16개로 — 저장 구조와 인덱싱</h2>
+  <p>
+    수학에서 4×4 행렬은 4행 4열, 총 16개의 수입니다. 하지만 C++에서 2차원 배열(<code>float m[4][4]</code>) 대신
+    <strong>1차원 배열 <code>float m[16]</code></strong>을 씁니다. 메모리는 어차피 일렬로 이어진 바이트 뭉치라,
+    16칸을 한 줄로 늘어놓고 "몇 번째 칸이 몇 행 몇 열인지"를 우리가 정하면 됩니다. 그 규칙이 바로 <strong>행 우선</strong>입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Mat4.h — 저장 구조와 접근자</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#pragma once
+// 메모리: [row0(4개), row1(4개), row2(4개), row3(4개)]가 일렬로 붙어 있음.
+// (행 r, 열 c) 성분의 위치 = m[r*4 + c]
+struct Mat4 {
+    float m[16] = { 0 };                          // 16칸 전부 0으로 시작
+    float&amp; at(int r, int c) { return m[r * 4 + c]; }             // 쓰기/읽기용
+    const float&amp; at(int r, int c) const { return m[r * 4 + c]; } // 읽기 전용
+};</code></pre>
+  </div>
+
+  <h3>한 줄씩 해부</h3>
+  <p>
+    <code>#pragma once</code> — 이 헤더가 여러 <code>.cpp</code>에서 <code>#include</code>돼도 딱 한 번만 펼쳐지게 하는
+    <em>중복 포함 방지</em> 지시입니다. 같은 구조체를 두 번 정의하면 컴파일 오류가 나기 때문에 헤더 맨 위의 관례입니다.
+  </p>
+  <p>
+    <code>struct Mat4 { ... };</code> — <code>struct</code>는 <code>class</code>와 거의 같지만 기본 접근이 <code>public</code>이라,
+    수학용 값 타입처럼 <em>멤버를 자유롭게 읽고 쓰는</em> 자료구조에 적합합니다.
+  </p>
+  <p>
+    <code>float m[16] = { 0 };</code> — 4×4=16개의 실수를 담는 배열입니다.
+    <code>= { 0 }</code>는 <strong>집합 초기화(aggregate initialization)</strong>로, 첫 원소를 0으로 두면
+    나머지 15칸도 자동으로 0이 됩니다. 즉 <code>Mat4</code>를 만들면 <strong>영행렬(모두 0)</strong>로 시작합니다.
+    이 "기본이 0"이라는 사실은 뒤에서 함정으로 다시 등장하니 기억해 두세요.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>= { 0 }</code>를 빼면 <code>m</code>은 <strong>초기화되지 않은 쓰레기 값</strong>으로 남습니다.
+    행렬 연산 결과가 실행할 때마다 달라지는 유령 버그의 원인이 되니, 값 타입 구조체는 항상 기본값을 명시하세요.
+  </div>
+
+  <h3>인덱싱 <code>m[r*4 + c]</code>가 왜 이 공식인가</h3>
+  <p>
+    행 우선이란 "<strong>한 행을 통째로 먼저 저장하고, 그다음 행을 이어 붙인다</strong>"는 뜻입니다.
+    그러면 <code>r</code>번째 행은 앞에 이미 <code>r</code>개의 행(각 4칸)이 놓여 있으니 <code>r*4</code>칸을 건너뛴 자리에서 시작하고,
+    그 행 안에서 <code>c</code>번째 열이니 <code>+c</code>를 더합니다. 그래서 <strong><code>m[r*4 + c]</code></strong>입니다.
+  </p>
+  <p>메모리 한 줄을 그림글로 그리면 이렇습니다(인덱스 0~15):</p>
+  <div class="code">
+    <div class="code-head"><span>행 우선(row-major) 메모리 배치</span><span class="lang">memory</span></div>
+<pre><code class="language-cpp">index :  0    1    2    3  | 4    5    6    7  | 8    9   10   11 | 12   13   14   15
+(r,c) : (0,0)(0,1)(0,2)(0,3)|(1,0)(1,1)(1,2)(1,3)|(2,0)(2,1)(2,2)(2,3)|(3,0)(3,1)(3,2)(3,3)
+행    :  &lt;-------- row0 -------&gt;|&lt;-------- row1 -------&gt;|&lt;-------- row2 -------&gt;|&lt;-------- row3 -------&gt;
+
+예) at(2,1) -&gt; m[2*4 + 1] = m[9]   // 3번째 행(r=2), 2번째 열(c=1)
+    at(0,3) -&gt; m[0*4 + 3] = m[3]
+    at(3,3) -&gt; m[3*4 + 3] = m[15]  // 오른쪽 맨 아래 구석</code></pre>
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">행 우선 vs 열 우선</span>
+    같은 16개 수라도 <strong>메모리에 늘어놓는 순서</strong>가 다릅니다.
+    <strong>행 우선</strong>(우리 방식)은 <code>row0, row1, row2, row3</code> 순.
+    <strong>열 우선(column-major)</strong>은 <code>col0, col1, col2, col3</code> 순으로,
+    같은 논리적 성분 <code>(r,c)</code>가 <code>m[c*4 + r]</code>에 놓입니다.
+    수학적으로 같은 행렬이라도 <em>디스크/버스로 보낼 때의 바이트 순서</em>가 달라, GPU에 넘길 때 이 차이가 화면 결과를 바꿉니다(6번 항목).
+  </div>
+
+  <h3>접근자 <code>at</code>이 두 개인 이유 — const 오버로드</h3>
+  <p>
+    <code>float&amp; at(int r, int c)</code>는 성분에 대한 <strong>참조(<code>&amp;</code>)</strong>를 돌려줍니다.
+    참조를 돌려주니 <code>M.at(0,0) = 1;</code>처럼 <em>왼쪽에 두고 값을 대입</em>할 수 있습니다(쓰기 가능).
+  </p>
+  <p>
+    두 번째 <code>const float&amp; at(int r, int c) const</code>는 함수 끝에 <code>const</code>가 붙어
+    "<strong>이 함수는 <code>Mat4</code> 자신을 건드리지 않는다</strong>"고 약속합니다. 그래서 <code>const Mat4&amp;</code>로 받은
+    <em>읽기 전용 행렬</em>에서도 성분을 꺼내 볼 수 있습니다. 반환도 <code>const float&amp;</code>라 실수로 값을 바꿀 수 없습니다.
+    아래 곱셈 함수는 인자를 <code>const A</code>, <code>const B</code>로 받는데, 이 <code>const</code> 버전이 없으면
+    <code>A.at(r,k)</code> 같은 읽기조차 컴파일되지 않습니다. 그래서 <strong>쓰기용 · 읽기용 두 벌</strong>을 둡니다.
+  </p>
+  <p>
+    참조로 돌려주는 또 다른 이점은 <strong>복사 비용 0</strong>입니다. <code>float</code> 하나야 작지만,
+    <em>배열 원소의 실제 위치</em>를 가리키므로 대입이 곧바로 원본에 반영되는 것이 핵심입니다.
+  </p>
+
+  <!-- ===================== 항등행렬 ===================== -->
+  <h2 style="margin-top:44px;">2. 항등행렬 identity() — "아무것도 안 바꾸는" 기준점</h2>
+  <p>
+    항등행렬(identity matrix)은 <strong>대각선만 1이고 나머지는 0</strong>인 행렬입니다. 숫자에서 1을 곱하면 그대로이듯,
+    어떤 행렬 <code>M</code>이나 벡터 <code>v</code>에 항등행렬을 곱해도 값이 그대로입니다(<code>M·I = M</code>, <code>v·I = v</code>).
+    그래서 <em>변환을 아직 아무것도 안 한 초기 상태</em>, 여러 변환을 누적할 때의 <em>출발점</em>으로 씁니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Mat4.h — 항등행렬</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">    static Mat4 identity() {
+        Mat4 r;                 // 모든 성분 0 (집합 초기화 덕분)
+        r.at(0,0) = 1;          // 대각선만 1로
+        r.at(1,1) = 1;
+        r.at(2,2) = 1;
+        r.at(3,3) = 1;
+        return r;
+    }</code></pre>
+  </div>
+
+  <h3>한 줄씩 해부</h3>
+  <p>
+    <code>static Mat4 identity()</code> — <code>static</code>이라 특정 인스턴스가 아니라 <em>타입에 속한 함수</em>입니다.
+    그래서 객체 없이 <code>Mat4::identity()</code>로 호출해 <strong>새 행렬을 찍어내는 팩토리</strong>처럼 씁니다.
+  </p>
+  <p>
+    <code>Mat4 r;</code> — 앞서 본 <code>= { 0 }</code> 덕분에 이 순간 <code>r</code>은 완전한 <strong>영행렬</strong>입니다.
+    그래서 뒤이어 대각선 4칸만 1로 덮으면 나머지는 이미 0이라 손댈 필요가 없습니다.
+  </p>
+  <p>
+    <code>r.at(0,0)=1; r.at(1,1)=1; r.at(2,2)=1; r.at(3,3)=1;</code> — <code>(0,0),(1,1),(2,2),(3,3)</code>이 <strong>주대각선</strong>입니다.
+    이 네 자리는 메모리로는 <code>m[0], m[5], m[10], m[15]</code>(각각 <code>r*4+c</code>로 <code>0, 5, 10, 15</code>)에 해당합니다.
+    <code>at</code>가 참조를 돌려주니 <code>= 1</code> 대입이 곧바로 배열에 꽂힙니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>완성된 항등행렬(4×4 논리 뷰)</span><span class="lang">matrix</span></div>
+<pre><code class="language-cpp">| 1  0  0  0 |
+| 0  1  0  0 |
+| 0  0  1  0 |
+| 0  0  0  1 |</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    변환을 누적할 때 <strong>출발 행렬을 영행렬(<code>Mat4{}</code>)로 두면 안 됩니다.</strong>
+    영행렬에 무엇을 곱해도 0이 되어, 정점이 전부 원점(0,0,0)으로 뭉개지고 <em>화면이 새까맣게</em> 나옵니다.
+    누적의 시작은 반드시 <code>Mat4::identity()</code>입니다.
+  </div>
+
+  <!-- ===================== 행렬 곱 ===================== -->
+  <h2 style="margin-top:44px;">3. 행렬 곱 operator* — 그래픽스의 심장</h2>
+  <p>
+    행렬 곱 <code>C = A * B</code>는 "<strong>두 변환을 하나로 합치는</strong>" 연산입니다. 예를 들어 <code>A</code>가 회전,
+    <code>B</code>가 투영이라면 <code>A*B</code>는 "회전하고 나서 투영하는" 단일 행렬이 됩니다. 정점 수백만 개에 두 변환을
+    따로 적용하는 대신 <strong>미리 한 번 곱해</strong> 두면 정점당 곱셈이 절반으로 줍니다. 이게 MVP를 미리 만드는 이유입니다.
+  </p>
+
+  <h3>수학적 의미 → 직관 → 코드</h3>
+  <p>
+    <strong>① 수학:</strong> 결과 행렬의 <code>(r,c)</code> 성분은 정해진 공식으로 계산됩니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>행렬 곱의 정의</span><span class="lang">math</span></div>
+<pre><code class="language-cpp">C(r,c) = A(r,0)·B(0,c) + A(r,1)·B(1,c) + A(r,2)·B(2,c) + A(r,3)·B(3,c)
+       = Σ (k=0..3)  A(r,k) · B(k,c)</code></pre>
+  </div>
+  <p>
+    <strong>② 직관(그림글):</strong> <code>C</code>의 <code>(r,c)</code>를 구하려면
+    <strong><code>A</code>의 <code>r</code>번째 <span style="color:var(--accent2)">가로줄(행)</span></strong>과
+    <strong><code>B</code>의 <code>c</code>번째 <span style="color:var(--accent)">세로줄(열)</span></strong>을 겹쳐 놓고,
+    같은 위치끼리 곱해서 4개를 전부 더합니다. "A의 한 행이 B의 한 열 위를 훑고 지나가며 내적을 만든다"고 상상하면 됩니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>(r,c) = A의 r행 · B의 c열 (내적)</span><span class="lang">diagram</span></div>
+<pre><code class="language-cpp">          B의 c열 (세로)
+             ↓
+          [ B(0,c) ]
+   A의 r행  [ B(1,c) ]
+[A(r,0) A(r,1) A(r,2) A(r,3)]  ·  [ B(2,c) ]  =  C(r,c)
+             (가로)              [ B(3,c) ]
+
+C(r,c) = A(r,0)·B(0,c) + A(r,1)·B(1,c) + A(r,2)·B(2,c) + A(r,3)·B(3,c)</code></pre>
+  </div>
+  <p>
+    <strong>③ 코드:</strong> 이 공식을 그대로 3중 루프로 옮깁니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Mat4.h — 행렬 곱</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// C = A * B,  C(r,c) = Σ A(r,k)·B(k,c)
+inline Mat4 operator*(const Mat4&amp; A, const Mat4&amp; B) {
+    Mat4 C;                                   // 결과: 처음엔 영행렬
+    for (int c = 0; c &lt; 4; ++c)               // 결과의 열을 하나씩
+        for (int r = 0; r &lt; 4; ++r) {         // 그 열의 행을 하나씩 -&gt; (r,c) 한 칸
+            float sum = 0;                    // 이 칸의 누적합
+            for (int k = 0; k &lt; 4; ++k)       // 내적: A의 r행 × B의 c열
+                sum += A.at(r,k) * B.at(k,c);
+            C.at(r,c) = sum;                  // 완성된 (r,c) 성분 기록
+        }
+    return C;
+}</code></pre>
+  </div>
+
+  <h3>한 줄씩 해부</h3>
+  <p>
+    <code>inline Mat4 operator*(const Mat4&amp; A, const Mat4&amp; B)</code> —
+    <code>operator*</code>를 <strong>오버로딩</strong>해 <code>A * B</code>라고 쓰면 이 함수가 불리게 만듭니다.
+    함수 이름을 <code>multiply(A,B)</code>로 둘 수도 있지만, <code>world * view * proj</code>처럼
+    <strong>수식 그대로 자연스럽게 읽히는</strong> 코드를 위해 연산자로 정의합니다.
+    인자를 <code>const Mat4&amp;</code>(읽기 전용 참조)로 받는 이유는 <strong>64바이트짜리 행렬을 복사하지 않고</strong>
+    원본을 안전하게 참조하기 위함입니다. <code>inline</code>은 헤더에 정의를 두어 여러 파일에서 포함해도
+    <em>중복 정의 오류가 나지 않게</em> 하는 표시입니다.
+  </p>
+  <p>
+    <code>Mat4 C;</code> — 결과 행렬. 집합 초기화로 <strong>0에서 시작</strong>하므로, 아래에서 16칸을 모두 덮어씁니다.
+  </p>
+  <p>
+    <strong>바깥 두 루프 <code>for(c) for(r)</code></strong> — 결과 <code>C</code>의 <strong>16개 칸 <code>(r,c)</code>을 하나씩</strong> 돌기 위한 이중 루프입니다.
+    여기서는 바깥이 열(<code>c</code>), 안쪽이 행(<code>r</code>) 순서입니다. 논리적 결과는 <strong>순서와 무관</strong>합니다
+    — 어차피 16칸을 전부 채우니까요. 다만 뒤에 나올 cbuffer가 <em>열 우선</em>으로 해석하는 것과 시각을 맞추려고
+    "열을 먼저 고르고 그 안의 행을 훑는" 순서로 적어 두면 열 단위로 결과를 떠올리기 편합니다.
+  </p>
+  <p>
+    <strong>안쪽 루프 <code>for(k)</code>와 <code>sum</code></strong> — 고른 한 칸 <code>(r,c)</code>의 값을 만드는 <strong>내적</strong>입니다.
+    <code>k=0,1,2,3</code>을 돌며 <code>A.at(r,k) * B.at(k,c)</code>를 더합니다. 여기서 반복 변수 <code>k</code>가
+    <strong>A에서는 열 번호로, B에서는 행 번호로</strong> 동시에 쓰이는 것이 핵심입니다.
+    두 번째 인덱스(<code>k</code>)가 겹쳐 돌아가며 "A의 r행"과 "B의 c열"을 짝지어 줍니다.
+  </p>
+  <p>
+    그래서 <strong>4×4 곱은 성분 16개 × 각 4번 곱셈 = 총 64번의 곱셈</strong>과 48번의 덧셈으로 이뤄집니다.
+    "16개 곱셈의 합"이라는 말은 <em>한 칸</em>을 기준으로 볼 때 곱셈이 4개 더해진다는 뜻이고,
+    행렬 전체로는 16칸 × 4 = 64회가 됩니다.
+  </p>
+
+  <h3>손으로 한 칸 계산해 보기</h3>
+  <p>
+    간단한 예로 <code>A</code>를 항등행렬, <code>B</code>를 임의 행렬로 두고 <code>C(0,0)</code>을 계산해 봅시다.
+    <code>A</code>의 0행은 <code>[1, 0, 0, 0]</code>이므로:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>C(0,0) 손계산 (A = 항등)</span><span class="lang">math</span></div>
+<pre><code class="language-cpp">C(0,0) = A(0,0)·B(0,0) + A(0,1)·B(1,0) + A(0,2)·B(2,0) + A(0,3)·B(3,0)
+       =   1·B(0,0)    +   0·B(1,0)    +   0·B(2,0)    +   0·B(3,0)
+       =   B(0,0)
+
+// 항등행렬은 1이 있는 자리 하나만 살아남으므로 결국 C = B.  I * B = B 를 성분으로 확인.</code></pre>
+  </div>
+  <p>
+    이렇게 항등행렬의 0행 <code>[1,0,0,0]</code>은 <code>B</code>의 0행만 그대로 골라냅니다. 다른 행도 마찬가지라
+    <code>C = A*B = I*B = B</code>가 성분 수준에서 확인됩니다. 항등행렬이 "아무것도 안 바꾼다"는 성질의 실체입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>행렬 곱은 교환법칙이 성립하지 않습니다: <code>A*B ≠ B*A</code>.</strong>
+    위 3중 루프에서 <code>A.at(r,k)</code>와 <code>B.at(k,c)</code>의 역할(행/열)이 비대칭인 것을 보면 알 수 있습니다.
+    변환 순서가 결과를 바꾸므로(회전 후 이동 ≠ 이동 후 회전) 곱하는 순서를 절대 뒤집지 마세요.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    이 소박한 3중 루프는 학습용으로 완벽하지만 SIMD를 안 씁니다. 실무에서는 4개 float을 한 번에 처리하는
+    SSE/AVX로 4~8배 빨라지며, 그것을 대신 해 주는 것이 <strong>DirectXMath의 <code>XMMATRIX</code></strong>입니다(맨 아래).
+  </div>
+
+  <!-- ===================== 전치 ===================== -->
+  <h2 style="margin-top:44px;">4. 전치 transpose — 행과 열 뒤집기</h2>
+  <p>
+    전치(transpose)는 행렬을 <strong>주대각선 기준으로 대칭 이동</strong>시켜 <code>(r,c)</code>와 <code>(c,r)</code>을 맞바꾸는 연산입니다.
+    <code>Mᵀ(r,c) = M(c,r)</code>. 순수 수학에서도 자주 쓰지만, 우리 파이프라인에서 전치가 등장하는 <strong>진짜 이유는
+    GPU로 행렬을 올릴 때 저장 순서를 맞추기 위해서</strong>입니다(6번 항목에서 상세히).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Mat4.h — 전치</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 전치: (r,c) ↔ (c,r).  cbuffer 업로드 시 HLSL의 열 우선 관례에 맞추려고 사용.
+inline Mat4 transpose(const Mat4&amp; M) {
+    Mat4 r;
+    for (int i = 0; i &lt; 4; ++i)
+        for (int j = 0; j &lt; 4; ++j)
+            r.at(i,j) = M.at(j,i);     // 인덱스를 뒤집어 대입
+    return r;
+}</code></pre>
+  </div>
+
+  <h3>한 줄씩 해부</h3>
+  <p>
+    <code>inline Mat4 transpose(const Mat4&amp; M)</code> — 원본 <code>M</code>은 읽기만 하고(<code>const&amp;</code>),
+    새 행렬 <code>r</code>을 만들어 돌려줍니다(원본을 제자리에서 바꾸지 않음).
+  </p>
+  <p>
+    <strong>이중 루프의 핵심은 대입 한 줄 <code>r.at(i,j) = M.at(j,i);</code></strong>입니다.
+    왼쪽은 <code>(i,j)</code>, 오른쪽은 <strong>인덱스가 뒤집힌 <code>(j,i)</code></strong>입니다.
+    즉 결과의 <code>(i,j)</code> 자리에 원본의 <code>(j,i)</code> 값을 가져다 놓습니다. 이 한 줄이 곧 <code>Mᵀ(i,j)=M(j,i)</code>의 코드 번역입니다.
+  </p>
+  <p>
+    <strong>메모리로 보면:</strong> 원본에서 <code>m[j*4+i]</code>에 있던 값이 결과에서 <code>m[i*4+j]</code>로 옮겨 갑니다.
+    주대각선(<code>i==j</code>)은 자기 자신이라 안 움직이고, 나머지는 대각선을 기준으로 짝을 지어 자리를 바꿉니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>전치 예시 (성분 위치 이동)</span><span class="lang">matrix</span></div>
+<pre><code class="language-cpp">        원본 M                     전치 Mᵀ
+| a  b  c  d |            | a  e  i  m |
+| e  f  g  h |    -&gt;      | b  f  j  n |
+| i  j  k  l |            | c  g  k  o |
+| m  n  o  p |            | d  h  l  p |
+// b(0,1)↔e(1,0),  c(0,2)↔i(2,0),  g(1,2)↔j(2,1) ...  대각 a,f,k,p는 그대로</code></pre>
+  </div>
+
+  <!-- ===================== cbuffer ===================== -->
+  <h2 style="margin-top:44px;">5. 상수 버퍼(cbuffer) 업로드 — 그리고 전치가 필요한 진짜 이유</h2>
+  <p>
+    CPU에서 만든 MVP 행렬을 셰이더가 쓰려면 <strong>상수 버퍼(constant buffer, cbuffer)</strong>라는 GPU 메모리로 복사해야 합니다.
+    행렬은 그냥 float 16개이니 <code>memcpy</code>로 통째로 밀어 넣습니다. 문제는 <strong>CPU와 HLSL의 저장 순서 해석이 다르다</strong>는 점입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>renderer.cpp — MVP를 cbuffer로 업로드</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">struct CBTransform { float mvp[16]; };      // cbuffer와 1:1 대응하는 CPU 구조체
+
+Mat4 mvp = world * view * proj;             // 우리 규약: 행벡터라 v' = v*(W*V*P)
+
+// HLSL의 cbuffer float4x4는 기본적으로 '열 우선'으로 해석한다.
+// 우리는 '행 우선' 저장이므로, 그대로 올리면 GPU가 전치된 걸로 읽는다 -&gt; 미리 전치해서 상쇄.
+Mat4 t = transpose(mvp);
+
+CBTransform cb;
+std::memcpy(cb.mvp, t.m, sizeof(cb.mvp));   // float 16개를 그대로 복사
+
+context-&gt;UpdateSubresource(constantBuffer.Get(), 0, nullptr, &amp;cb, 0, 0);
+context-&gt;VSSetConstantBuffers(0, 1, constantBuffer.GetAddressOf());</code></pre>
+  </div>
+
+  <h3>한 줄씩 해부</h3>
+  <p>
+    <code>struct CBTransform { float mvp[16]; };</code> — 셰이더 쪽 cbuffer의 <code>float4x4</code>와
+    <strong>바이트 레이아웃이 정확히 같은</strong> CPU 구조체입니다. 여기 담긴 순서 그대로 GPU 메모리에 놓입니다.
+  </p>
+  <p>
+    <code>Mat4 mvp = world * view * proj;</code> — 앞의 곱셈 연산자로 세 변환을 하나로 합칩니다.
+    행벡터 규약이라 정점은 셰이더에서 <code>mul(v, mvp)</code>(즉 <code>v * mvp</code>)로 곱해집니다.
+  </p>
+  <p>
+    <code>Mat4 t = transpose(mvp);</code> — <strong>핵심 한 줄.</strong>
+    우리는 <code>mvp</code>를 <em>행 우선</em>으로 저장했는데, HLSL cbuffer의 <code>float4x4</code>는 <em>열 우선</em>으로 읽습니다.
+    같은 16개 바이트를 서로 다른 순서로 해석하면 결과가 <em>전치된 행렬</em>이 됩니다. 그래서 <strong>미리 한 번 전치해서 올리면
+    GPU 쪽의 전치 해석과 서로 상쇄</strong>되어 우리가 의도한 행렬이 그대로 적용됩니다.
+  </p>
+  <p>
+    <code>std::memcpy(cb.mvp, t.m, sizeof(cb.mvp));</code> — 전치한 행렬의 배열 <code>t.m</code> 16개를 구조체로 복사합니다.
+    <code>sizeof(cb.mvp)</code>는 <code>16*4=64</code>바이트. 행 우선으로 저장을 맞춰 뒀기에 <em>필드별로 옮기지 않고</em> 한 번에 복사됩니다.
+  </p>
+  <p>
+    <code>UpdateSubresource(...)</code> — CPU의 <code>cb</code>를 GPU 상수 버퍼로 전송합니다.
+    <code>VSSetConstantBuffers(0, 1, ...)</code>는 그 버퍼를 <strong>버텍스 셰이더의 슬롯 0번</strong>에 바인딩해,
+    셰이더가 <code>register(b0)</code>로 접근할 수 있게 합니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>D3D에서 화면이 뒤틀리는 원인 1위가 이 전치 누락입니다.</strong>
+    HLSL cbuffer <code>float4x4</code>는 기본적으로 <em>열 우선</em> 해석 → 행 우선 행렬을 그대로 올리면 전치된 변환이 적용됩니다.
+    해법은 둘 중 하나:
+    <br>(1) <strong>CPU에서 <code>transpose</code> 후 업로드</strong> + 셰이더에서 <code>mul(v, M)</code> — 이 가이드의 방식.
+    <br>(2) 셰이더 선언을 <code>row_major float4x4</code>로 바꿔 GPU가 행 우선으로 읽게 하기(그러면 CPU 전치 불필요).
+    <br>두 방법을 <strong>동시에</strong> 쓰면 전치가 두 번 되어 원위치로 돌아오니, 하나만 고르세요.
+  </div>
+
+  <!-- ===================== DirectXMath ===================== -->
+  <h2 style="margin-top:44px;">6. DirectXMath 버전 — 실무 표준</h2>
+  <p>
+    학습을 위해 직접 만들었지만, 실무에서는 SIMD로 최적화된 <strong>DirectXMath</strong>를 씁니다.
+    아래는 위 코드와 <strong>1:1로 대응</strong>합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>DirectXMath로 동일 작업</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+
+XMMATRIX mvp = XMMatrixIdentity();          // 항등행렬 (우리 identity()에 대응)
+// ... 여기서 world/view/proj를 곱해 mvp를 구성 ...
+
+XMFLOAT4X4 mvpStore;                          // 저장용 4x4 (구조체 멤버로 안전)
+XMStoreFloat4x4(&amp;mvpStore, XMMatrixTranspose(mvp));  // 전치 후 메모리에 저장
+
+CBTransform cb;
+memcpy(cb.mvp, &amp;mvpStore, sizeof(cb.mvp));    // 그대로 cbuffer로
+UpdateSubresource(/* ... */);</code></pre>
+  </div>
+
+  <h3>원본 ↔ DirectXMath 1:1 대응</h3>
+  <table class="impl">
+    <thead><tr><th>직접 구현(Mat4)</th><th>DirectXMath</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td><code>Mat4</code>(계산용)</td><td><code>XMMATRIX</code></td><td>SIMD 레지스터 4개로 표현되는 연산용 행렬</td></tr>
+      <tr><td><code>Mat4</code>(저장용)</td><td><code>XMFLOAT4X4</code></td><td>단순 float 16개. 구조체 멤버/파일 저장용</td></tr>
+      <tr><td><code>Mat4::identity()</code></td><td><code>XMMatrixIdentity()</code></td><td>항등행렬 생성</td></tr>
+      <tr><td><code>A * B</code></td><td><code>XMMatrixMultiply(A, B)</code> 또는 <code>A * B</code></td><td>행렬 곱(SIMD)</td></tr>
+      <tr><td><code>transpose(M)</code></td><td><code>XMMatrixTranspose(M)</code></td><td>전치</td></tr>
+      <tr><td><code>memcpy(cb.mvp, t.m, ...)</code></td><td><code>XMStoreFloat4x4(&amp;store, M)</code></td><td>연산용 → 저장용으로 내려쓰기</td></tr>
+      <tr><td>(반대 방향)</td><td><code>XMLoadFloat4x4(&amp;store)</code></td><td>저장용 → 연산용으로 올려읽기</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="tag warn">왜 XMMATRIX와 XMFLOAT4X4 두 개인가</span>
+    <code>XMMATRIX</code>는 SIMD 레지스터라 <strong>16바이트 정렬(alignment)</strong>이 필요합니다.
+    이걸 클래스 멤버 변수로 그냥 두면 정렬이 깨져 크래시가 날 수 있습니다. 그래서
+    <strong>계산할 때만 <code>XMMATRIX</code>, 저장(멤버/버퍼)은 정렬 제약 없는 <code>XMFLOAT4X4</code></strong>로 나눠 쓰고,
+    둘 사이는 <code>XMLoadFloat4x4</code>(올려읽기) / <code>XMStoreFloat4x4</code>(내려쓰기)로 오갑니다.
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    항등행렬은 반드시 <code>XMMatrixIdentity()</code>로 만드세요.
+    <code>XMMATRIX{}</code>(기본 생성)는 <strong>0행렬</strong>이라, 이걸 MVP로 쓰면 앞서 본 대로
+    모든 정점이 원점으로 뭉개져 <em>화면이 새까맣게</em> 나옵니다. 우리 <code>Mat4{}</code>가 영행렬인 것과 완전히 같은 함정입니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>XMMATRIX</code> 곱셈·전치는 SSE/AVX로 4개 float을 한 번에 처리해 우리 3중 루프보다 훨씬 빠릅니다.
+    직접 구현은 <em>원리 이해용</em>, 실제 렌더 루프의 행렬 연산은 DirectXMath에 맡기는 것이 정석입니다.
+  </div>
+
+  <h2 style="margin-top:44px;">정리</h2>
+  <ul>
+    <li><strong>저장:</strong> <code>float m[16]</code>을 <strong>행 우선</strong>으로, <code>(r,c) = m[r*4+c]</code>. DirectXMath와 배치를 맞추기 위함.</li>
+    <li><strong>identity:</strong> 대각선만 1인 "변화 없음" 행렬. 누적의 출발점(영행렬로 시작하면 화면이 까맣게 됨).</li>
+    <li><strong>곱셈:</strong> <code>C(r,c)=Σ A(r,k)·B(k,c)</code>. 3중 루프로 16칸 × 4곱 = 64회. 교환법칙 없음(순서 중요).</li>
+    <li><strong>전치:</strong> <code>(r,c)↔(c,r)</code>. cbuffer의 열 우선 해석과 상쇄시키기 위해 업로드 직전 한 번.</li>
+    <li><strong>실무:</strong> <code>XMMATRIX</code>(계산) / <code>XMFLOAT4X4</code>(저장) + <code>XMMatrixTranspose</code>로 전치.</li>
+  </ul>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./01-vector.html">← 벡터 — Vec3</a>
+    <a href="./01-transform.html">좌표계와 변환 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

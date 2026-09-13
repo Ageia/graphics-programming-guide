@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: Model → World → View → Projection — C++/DirectX 11</title>
+<meta name="description" content="3D 점 하나가 화면 픽셀이 되기까지의 네 좌표계 변환(Model·World·View·Projection)을 DirectXMath와 HLSL로 한 줄 한 줄 직접 구현하고, 각 행렬의 수학·기하 직관·코드 매핑을 성분 단위로 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./03-opengl3d.html">3장. 3D 그래픽스</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">Model → World → View → Projection</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 3</span>
+  <h1>Model → World → View → Projection — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    3D 점 하나가 화면 위 픽셀이 되기까지, 좌표는 <strong>네 개의 공간</strong>을 지납니다.
+    로컬(모델) 공간 → 월드 공간 → 뷰(카메라) 공간 → 클립 공간이죠.
+    이 여행을 담당하는 세 행렬이 <strong>Model · View · Projection</strong>입니다.
+    이 페이지에서는 원본 큐브 예제의 정점 데이터·셰이더·렌더 루프를
+    <strong>한 줄, 한 성분씩</strong> 뜯어보며, 각 행렬이 <em>수학적으로 무엇을 하는지</em> →
+    <em>기하학적으로 어떻게 상상하면 되는지</em> → <em>코드의 어느 부분에 대응하는지</em>를
+    3단으로 설명합니다. DirectXMath와 D3D11 API 함수 하나하나를 원본과 1:1로 짚어 드립니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드 전체는 <strong>행 벡터(row-vector)</strong> 규약을 씁니다.
+    점을 <code>v' = v · M</code>처럼 <em>행렬 왼쪽에 벡터</em>를 두고 곱합니다.
+    행렬은 <strong>행 우선(row-major)</strong>으로 메모리에 저장하고(<code>m[r*4+c]</code>),
+    좌표계는 <strong>왼손 좌표계(LH)</strong>, 클립 공간 z 범위는 <strong>[0, 1]</strong>,
+    텍스처 V축은 <strong>위→아래</strong>가 증가 방향입니다.
+    DirectXMath가 정확히 이 규약(행 벡터)을 따르므로 잘 맞습니다.
+    실무에서는 직접 행렬을 짜기보다 <strong>DirectXMath 같은 검증된 라이브러리</strong>를 쓰는 것이 정석이며,
+    아래에서 성분을 직접 펼쳐 보는 것은 <em>원리를 이해하기 위한 학습용</em>입니다.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="overview">
+    <h2>0. 큰 그림 — 좌표는 왜 네 번 변신하나요?</h2>
+    <p>
+      게임 속 큐브 하나를 생각해 봅시다. 이 큐브를 만든 사람(모델러)은
+      큐브를 <strong>원점 (0,0,0)을 중심으로</strong> 편하게 만들어 둡니다.
+      이렇게 “물체 자기 자신을 기준으로 한” 좌표를 <strong>로컬 좌표(local / object space)</strong>라고 부릅니다.
+      원본의 <code>kCubeVertices</code> 배열에 들어 있는 <code>-0.5 ~ +0.5</code> 값들이 바로 로컬 좌표예요.
+    </p>
+    <p>
+      하지만 게임 월드에는 큐브가 여러 개 있고, 각자 다른 위치·회전·크기를 가집니다.
+      그래서 로컬 좌표를 <strong>월드 어딘가에 배치</strong>해야 합니다. 이 배치를 하는 것이 <strong>모델 행렬(Model)</strong>입니다.
+      그 결과가 <strong>월드 좌표(world space)</strong>죠. “모델 행렬이 물체를 월드에 놓는다”가 핵심 문장입니다.
+    </p>
+    <p>
+      다음으로, 우리는 이 월드를 <strong>카메라의 눈</strong>으로 봐야 합니다.
+      카메라가 오른쪽으로 움직이면 화면 속 세계는 왼쪽으로 밀려나 보이죠?
+      즉 “카메라를 옮긴다”는 “세계 전체를 그 반대로 옮긴다”와 같습니다.
+      이 반대 이동을 담당하는 것이 <strong>뷰 행렬(View)</strong>이고, 결과는 <strong>뷰 좌표(view / camera space)</strong>입니다.
+      뷰 공간에서는 카메라가 원점에 앉아 정면(+Z, 왼손 좌표계)을 바라봅니다.
+    </p>
+    <p>
+      마지막으로 3D를 2D 화면에 그리려면 <strong>원근(perspective)</strong>을 넣어야 합니다.
+      멀리 있는 것은 작게, 가까운 것은 크게요. 이걸 만드는 것이 <strong>투영 행렬(Projection)</strong>이고,
+      결과는 <strong>클립 좌표(clip space)</strong>입니다. GPU는 이 클립 좌표를 받아 화면 픽셀로 마무리(rasterization)합니다.
+    </p>
+
+    <table class="impl">
+      <thead>
+        <tr><th>공간</th><th>무엇을 기준으로?</th><th>이 공간으로 보내는 행렬</th><th>예제 속 값</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>로컬(모델)</td><td>물체 자신의 원점</td><td>— (시작점)</td><td><code>kCubeVertices</code> (-0.5~0.5)</td></tr>
+        <tr><td>월드</td><td>세계 전체의 원점</td><td>Model (<code>model</code>)</td><td>회전만 적용 (제자리 회전)</td></tr>
+        <tr><td>뷰(카메라)</td><td>카메라의 눈</td><td>View (<code>view</code>)</td><td>+Z로 3만큼 밀기</td></tr>
+        <tr><td>클립</td><td>정규화된 절두체</td><td>Projection (<code>proj</code>)</td><td>FOV 45°, 원근</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      행 벡터 규약에서는 이 변환들을 <strong>적용하는 순서대로 왼쪽에서 오른쪽으로</strong> 곱합니다.
+      즉 <code>v' = v · Model · View · Projection</code>. 그래서 CPU에서 합칠 때도
+      <code>mvp = model * view * proj</code> 순서가 됩니다. (열 벡터 규약을 쓰는 OpenGL 튜토리얼과 순서가 <em>반대</em>라는 점을 꼭 기억하세요.)
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      “World”가 표에 있는데 원본 코드엔 왜 <code>world</code>라는 변수가 안 보이나요?
+      이 예제에서는 큐브를 월드 원점에 그대로 두고 <strong>회전만</strong> 주기 때문에,
+      <code>model</code> 행렬이 곧 “모델 → 월드” 변환 전체를 겸합니다.
+      즉 여기서는 <strong>Model = 모델→월드 행렬</strong>이라고 보면 됩니다.
+      물체를 월드의 다른 자리에 옮기고 싶으면 <code>model</code>에 이동(translation)을 더 곱하면 됩니다.
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="verts">
+    <h2>1. 로컬 좌표 — 큐브 정점 데이터</h2>
+    <p>
+      가장 먼저 필요한 것은 <strong>그릴 대상</strong>입니다. 여기서는 한 변이 1인 단위 큐브를,
+      <strong>인덱스 없이</strong> 삼각형 36개(= 12개 삼각형 × 3정점)의 위치만으로 정의합니다.
+      GPU는 삼각형만 이해하므로, 사각형 면 하나를 두 개의 삼각형으로 쪼갭니다(6면 × 2 = 12삼각형).
+    </p>
+    <ol class="steps">
+      <li>정점 하나는 <code>float</code> 3개(x, y, z)로 표현한다.</li>
+      <li>면 하나 = 삼각형 2개 = 정점 6개. 6면이니 총 36정점.</li>
+      <li>모든 좌표는 <code>-0.5 ~ +0.5</code> 범위 → 원점 중심의 “한 변 1”짜리 큐브.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>src/cube.h — 큐브 정점 (위치 xyz)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#pragma once
+
+// 단위 큐브: 각 면 2삼각형 × 6면 = 36정점.
+// 인덱스를 쓰지 않는 간단 버전(중복 정점 허용).
+static const float kCubeVertices[] = {
+    // 뒷면 (z = -0.5)
+    -0.5f,-0.5f,-0.5f,  0.5f,-0.5f,-0.5f,  0.5f, 0.5f,-0.5f,
+     0.5f, 0.5f,-0.5f, -0.5f, 0.5f,-0.5f, -0.5f,-0.5f,-0.5f,
+    // 앞면 (z = +0.5)
+    -0.5f,-0.5f, 0.5f,  0.5f,-0.5f, 0.5f,  0.5f, 0.5f, 0.5f,
+     0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f,-0.5f, 0.5f,
+    // 왼쪽 면 (x = -0.5)
+    -0.5f, 0.5f, 0.5f, -0.5f, 0.5f,-0.5f, -0.5f,-0.5f,-0.5f,
+    -0.5f,-0.5f,-0.5f, -0.5f,-0.5f, 0.5f, -0.5f, 0.5f, 0.5f,
+    // 오른쪽 면 (x = +0.5)
+     0.5f, 0.5f, 0.5f,  0.5f, 0.5f,-0.5f,  0.5f,-0.5f,-0.5f,
+     0.5f,-0.5f,-0.5f,  0.5f,-0.5f, 0.5f,  0.5f, 0.5f, 0.5f,
+    // 아랫면 (y = -0.5)
+    -0.5f,-0.5f,-0.5f,  0.5f,-0.5f,-0.5f,  0.5f,-0.5f, 0.5f,
+     0.5f,-0.5f, 0.5f, -0.5f,-0.5f, 0.5f, -0.5f,-0.5f,-0.5f,
+    // 윗면 (y = +0.5)
+    -0.5f, 0.5f,-0.5f,  0.5f, 0.5f,-0.5f,  0.5f, 0.5f, 0.5f,
+     0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f,-0.5f,
+};</code></pre>
+    </div>
+
+    <h3>줄 단위 해부</h3>
+    <p>
+      <code>#pragma once</code>는 이 헤더가 여러 번 <code>#include</code>되어도 컴파일러가 <strong>딱 한 번만</strong> 읽게 하는
+      중복 포함 방지 지시입니다. 옛날식 <code>#ifndef ... #define ... #endif</code> 가드와 같은 목적이며, 훨씬 짧습니다.
+    </p>
+    <p>
+      <code>static const float kCubeVertices[]</code>를 하나씩 뜯어보면요:
+    </p>
+    <ul>
+      <li><code>static</code> — 이 배열의 <strong>이름(링크)을 이 .cpp 파일(번역 단위) 안으로 한정</strong>합니다.
+        헤더에 데이터를 정의할 때 <code>static</code>을 붙이면, 여러 .cpp가 이 헤더를 포함해도
+        “같은 심볼이 중복 정의됐다”는 링커 오류(ODR 위반)를 피합니다.</li>
+      <li><code>const</code> — “읽기 전용”. 정점 데이터는 프로그램 도중 바뀌지 않으므로 상수로 두는 게 안전합니다.
+        나중에 <code>D3D11_USAGE_IMMUTABLE</code>(불변 버퍼)로 GPU에 올릴 것이라 의미가 잘 맞습니다.</li>
+      <li><code>float</code> — GPU가 가장 잘 다루는 32비트 부동소수점. 위치 하나에 float 3개면 12바이트.</li>
+      <li><code>[]</code> — 크기를 비워 두면 컴파일러가 <strong>초기화 목록의 원소 개수로 자동 계산</strong>합니다.
+        여기선 36정점 × 3 = 108개의 float이 되죠.</li>
+    </ul>
+    <p>
+      숫자들은 <strong>3개씩 한 정점</strong>, <strong>3정점(9개 float)이 한 삼각형</strong>, <strong>두 삼각형이 한 면</strong>입니다.
+      예를 들어 뒷면 첫 줄 <code>-0.5,-0.5,-0.5 / 0.5,-0.5,-0.5 / 0.5,0.5,-0.5</code>은
+      z = -0.5 평면 위에서 왼쪽아래 → 오른쪽아래 → 오른쪽위를 잇는 삼각형입니다.
+    </p>
+
+    <h3>수학 → 기하 직관 → 코드 매핑</h3>
+    <p>
+      <strong>수학:</strong> 각 정점은 로컬 공간의 3차원 점 <code>(x, y, z)</code>입니다. 아직 어떤 행렬도 곱하지 않은 “원재료”죠.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> 큐브의 중심을 원점에 놓고, 여덟 꼭짓점이 각 축 방향으로 ±0.5만큼 뻗어 있다고 상상하세요.
+      한 변의 길이는 <code>0.5 - (-0.5) = 1</code>이라 “단위 큐브”입니다.
+      원점 중심이라 나중에 회전(모델 행렬)을 걸면 <strong>제자리에서 빙글빙글</strong> 돕니다.
+      만약 중심을 원점에서 벗어나게 만들었다면, 회전할 때 궤도를 그리며 크게 돌았을 겁니다.
+    </p>
+    <p>
+      <strong>코드 매핑:</strong> 이 배열은 곧 <code>D3D11_SUBRESOURCE_DATA</code>에 실려
+      <code>CreateBuffer</code>로 GPU 메모리(버텍스 버퍼)에 복사됩니다. 그 뒤로는 GPU가 정점 셰이더에 하나씩 흘려보냅니다.
+    </p>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      인덱스를 안 쓰니 꼭짓점 8개면 될 것이 36개로 <strong>중복 저장</strong>됩니다(큐브의 각 꼭짓점이 여러 면에서 반복).
+      학습용으로는 단순해서 좋지만, 실전에서는 <strong>인덱스 버퍼(<code>ID3D11Buffer</code> + <code>DXGI_FORMAT_R16_UINT</code>)</strong>로
+      정점 8개 + 인덱스 36개만 저장해 대역폭과 정점 셰이더 호출을 줄입니다.
+      큰 메시일수록 이 차이가 커집니다.
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      삼각형이 화면에 보이려면 <strong>정점을 도는 방향(winding order)</strong>이 백페이스 컬링 설정과 맞아야 합니다.
+      D3D11 기본은 <code>D3D11_CULL_BACK</code> + <strong>시계 방향(CW)이 앞면</strong>입니다.
+      큐브가 “안이 보이고 겉이 사라진다”면 컬링 방향이 뒤집힌 것이니,
+      래스터라이저 상태에서 <code>FrontCounterClockwise</code>를 뒤집거나 정점 순서를 바꿔야 합니다.
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="shader">
+    <h2>2. 셰이더 — 클립 공간으로 보내는 한 줄</h2>
+    <p>
+      정점 데이터를 GPU에 올렸으니, 각 정점을 <strong>어떻게 변환할지</strong> 알려줘야 합니다.
+      그 일을 하는 프로그램이 <strong>정점 셰이더(vertex shader)</strong>입니다.
+      여기서는 MVP를 미리 하나로 합쳐 상수 버퍼로 받아, <strong>딱 한 번의 행렬 곱</strong>으로 로컬 좌표를 클립 좌표로 보냅니다.
+    </p>
+    <ol class="steps">
+      <li><code>cbuffer</code>로 CPU에서 보낸 <code>mvp</code> 행렬을 받는다.</li>
+      <li>입력 정점의 로컬 위치에 <code>mul</code>로 MVP를 곱한다.</li>
+      <li>결과를 <code>SV_Position</code>(클립 좌표)으로 내보낸다.</li>
+      <li>픽셀 셰이더는 단색 주황을 칠한다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>셰이더 (인라인 문자열) — 최소 MVP</span><span class="lang">HLSL</span></div>
+      <pre><code class="language-hlsl">// ── 정점 셰이더 (VSMain) ──
+cbuffer Transforms : register(b0)
+{
+    float4x4 mvp;   // CPU에서 model*view*proj를 합쳐 transpose 해 넘김
+};
+
+struct VSIn  { float3 pos : POSITION; };   // 로컬 좌표
+struct VSOut { float4 pos : SV_Position; };
+
+VSOut VSMain(VSIn input)
+{
+    VSOut o;
+    // 하나로 합친 MVP를 곱해 클립 공간으로
+    o.pos = mul(mvp, float4(input.pos, 1.0));
+    return o;
+}
+
+// ── 픽셀 셰이더 (PSMain) ──
+float4 PSMain(VSOut input) : SV_Target
+{
+    return float4(0.85, 0.55, 0.25, 1.0);  // 단색 주황
+}</code></pre>
+    </div>
+
+    <h3>줄 단위 해부 — cbuffer와 register</h3>
+    <p>
+      <code>cbuffer Transforms : register(b0)</code>는 <strong>상수 버퍼(constant buffer)</strong>를 선언합니다.
+      상수 버퍼는 “한 번의 그리기(draw) 동안 <em>모든 정점이 공유하는</em> 값”을 담는 GPU 메모리 블록입니다.
+      MVP 행렬은 정점마다 바뀌지 않고 프레임 전체가 같은 값을 쓰니, 딱 상수 버퍼감이죠.
+    </p>
+    <ul>
+      <li><code>Transforms</code> — 버퍼 블록의 이름표(가독성용). HLSL 안에서 이 이름으로 다시 참조하지는 않습니다.</li>
+      <li><code>: register(b0)</code> — 이 상수 버퍼를 <strong>b(uffer) 슬롯 0번</strong>에 바인딩하라는 뜻.
+        CPU 쪽 <code>VSSetConstantBuffers(0, 1, ...)</code>의 첫 인자 <code>0</code>과 <strong>정확히 짝</strong>이 맞아야 합니다.
+        번호가 어긋나면 셰이더가 엉뚱한(혹은 비어 있는) 버퍼를 읽어 물체가 사라집니다.</li>
+      <li><code>float4x4 mvp;</code> — 4×4 행렬 하나. float 16개 = 64바이트. 뒤에서 볼 16바이트 정렬 규칙에 딱 맞습니다.</li>
+    </ul>
+
+    <h3>줄 단위 해부 — 세만틱(semantic)</h3>
+    <p>
+      <code>struct VSIn { float3 pos : POSITION; };</code>에서 <code>: POSITION</code>은 <strong>세만틱</strong>이라 부르는 “꼬리표”입니다.
+      GPU는 변수 이름(<code>pos</code>)이 아니라 이 꼬리표를 보고 “아, 이 float3가 위치 데이터구나” 하고 매칭합니다.
+      CPU 쪽 <strong>입력 레이아웃</strong>의 <code>"POSITION"</code> 문자열과 이 세만틱이 짝이 맞아야 정점 데이터가 올바르게 흘러들어옵니다.
+    </p>
+    <p>
+      <code>struct VSOut { float4 pos : SV_Position; };</code>의 <code>SV_Position</code>은 <strong>시스템 값 세만틱(System-Value)</strong>입니다.
+      <code>SV_</code> 접두어가 붙으면 “이건 그냥 데이터가 아니라 <em>파이프라인이 특별하게 다루는 값</em>”이라는 뜻이에요.
+      <code>SV_Position</code>은 “이 정점의 <strong>클립 공간 위치</strong>”를 의미하며, 래스터라이저가 이 값을 받아
+      원근 나눗셈과 뷰포트 변환을 거쳐 화면 픽셀 좌표로 바꿉니다. 반드시 <code>float4</code>여야 합니다.
+    </p>
+    <p>
+      픽셀 셰이더의 <code>: SV_Target</code>은 “이 <code>float4</code>가 <strong>렌더 타겟(백버퍼)에 쓸 최종 색</strong>”이라는 시스템 값 세만틱입니다.
+      RGBA 순서이고 각 성분은 보통 0~1 범위입니다. <code>(0.85, 0.55, 0.25, 1.0)</code>은 알파 1(불투명)인 주황색이죠.
+    </p>
+
+    <h3>핵심 한 줄: <code>mul(mvp, float4(input.pos, 1.0))</code></h3>
+    <p>
+      <strong>수학:</strong> 3D 점을 행렬로 변환하려면 좌표를 4차원 <strong>동차좌표(homogeneous coordinate)</strong>로 올려야 합니다.
+      점(위치)은 마지막 성분 <code>w = 1</code>을 붙입니다. 그래서 <code>float4(input.pos, 1.0)</code>은
+      <code>(x, y, z, 1)</code>이 됩니다. <em>방향 벡터</em>라면 <code>w = 0</code>을 붙여 이동에 영향받지 않게 하지만,
+      여기서는 “점”이라 1입니다.
+    </p>
+    <div class="callout">
+      <span class="tag warn">왜 4차원인가?</span>
+      3×3 행렬로는 <strong>회전·크기</strong>는 표현해도 <strong>이동(translation)</strong>은 표현할 수 없습니다(원점은 항상 원점으로 감).
+      한 차원을 더 얹은 4×4 행렬의 마지막 행에 이동량을 넣고, 점에 <code>w=1</code>을 붙이면
+      <em>이동까지 곱셈 한 번</em>으로 처리됩니다. 나아가 <code>w</code>를 나누는 트릭이 바로 <strong>원근</strong>을 만듭니다(뒤에서 상세).
+    </div>
+    <p>
+      <strong>기하 직관:</strong> 이 한 줄은 로컬 공간의 점을 <strong>Model → View → Projection을 한 번에</strong> 통과시켜
+      클립 공간의 점으로 “순간이동”시킵니다. 세 번 곱하는 대신, CPU에서 세 행렬을 미리 하나(<code>mvp</code>)로 합쳐 두었기에
+      정점당 <strong>행렬 곱 한 번</strong>이면 끝납니다.
+    </p>
+    <p>
+      <strong>코드 매핑:</strong> HLSL <code>mul(A, B)</code>는 “A 곱하기 B”를 그대로 계산합니다.
+      여기서 <code>mul(mvp, v)</code>는 <code>mvp</code>를 열 벡터 <code>v</code>에 곱하는 형태로 동작합니다.
+      우리 규약은 행 벡터(<code>v' = v · M</code>)인데 왜 순서가 반대로 보일까요? 바로 <strong>CPU에서 넘기기 전에 transpose를 했기 때문</strong>입니다.
+      전치한 행렬에 <code>mul(M^T, v)</code>를 하면 수학적으로 <code>v · M</code>과 같은 결과가 나옵니다.
+      (이 관계는 §5의 transpose 함정 callout에서 다시 정확히 설명합니다.)
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>mul</code>의 <strong>인자 순서와 transpose 여부는 한 세트</strong>입니다.
+      “셰이더에서 <code>mul(mvp, v)</code>를 쓴다 → CPU에서 <code>XMMatrixTranspose</code>로 전치해서 넘긴다”가
+      이 예제의 조합입니다. 셰이더를 <code>mul(v, mvp)</code>로 바꾸면 CPU의 transpose를 <strong>빼야</strong> 짝이 맞습니다.
+      둘 중 하나만 바꾸면 물체가 찌그러지거나 사라집니다.
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="setup">
+    <h2>3. C++ 셋업 — 버퍼·셰이더·입력 레이아웃</h2>
+    <p>
+      이제 CPU 쪽에서 GPU에 자원을 만들어 올릴 차례입니다.
+      버텍스 버퍼, 셰이더 객체, 입력 레이아웃, 상수 버퍼를 차례로 생성합니다.
+      아래 발췌에서 창 생성·디바이스/스왑체인 보일러플레이트는 개발 환경 편에서 만든 것을 그대로 쓴다고 가정합니다.
+    </p>
+    <ol class="steps">
+      <li><code>CreateBuffer</code>로 정점 데이터를 GPU에 올린다(불변 버퍼).</li>
+      <li><code>D3DCompile</code> 결과 바이트코드로 정점/픽셀 셰이더 객체를 만든다.</li>
+      <li>입력 레이아웃으로 “정점 바이트를 어떻게 해석할지” 정의한다.</li>
+      <li>매 프레임 갱신할 상수 버퍼를 <code>DYNAMIC</code>으로 만든다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>src/main.cpp — 셋업 + 렌더 루프 (발췌)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;d3dcompiler.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+// 최소 셰이더 컴파일 헬퍼 (전체 클래스는 4장 참고)
+// D3DCompile로 HLSL 문자열 → 바이트코드
+ComPtr&lt;ID3DBlob&gt; compileShader(const char* src, const char* entry, const char* target);
+
+// 상수 버퍼에 넘길 구조체 (16바이트 정렬 필수)
+struct CBTransforms { XMFLOAT4X4 mvp; };
+
+int main() {
+    // ... Win32 창 + D3D11 디바이스/스왑체인/RTV (개발 환경 참고) ...
+    ComPtr&lt;ID3D11Device&gt;        device;
+    ComPtr&lt;ID3D11DeviceContext&gt; context;
+    ComPtr&lt;IDXGISwapChain&gt;      swapChain;
+    ComPtr&lt;ID3D11RenderTargetView&gt; rtv;
+    // (디바이스/스왑체인/RTV는 개발 환경에서 생성했다고 가정)
+
+    // 1) 버텍스 버퍼 생성 후 정점 업로드
+    D3D11_BUFFER_DESC vbDesc{};
+    vbDesc.ByteWidth      = sizeof(kCubeVertices);
+    vbDesc.Usage          = D3D11_USAGE_IMMUTABLE;
+    vbDesc.BindFlags      = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA vbInit{ kCubeVertices, 0, 0 };
+    ComPtr&lt;ID3D11Buffer&gt; vbo;
+    device-&gt;CreateBuffer(&amp;vbDesc, &amp;vbInit, &amp;vbo);
+
+    // 2) 셰이더 컴파일 + 셰이더 객체 생성
+    ComPtr&lt;ID3DBlob&gt; vsBlob = compileShader(kShaderSrc, "VSMain", "vs_5_0");
+    ComPtr&lt;ID3DBlob&gt; psBlob = compileShader(kShaderSrc, "PSMain", "ps_5_0");
+    ComPtr&lt;ID3D11VertexShader&gt; vs;
+    ComPtr&lt;ID3D11PixelShader&gt;  ps;
+    device-&gt;CreateVertexShader(vsBlob-&gt;GetBufferPointer(), vsBlob-&gt;GetBufferSize(), nullptr, &amp;vs);
+    device-&gt;CreatePixelShader (psBlob-&gt;GetBufferPointer(), psBlob-&gt;GetBufferSize(), nullptr, &amp;ps);
+
+    // 입력 레이아웃: POSITION = float3, offset 0
+    D3D11_INPUT_ELEMENT_DESC layout[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    ComPtr&lt;ID3D11InputLayout&gt; inputLayout;
+    device-&gt;CreateInputLayout(layout, 1, vsBlob-&gt;GetBufferPointer(),
+                              vsBlob-&gt;GetBufferSize(), &amp;inputLayout);
+
+    // 3) 상수 버퍼 생성 (매 프레임 갱신하므로 DYNAMIC + CPU write)
+    D3D11_BUFFER_DESC cbDesc{};
+    cbDesc.ByteWidth      = sizeof(CBTransforms);
+    cbDesc.Usage          = D3D11_USAGE_DYNAMIC;
+    cbDesc.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+    cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ComPtr&lt;ID3D11Buffer&gt; cbuf;
+    device-&gt;CreateBuffer(&amp;cbDesc, nullptr, &amp;cbuf);
+
+    // 깊이 버퍼/스텐실 상태는 §4에서 (큐브가 앞뒤로 겹치므로 필요)
+    ComPtr&lt;ID3D11DepthStencilView&gt; dsv;      // §4에서 생성
+    ComPtr&lt;ID3D11DepthStencilState&gt; dsState; // §4에서 생성
+
+    // 뷰포트
+    D3D11_VIEWPORT vp{ 0, 0, 1280.0f, 720.0f, 0.0f, 1.0f };
+    context-&gt;RSSetViewports(1, &amp;vp);</code></pre>
+    </div>
+
+    <h3>인클루드와 도우미들</h3>
+    <ul>
+      <li><code>&lt;d3d11.h&gt;</code> — 디바이스·컨텍스트·버퍼 등 D3D11 핵심 API.</li>
+      <li><code>&lt;d3dcompiler.h&gt;</code> — 런타임에 HLSL 문자열을 바이트코드로 컴파일하는 <code>D3DCompile</code>.</li>
+      <li><code>&lt;DirectXMath.h&gt;</code> — SIMD 최적화된 벡터/행렬 수학. 우리 규약(행 벡터)과 일치.</li>
+      <li><code>&lt;wrl/client.h&gt;</code> — <code>ComPtr</code> 스마트 포인터. COM 객체의 참조 카운트를 자동 관리해
+        <code>Release()</code>를 깜빡할 일을 없애 줍니다.</li>
+    </ul>
+    <p>
+      <code>using Microsoft::WRL::ComPtr;</code>와 <code>using namespace DirectX;</code>는
+      긴 네임스페이스를 매번 안 적어도 되게 해 줍니다. <code>ComPtr&lt;ID3D11Buffer&gt;</code>처럼 쓸 수 있죠.
+    </p>
+    <p>
+      <code>struct CBTransforms { XMFLOAT4X4 mvp; };</code> — 상수 버퍼에 <strong>정확히 이 바이트 배치로</strong> 올릴 CPU 구조체입니다.
+      <code>XMFLOAT4X4</code>는 float 16개(64바이트)를 담는 저장용 타입입니다.
+      64는 16의 배수라 상수 버퍼 정렬 규칙을 자동으로 만족합니다(뒤 함정 참고).
+    </p>
+
+    <h3>1) 버텍스 버퍼 — <code>CreateBuffer</code></h3>
+    <p>
+      <code>D3D11_BUFFER_DESC vbDesc{};</code>의 <code>{}</code>는 <strong>값 초기화(value-initialization)</strong>로
+      구조체의 모든 멤버를 0으로 밀어 줍니다. C 구조체를 <code>memset</code> 없이 깔끔하게 0으로 시작하는 관용구예요.
+      쓰레기 값이 남아 API가 오작동하는 것을 막습니다.
+    </p>
+    <ul>
+      <li><code>ByteWidth = sizeof(kCubeVertices)</code> — 버퍼 크기. 배열 전체 바이트 수(108 float × 4 = 432바이트).
+        <code>sizeof</code>가 배열이면 <strong>원소 개수 × 원소 크기</strong>를 정확히 돌려줍니다(포인터로 붕괴되지 않은 진짜 배열이라 가능).</li>
+      <li><code>Usage = D3D11_USAGE_IMMUTABLE</code> — “만든 뒤 절대 안 바뀜”. 가장 빠른 GPU 전용 메모리에 놓이고,
+        생성 시점에 초기 데이터를 반드시 함께 줘야 합니다.</li>
+      <li><code>BindFlags = D3D11_BIND_VERTEX_BUFFER</code> — 이 버퍼를 <strong>정점 입력</strong> 용도로 쓸 것이라 표시.</li>
+    </ul>
+    <p>
+      <code>D3D11_SUBRESOURCE_DATA vbInit{ kCubeVertices, 0, 0 };</code>는 초기 데이터입니다.
+      첫 필드 <code>pSysMem</code>은 “복사해 올릴 CPU 메모리의 시작 주소”(= 배열 포인터), 나머지 두 값은
+      2D/3D 텍스처에서만 쓰는 행/깊이 피치라 버퍼에서는 0입니다.
+    </p>
+    <p>
+      <code>device-&gt;CreateBuffer(&amp;vbDesc, &amp;vbInit, &amp;vbo)</code> — 서술자와 초기 데이터를 넘겨 GPU 버퍼를 만들고,
+      결과 인터페이스 포인터를 <code>vbo</code>에 채웁니다. <code>&amp;vbo</code>는 <code>ComPtr</code>이 내부적으로
+      받을 주소를 넘기는 방식입니다.
+    </p>
+
+    <h3>2) 셰이더 객체 — 바이트코드에서 만들기</h3>
+    <p>
+      <code>compileShader(kShaderSrc, "VSMain", "vs_5_0")</code>는 §2의 HLSL 문자열을 컴파일해
+      <strong>바이트코드 blob</strong>(<code>ID3DBlob</code>)을 돌려줍니다.
+      두 번째 인자 <code>"VSMain"</code>은 <strong>진입 함수 이름</strong>(셰이더의 <code>main</code>에 해당),
+      세 번째 <code>"vs_5_0"</code>은 <strong>셰이더 모델/프로파일</strong>(vs = vertex shader, 5.0 = Shader Model 5)입니다.
+      픽셀 셰이더는 <code>"PSMain"</code>, <code>"ps_5_0"</code>으로 같은 소스에서 다른 함수를 뽑아냅니다.
+    </p>
+    <p>
+      <code>CreateVertexShader(포인터, 크기, nullptr, &amp;vs)</code> — 컴파일된 바이트코드에서 실제 셰이더 객체를 만듭니다.
+      <code>GetBufferPointer()</code>/<code>GetBufferSize()</code>는 blob 안의 바이트코드 시작 주소와 길이입니다.
+      세 번째 인자 <code>nullptr</code>은 클래스 링키지(고급 기능)를 안 쓴다는 뜻입니다.
+    </p>
+
+    <h3>입력 레이아웃 — 바이트를 정점으로 해석하는 설명서</h3>
+    <p>
+      버텍스 버퍼는 GPU 입장에서 “그냥 바이트 덩어리”입니다.
+      “처음 12바이트가 POSITION float3, 그다음이…” 하는 <strong>해석 규칙</strong>을 알려주는 것이 입력 레이아웃입니다.
+      <code>D3D11_INPUT_ELEMENT_DESC</code> 한 줄을 필드별로 보면:
+    </p>
+    <ul>
+      <li><code>"POSITION"</code> — 세만틱 이름. §2 셰이더의 <code>: POSITION</code>과 <strong>문자열이 정확히 일치</strong>해야 연결됩니다.</li>
+      <li><code>0</code> — 세만틱 인덱스. <code>POSITION0</code>, <code>POSITION1</code>처럼 같은 세만틱을 여러 개 쓸 때 구분용. 여기선 0.</li>
+      <li><code>DXGI_FORMAT_R32G32B32_FLOAT</code> — “32비트 float 3개” = float3. 정점당 12바이트를 이 형식으로 읽습니다.</li>
+      <li><code>0</code> — 입력 슬롯 번호. 버텍스 버퍼를 여러 개 묶을 때 쓰는데, 여기선 0번 슬롯 하나뿐.</li>
+      <li><code>0</code> — <strong>바이트 오프셋</strong>. 이 속성이 정점 시작에서 몇 바이트 뒤에 있는지. POSITION은 맨 앞이라 0.
+        (<code>D3D11_APPEND_ALIGNED_ELEMENT</code>를 쓰면 자동 누적 계산도 가능합니다.)</li>
+      <li><code>D3D11_INPUT_PER_VERTEX_DATA</code> — 정점마다 하나씩 읽는 데이터(인스턴싱이면 per-instance).</li>
+      <li>마지막 <code>0</code> — 인스턴스 데이터 스텝(per-vertex라 0).</li>
+    </ul>
+    <p>
+      <code>CreateInputLayout(layout, 1, 바이트코드, 크기, &amp;inputLayout)</code>은
+      이 레이아웃이 <strong>정점 셰이더 입력 시그니처와 맞는지 검증</strong>하려고 정점 셰이더 바이트코드를 함께 받습니다.
+      두 번째 인자 <code>1</code>은 레이아웃 원소 개수(여기선 POSITION 하나)입니다.
+    </p>
+
+    <h3>3) 상수 버퍼 — 매 프레임 갱신용</h3>
+    <p>
+      MVP는 매 프레임 바뀌므로, 버텍스 버퍼와 달리 <strong>CPU가 자주 덮어쓸 수 있는</strong> 설정으로 만듭니다.
+    </p>
+    <ul>
+      <li><code>ByteWidth = sizeof(CBTransforms)</code> — 64바이트(<code>XMFLOAT4X4</code> 하나). 16의 배수라 OK.</li>
+      <li><code>Usage = D3D11_USAGE_DYNAMIC</code> — CPU가 자주 쓰고 GPU가 읽는 버퍼.</li>
+      <li><code>BindFlags = D3D11_BIND_CONSTANT_BUFFER</code> — 상수 버퍼 용도.</li>
+      <li><code>CPUAccessFlags = D3D11_CPU_ACCESS_WRITE</code> — CPU가 <code>Map</code>으로 쓸 수 있게 허용.</li>
+    </ul>
+    <p>
+      <code>CreateBuffer(&amp;cbDesc, nullptr, &amp;cbuf)</code>에서 두 번째 인자가 <code>nullptr</code>인 이유는
+      매 프레임 어차피 새로 채울 것이라 <strong>초기 데이터가 필요 없기 때문</strong>입니다.
+    </p>
+
+    <h3>뷰포트</h3>
+    <p>
+      <code>D3D11_VIEWPORT vp{ 0, 0, 1280.0f, 720.0f, 0.0f, 1.0f }</code>는
+      클립→화면 변환의 최종 목적지를 정의합니다: 좌상단 (0,0)에서 폭 1280·높이 720픽셀,
+      깊이는 <strong>0.0~1.0</strong> 범위입니다. 이 깊이 범위 [0,1]이 우리 규약의 클립 z 범위와 일치합니다(D3D 표준).
+      <code>RSSetViewports(1, &amp;vp)</code>로 래스터라이저 단계에 등록합니다.
+    </p>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="matrices">
+    <h2>4. 렌더 루프 — 세 행렬을 만들어 업로드</h2>
+    <p>
+      드디어 이 페이지의 심장입니다. 매 프레임 Model·View·Projection 세 행렬을 만들고,
+      하나로 합쳐(<code>mvp</code>), transpose해서 상수 버퍼로 올린 뒤, 파이프라인을 바인딩하고 그립니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>src/main.cpp — 렌더 루프 (계속)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">    MSG msg{};
+    while (msg.message != WM_QUIT) {
+        if (PeekMessage(&amp;msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&amp;msg); DispatchMessage(&amp;msg); continue;
+        }
+
+        const float clearColor[4] = { 0.06f, 0.07f, 0.10f, 1.0f };
+        context-&gt;ClearRenderTargetView(rtv.Get(), clearColor);
+        context-&gt;ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+        context-&gt;OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());
+        context-&gt;OMSetDepthStencilState(dsState.Get(), 0);
+
+        // 매 프레임 세 행렬을 새로 만든다 (DirectXMath = 행 벡터)
+        float t = getTimeSeconds();
+        XMMATRIX model = XMMatrixRotationRollPitchYaw(t * 0.4f, t, t * 0.2f);
+        // 카메라를 z축 +3만큼 뒤로 = 세계를 -3만큼 당김 (왼손 좌표계)
+        XMMATRIX view  = XMMatrixTranslation(0.0f, 0.0f, 3.0f);
+        XMMATRIX proj  = XMMatrixPerspectiveFovLH(XMConvertToRadians(45.0f),
+                                                  1280.0f / 720.0f, 0.1f, 100.0f);
+
+        // 행 벡터라 model*view*proj 순서. 셰이더로 넘기기 전 transpose.
+        XMMATRIX mvp = model * view * proj;
+
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        context-&gt;Map(cbuf.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;mapped);
+        XMStoreFloat4x4(&amp;((CBTransforms*)mapped.pData)-&gt;mvp, XMMatrixTranspose(mvp));
+        context-&gt;Unmap(cbuf.Get(), 0);
+
+        // 파이프라인 바인딩
+        UINT stride = 3 * sizeof(float), offset = 0;
+        context-&gt;IASetInputLayout(inputLayout.Get());
+        context-&gt;IASetVertexBuffers(0, 1, vbo.GetAddressOf(), &amp;stride, &amp;offset);
+        context-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context-&gt;VSSetShader(vs.Get(), nullptr, 0);
+        context-&gt;PSSetShader(ps.Get(), nullptr, 0);
+        context-&gt;VSSetConstantBuffers(0, 1, cbuf.GetAddressOf());
+
+        context-&gt;Draw(36, 0);   // 4) 그리기 (정점 36개)
+
+        swapChain-&gt;Present(1, 0);
+    }
+    // ... ComPtr가 자동 해제 ...
+}</code></pre>
+    </div>
+
+    <h3>메시지 펌프와 화면 지우기</h3>
+    <p>
+      <code>while (msg.message != WM_QUIT)</code> 루프 안에서 <code>PeekMessage(..., PM_REMOVE)</code>는
+      Windows 메시지 큐를 <strong>막지 않고(non-blocking)</strong> 확인합니다. 메시지가 있으면 처리(<code>continue</code>),
+      없으면 아래로 내려가 렌더링합니다. 이렇게 해야 창을 조작하면서도 매 프레임 그림을 그릴 수 있습니다.
+    </p>
+    <p>
+      <code>ClearRenderTargetView(rtv, clearColor)</code>는 백버퍼를 어두운 남색으로 칠해 지웁니다.
+      <code>ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 1.0f, 0)</code>는 <strong>깊이 버퍼를 1.0(가장 먼 값)으로 초기화</strong>합니다.
+      깊이 [0,1] 규약에서 1.0은 “무한히 멀다”는 뜻이라, 첫 픽셀은 무엇이든 이보다 가까워 통과합니다.
+    </p>
+    <p>
+      <code>OMSetRenderTargets</code>는 “그림을 어디에 그릴지(백버퍼)와 깊이 판정을 어디서 할지(깊이 버퍼)”를 출력 병합기(OM)에 묶습니다.
+      <code>GetAddressOf()</code>는 <code>ComPtr</code>이 들고 있는 <strong>원시 포인터의 주소</strong>를 넘기는 방법이라,
+      API가 “포인터 배열”을 요구할 때 씁니다(<code>Get()</code>은 포인터 자체를 반환).
+    </p>
+
+    <h3>Model 행렬 — <code>XMMatrixRotationRollPitchYaw</code></h3>
+    <p>
+      <strong>무엇을 만드나:</strong> 큐브를 <strong>제자리에서 회전</strong>시키는 모델 행렬입니다.
+      <code>t</code>가 시간(초)이라, 매 프레임 각도가 커지며 큐브가 부드럽게 돕니다.
+    </p>
+    <p>
+      <strong>수학:</strong> 인자는 순서대로 (pitch, yaw, roll) = (X축 회전, Y축 회전, Z축 회전) <strong>라디안</strong>입니다.
+      세 축 회전을 합성한 하나의 회전 행렬을 만듭니다. <code>t*0.4</code>, <code>t</code>, <code>t*0.2</code>로
+      축마다 회전 속도를 다르게 줘서 단조롭지 않게 굴립니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> pitch는 “고개를 위아래로 끄덕(X축 중심)”, yaw는 “좌우로 도리도리(Y축 중심)”,
+      roll은 “머리를 갸웃(Z축 중심)”이라고 상상하세요. 큐브 중심이 원점이라 궤도를 그리지 않고 제자리에서 회전합니다.
+    </p>
+    <p>
+      <strong>손계산 예:</strong> <code>t = 0</code>이면 세 각이 모두 0이라 <strong>단위 행렬(회전 없음)</strong>이 됩니다.
+      큐브는 처음엔 정면을 보다가 시간이 흐르며 기울기 시작합니다.
+      또 <code>t</code>가 π(≈3.14초)일 때 yaw가 180°라 큐브의 앞뒤가 뒤바뀝니다.
+    </p>
+    <p>
+      <strong>코드 매핑:</strong> DirectXMath 함수 하나로 세 축 회전을 다 처리합니다.
+      직접 짠다면 X·Y·Z 회전 행렬 세 개를 곱해야 하는데, 라이브러리가 최적화된 형태로 대신 해 줍니다.
+    </p>
+
+    <h3>View 행렬 — <code>XMMatrixTranslation(0, 0, 3)</code></h3>
+    <p>
+      <strong>무엇을 만드나:</strong> 카메라 기준으로 세계를 옮기는 뷰 행렬입니다.
+      여기서는 회전 없이 <strong>+Z 방향으로 3만큼 이동</strong>만 합니다.
+    </p>
+    <div class="callout">
+      <span class="tag warn">핵심 직관: 카메라를 뒤로 = 세계를 앞으로</span>
+      우리는 카메라를 큐브에서 <strong>뒤로 3만큼</strong> 떨어뜨리고 싶습니다.
+      그런데 뷰 행렬은 “카메라 이동의 <em>역</em>”이라, 카메라를 -Z로 3 물리는 대신
+      <strong>세계 전체를 +Z로 3 밀어</strong> 같은 효과를 냅니다.
+      왼손 좌표계에서 카메라는 +Z를 바라보므로, 세계를 +Z로 밀면 큐브가 “카메라 앞쪽 멀리”로 가서 화면에 담깁니다.
+    </div>
+    <p>
+      <strong>수학:</strong> 이동 행렬은 4×4 행렬의 마지막 행(행 우선·행 벡터 규약)에 이동량 <code>(0, 0, 3)</code>을 넣은 형태입니다.
+      점 <code>(x, y, z, 1)</code>에 곱하면 <code>(x, y, z+3, 1)</code>이 됩니다. z에 +3이 더해지죠.
+    </p>
+    <p>
+      <strong>손계산 예:</strong> 큐브 앞면의 한 점 <code>(0, 0, 0.5)</code>는 뷰 변환 뒤 <code>(0, 0, 3.5)</code>가 됩니다.
+      near 평면(0.1)보다 멀고 far(100)보다 가까우니 절두체 안이라 화면에 보입니다.
+      만약 이동을 안 줬다면 큐브가 카메라(원점)와 겹쳐 있어 near 평면에 잘려 아무것도 안 보였을 겁니다.
+    </p>
+    <p>
+      <strong>코드 매핑:</strong> 실전 카메라(위치·회전 자유)라면 <code>XMMatrixLookAtLH(eye, target, up)</code>을 씁니다
+      (다음 페이지 “카메라”에서 상세). 이 예제는 “고정 카메라”라 이동 하나면 충분합니다.
+    </p>
+
+    <h3>Projection 행렬 — <code>XMMatrixPerspectiveFovLH</code></h3>
+    <p>
+      <strong>무엇을 만드나:</strong> 3D를 원근감 있게 클립 공간으로 보내는 투영 행렬. LH = 왼손 좌표계용입니다.
+    </p>
+    <p>
+      <strong>인자 4개</strong>를 하나씩 볼게요:
+    </p>
+    <ul>
+      <li><code>XMConvertToRadians(45.0f)</code> — <strong>수직 시야각(FOV)</strong>. 45°는 사람이 자연스럽게 느끼는 화각입니다.
+        DirectXMath는 라디안을 받으므로 도(degree)를 변환해 넘깁니다. 값이 클수록 “광각 렌즈”처럼 더 넓게, 원근 왜곡이 커집니다.</li>
+      <li><code>1280.0f / 720.0f</code> — <strong>종횡비(aspect ratio)</strong> = 화면 폭 ÷ 높이 ≈ 1.778.
+        이걸 정확히 주지 않으면 큐브가 가로/세로로 늘어나 보입니다.
+        <em>반드시 <code>float</code> 나눗셈</em>이어야 합니다(정수 <code>1280/720</code>은 1이 되어 버림).</li>
+      <li><code>0.1f</code> — <strong>near 평면</strong>. 이보다 가까운 것은 잘려 안 보입니다.</li>
+      <li><code>100.0f</code> — <strong>far 평면</strong>. 이보다 먼 것은 안 보입니다.</li>
+    </ul>
+    <div class="callout">
+      <span class="tag warn">원근은 어떻게 만들어지나 (w 나눗셈)</span>
+      투영 행렬의 마법은 결과 <code>w</code> 성분에 <strong>뷰 공간 z를 넣는</strong> 데 있습니다.
+      정점 셰이더가 내보낸 클립 좌표 <code>(x, y, z, w)</code>를, GPU가 래스터화 직전에
+      <strong>x, y, z를 각각 w로 나눕니다</strong>(원근 나눗셈, perspective divide).
+      멀리 있는 점일수록 <code>w</code>가 커서 나눗셈 결과가 작아지고 → 화면 중앙 쪽으로 모여 <strong>작게</strong> 보입니다.
+      이것이 “멀면 작게”의 수학적 정체입니다.
+    </div>
+    <p>
+      <strong>기하 직관:</strong> 카메라 앞에 놓인 <strong>절두체(frustum)</strong>—앞이 좁고 뒤가 넓은 잘린 피라미드—를 상상하세요.
+      near·far·FOV가 이 피라미드의 크기를 정합니다. 투영 행렬은 이 피라미드를
+      <strong>정규화된 상자</strong>(x,y ∈ [-1,1], z ∈ [0,1])로 “쫙 펴” 담습니다. 그 과정에서 원근이 생깁니다.
+    </p>
+    <p>
+      <strong>코드 매핑:</strong> <code>...LH</code> 접미어가 왼손 좌표계 + z 범위 [0,1]을 만들어 우리 규약과 정확히 일치시킵니다.
+      OpenGL식 <code>...RH</code>(오른손, z ∈ [-1,1])를 쓰면 깊이가 반대로 뒤집혀 물체가 사라지니 주의하세요.
+    </p>
+
+    <h3>합성과 순서 — <code>model * view * proj</code></h3>
+    <p>
+      <strong>수학:</strong> 행 벡터 규약에서 점의 변환은 <code>v' = v · M · V · P</code>입니다.
+      결합법칙 덕분에 세 행렬을 미리 하나로 곱해도 결과가 같습니다: <code>MVP = M · V · P</code>.
+      코드의 <code>model * view * proj</code>가 바로 이것입니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      순서를 절대 뒤집지 마세요. <code>proj * view * model</code>로 곱하면(열 벡터 튜토리얼을 그대로 베끼면)
+      완전히 다른 행렬이 나옵니다. 행렬 곱은 <strong>교환법칙이 성립하지 않기</strong> 때문입니다.
+      행 벡터 규약에서는 “<strong>먼저 적용할 변환이 왼쪽</strong>”—Model부터 씁니다.
+    </div>
+
+    <h3>업로드 — Map / transpose / Unmap</h3>
+    <p>
+      <code>Map(cbuf, 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;mapped)</code>는 GPU 버퍼를 CPU 주소 공간에 <strong>잠깐 매핑</strong>해
+      쓸 수 있는 포인터(<code>mapped.pData</code>)를 줍니다. <code>WRITE_DISCARD</code>는
+      “이전 내용은 버리고 새 메모리를 달라”는 뜻이라 GPU가 아직 그 버퍼를 읽는 중이어도 멈추지 않습니다(퍼포먼스 핵심).
+    </p>
+    <p>
+      <code>XMStoreFloat4x4(&amp;((CBTransforms*)mapped.pData)-&gt;mvp, XMMatrixTranspose(mvp))</code>는 두 가지를 한 번에 합니다:
+    </p>
+    <ol class="steps">
+      <li><code>XMMatrixTranspose(mvp)</code> — 행렬을 <strong>전치</strong>(행↔열 교환)합니다. §2에서 예고한 그 transpose입니다.</li>
+      <li><code>XMStoreFloat4x4</code> — SIMD 레지스터에 있던 <code>XMMATRIX</code>를 메모리 저장용 <code>XMFLOAT4X4</code>로 <strong>복사</strong>해
+        매핑된 상수 버퍼에 씁니다. <code>(CBTransforms*)mapped.pData</code>로 형변환해 <code>mvp</code> 멤버 위치를 정확히 가리킵니다.</li>
+    </ol>
+    <p>
+      <code>Unmap(cbuf, 0)</code>은 매핑을 해제해 GPU가 다시 그 버퍼를 쓸 수 있게 돌려줍니다.
+      Map/Unmap은 반드시 짝으로 호출해야 합니다.
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      상수 버퍼에 행렬을 넘기기 전 <strong>반드시 <code>XMMatrixTranspose</code></strong>를 하세요.
+      DirectXMath는 행 우선(row-major)으로 저장하지만 HLSL의 <code>float4x4</code>는 기본이 <strong>열 우선(column-major)</strong>이라,
+      transpose 없이 넘기면 셰이더가 행/열을 뒤바꿔 읽어 <code>mul</code> 결과가 엉뚱해지고 물체가 찌그러지거나 사라집니다.
+      대안: 셰이더 쪽에서 <code>mul(v, mvp)</code>로 순서를 바꾸거나, HLSL 선언에 <code>row_major float4x4 mvp;</code>를 붙이면
+      CPU transpose를 생략할 수 있습니다. (이 예제는 “셰이더 <code>mul(mvp,v)</code> + CPU transpose” 조합입니다.)
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      상수 버퍼의 <code>ByteWidth</code>는 <strong>16바이트의 배수</strong>여야 합니다.
+      <code>float4x4</code>는 64바이트라 딱 맞지만, 작은 스칼라를 섞을 때는 패딩을 신경 써야
+      값이 조용히 어긋나지 않습니다. 예를 들어 <code>float4x4 mvp; float time;</code>를 담으면
+      HLSL은 다음 필드를 16바이트 경계에 정렬하므로 CPU 구조체에도 <code>float pad[3];</code> 같은 패딩을 맞춰야 합니다.
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      매 프레임 갱신되는 상수 버퍼는 <code>D3D11_USAGE_DYNAMIC</code> + <code>Map(WRITE_DISCARD)</code>가 표준입니다.
+      드라이버가 이전 버퍼를 버리고 새 메모리를 줘서 GPU 파이프라인이 멈추지(stall) 않습니다.
+      거의 안 바뀌는 데이터라면 <code>UpdateSubresource</code>가 더 간단합니다.
+    </div>
+
+    <h3>파이프라인 바인딩과 그리기</h3>
+    <p>
+      <code>UINT stride = 3 * sizeof(float)</code> — 한 정점의 바이트 크기(12바이트). GPU가 버퍼에서 정점을 몇 바이트씩 건너뛸지 알려줍니다.
+      <code>offset = 0</code>은 버퍼 시작부터 읽으라는 뜻입니다.
+    </p>
+    <ul>
+      <li><code>IASetInputLayout</code> — 입력 조립기(IA)에 “바이트 해석 규칙”을 건다.</li>
+      <li><code>IASetVertexBuffers(0, 1, ..., &amp;stride, &amp;offset)</code> — 0번 슬롯에 버텍스 버퍼 1개를 건다. stride/offset도 함께.</li>
+      <li><code>IASetPrimitiveTopology(...TRIANGLELIST)</code> — “정점 3개마다 삼각형 하나”로 해석하라. (다른 옵션: 스트립·라인 등)</li>
+      <li><code>VSSetShader</code> / <code>PSSetShader</code> — 정점/픽셀 셰이더를 파이프라인에 세팅.</li>
+      <li><code>VSSetConstantBuffers(0, 1, ...)</code> — 정점 셰이더의 b0 슬롯에 상수 버퍼를 건다.
+        이 <strong>첫 인자 0</strong>이 §2의 <code>register(b0)</code>와 짝이 맞아야 합니다.</li>
+    </ul>
+    <p>
+      <code>Draw(36, 0)</code> — 정점 0번부터 <strong>36개</strong>를 그립니다(인덱스 없는 큐브라 36 = 총 정점 수).
+      이 호출이 파이프라인을 돌려 큐브가 백버퍼에 그려집니다.
+    </p>
+    <p>
+      <code>Present(1, 0)</code> — 다 그린 백버퍼를 화면에 내보냅니다. 첫 인자 <code>1</code>은 <strong>수직 동기화(VSync) 1프레임 대기</strong>라
+      화면 찢김(tearing)을 막습니다(0이면 즉시, 최대 FPS).
+    </p>
+    <p>
+      루프가 끝나면 <code>ComPtr</code>들이 <strong>자동으로 <code>Release()</code></strong>를 호출해 모든 D3D 자원을 해제합니다.
+      수동 해제 코드가 필요 없는 것이 <code>ComPtr</code>의 큰 장점입니다.
+    </p>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <section id="directxmath-map">
+    <h2>5. DirectXMath / D3D11 API 대응 정리</h2>
+    <p>
+      이 페이지에서 쓴 라이브러리 함수와 “그것이 수학적으로 하는 일”을 한눈에 정리합니다.
+      직접 구현한다면 오른쪽 열을 손으로 짜야 하지만, 실무에서는 왼쪽(DirectXMath)을 쓰는 것이 정석입니다.
+    </p>
+    <table class="impl">
+      <thead>
+        <tr><th>DirectXMath / D3D11</th><th>하는 일 (수학·역할)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>XMMatrixRotationRollPitchYaw(p,y,r)</code></td><td>X·Y·Z 세 축 회전을 합성한 회전 행렬 → Model</td></tr>
+        <tr><td><code>XMMatrixTranslation(x,y,z)</code></td><td>이동 행렬 → 여기서는 뷰(카메라 역이동)로 사용</td></tr>
+        <tr><td><code>XMMatrixPerspectiveFovLH(fov,ar,n,f)</code></td><td>왼손 좌표계·z[0,1] 원근 투영 행렬 → Projection</td></tr>
+        <tr><td><code>XMConvertToRadians(deg)</code></td><td>도 → 라디안 변환(FOV 인자용)</td></tr>
+        <tr><td><code>연산자 * (XMMATRIX)</code></td><td>행렬 곱. 행 벡터라 <code>model*view*proj</code> 순서</td></tr>
+        <tr><td><code>XMMatrixTranspose(m)</code></td><td>행↔열 교환. HLSL 열 우선 기본과 맞추려 업로드 전 필수</td></tr>
+        <tr><td><code>XMStoreFloat4x4(&amp;dst, m)</code></td><td>SIMD <code>XMMATRIX</code> → 저장용 <code>XMFLOAT4X4</code> 복사</td></tr>
+        <tr><td><code>XMLoadFloat4x4 / XMLoadFloat3</code></td><td>저장용 타입 → SIMD 레지스터로 로드(반대 방향)</td></tr>
+        <tr><td><code>ID3D11Device::CreateBuffer</code></td><td>버텍스/상수 버퍼 등 GPU 메모리 자원 생성</td></tr>
+        <tr><td><code>CreateInputLayout</code></td><td>정점 바이트 → 셰이더 입력 해석 규칙 등록·검증</td></tr>
+        <tr><td><code>Map / Unmap (WRITE_DISCARD)</code></td><td>동적 상수 버퍼를 stall 없이 CPU에서 갱신</td></tr>
+        <tr><td><code>mul(A, B)</code> (HLSL)</td><td>행렬·벡터 곱. transpose 여부와 인자 순서가 한 세트</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <span class="tag warn">정리</span>
+      기억할 핵심 세 가지: ① <strong>순서</strong>는 행 벡터라 <code>model → view → proj</code>,
+      ② <strong>업로드 전 transpose</strong>는 셰이더 <code>mul(mvp,v)</code> 조합과 한 세트,
+      ③ <strong>원근</strong>은 투영 행렬이 심어 둔 <code>w</code>를 GPU가 나눠서 만든다.
+      이 셋만 몸에 익히면 3D 파이프라인의 좌표 여행 전체가 손에 잡힙니다.
+    </div>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./03-opengl3d.html">← 3장 허브</a>
+    <a href="./03-camera.html">카메라 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

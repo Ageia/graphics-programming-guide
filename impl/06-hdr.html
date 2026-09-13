@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: HDR · 톤 매핑 — C++/DirectX 11</title>
+<meta name="description" content="16비트 float 렌더 타깃에 HDR로 그린 뒤 노출·톤매핑·감마로 LDR에 압축하는 과정을 C++/HLSL 한 줄 단위로 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">HDR · 톤 매핑</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6</span>
+  <h1>HDR · 톤 매핑 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    PBR 조명은 물리 단위로 계산하기 때문에 밝은 곳의 값이 1.0을 예사로 넘어갑니다. 그런데 화면에 실제로 뿌려지는
+    일반 백버퍼는 채널당 8비트, 즉 0~1 범위밖에 담지 못합니다. 아무 대책 없이 그리면 1.0을 넘는 밝기는 전부
+    <strong>1.0으로 잘려(clamp)</strong> 하이라이트의 계조가 통째로 사라집니다. 이 페이지에서는
+    <strong>16비트 float 렌더 타깃</strong>에 밝기를 원본 그대로 담아두었다가, 마지막 후처리 단계에서
+    <strong>노출(exposure) → 톤 매핑 커브 → 감마</strong>의 세 단계를 거쳐 눈에 보기 좋은 0~1 범위로 압축하는 전체
+    파이프라인을 C++와 HLSL 코드 한 줄씩 뜯어 가며 만들어 봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 문서는 시리즈 공통 규약을 따릅니다. <strong>행벡터</strong> <code>v' = v * M</code> (HLSL <code>mul(v, M)</code>),
+    행 우선 저장, <strong>왼손 좌표계</strong>, 클립 공간 z 범위 <code>[0,1]</code>, 텍스처 V축은 위→아래입니다.
+    행렬·수학은 실무에서 <strong>DirectXMath</strong> 같은 검증된 라이브러리를 쓰는 것을 권장하며, 여기서 직접 짜는
+    코드는 어디까지나 <em>동작 원리를 몸으로 이해하기 위한 학습용</em>입니다.
+  </div>
+
+  <h2>0. 왜 HDR이 필요한가 — 숫자로 먼저 느끼기</h2>
+  <p>
+    "HDR(High Dynamic Range)"은 말 그대로 <strong>다룰 수 있는 밝기의 범위가 넓다</strong>는 뜻입니다.
+    반대로 우리가 흔히 쓰는 8비트 백버퍼는 LDR(Low Dynamic Range)입니다. 왜 이게 문제가 되는지 구체적인 숫자로
+    먼저 감을 잡아 봅시다.
+  </p>
+  <p>
+    태양 직사광이 닿는 흰 벽의 밝기를 물리 계산으로 구했더니 <code>(8.0, 8.0, 7.5)</code>가 나왔고, 그늘진 벽은
+    <code>(0.6, 0.6, 0.55)</code>가 나왔다고 합시다. 실제 눈으로는 둘 다 흰 벽이지만 밝기 차이가 <strong>13배가 넘습니다.</strong>
+    이걸 그대로 8비트 백버퍼(0~1)에 넣으면 어떻게 될까요? <code>8.0</code>도 <code>1.0</code>으로 잘리고,
+    <code>0.6</code>은 그대로 <code>0.6</code>이 됩니다. 결국 <em>밝은 벽 안의 미묘한 얼룩·질감 정보가 통째로 백색으로 뭉개집니다.</em>
+    이것이 "정보 손실"의 정체입니다.
+  </p>
+  <p>
+    해법의 뼈대는 간단합니다. <strong>계산은 넓은 범위 그대로(HDR) 하고, 화면에 보내기 직전에만 예쁘게 눌러 담자(톤 매핑).</strong>
+    사진작가가 눈부신 창가와 어두운 실내를 한 장에 담기 위해 노출과 현상 커브를 조절하는 것과 완전히 같은 발상입니다.
+    아래 세 단계가 이 페이지의 전부입니다.
+  </p>
+  <ol class="steps">
+    <li><strong>16비트 float 컬러 텍스처</strong>에 RTV(그리기용)와 SRV(읽기용)를 만들고, 씬을 톤매핑 없이 그 텍스처에 HDR 그대로 렌더합니다.</li>
+    <li>화면 전체를 덮는 <strong>풀스크린 삼각형</strong>으로 그 텍스처를 샘플해서, <em>노출 곱 → 톤매핑 커브 → 감마 보정</em> 순으로 후처리한 결과를 백버퍼에 그립니다.</li>
+    <li>(선택) 블룸을 얹으려면 밝은 부분만 뽑아 → 가우시안 블러(핑퐁) → 원본 HDR에 더한 뒤 톤매핑합니다.</li>
+  </ol>
+
+  <!-- ============================================================= -->
+  <h2>1. HDR 렌더 타깃 만들기 (C++)</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 1.0을 넘는 밝기를 손실 없이 담을 수 있는 <em>부동소수점 컬러 텍스처</em>와,
+    그것을 그리는 데 필요한 <code>RTV</code>·나중에 후처리에서 읽는 데 필요한 <code>SRV</code>, 그리고 후처리 샘플러입니다.
+  </p>
+  <p>
+    <strong>왜 필요한가:</strong> 평소 화면 백버퍼는 <code>DXGI_FORMAT_R8G8B8A8_UNORM</code> 같은 8비트 정규화 포맷이라
+    각 채널이 0~1로 자동 클램프됩니다. 여기에 HDR을 그리면 그 순간 정보가 날아가죠. 그래서 씬을 그릴 "중간 캔버스"를
+    16비트 float 포맷으로 따로 마련하고, 씬은 거기에 먼저 그린 다음, 후처리 셰이더가 그 캔버스를 텍스처처럼 읽어
+    최종 백버퍼로 옮겨 담는 <strong>2패스(two-pass) 구조</strong>를 씁니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>hdr_target.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// HDR 렌더 타깃 생성: 16비트 float 컬러 텍스처 (RTV + SRV) + 깊이 버퍼
+using Microsoft::WRL::ComPtr;
+
+ComPtr&lt;ID3D11Texture2D&gt;          hdrTex;
+ComPtr&lt;ID3D11RenderTargetView&gt;  hdrRTV;
+ComPtr&lt;ID3D11ShaderResourceView&gt; hdrSRV;
+
+D3D11_TEXTURE2D_DESC td = {};
+td.Width = W;  td.Height = H;
+td.MipLevels = 1; td.ArraySize = 1;
+// 핵심: 16비트 float 포맷 → 1.0 초과 값 보존
+td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+td.SampleDesc.Count = 1;
+td.Usage = D3D11_USAGE_DEFAULT;
+td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+device-&gt;CreateTexture2D(&amp;td, nullptr, &amp;hdrTex);
+device-&gt;CreateRenderTargetView(hdrTex.Get(), nullptr, &amp;hdrRTV);
+device-&gt;CreateShaderResourceView(hdrTex.Get(), nullptr, &amp;hdrSRV);
+
+// 선형 클램프 샘플러 (풀스크린 후처리용)
+ComPtr&lt;ID3D11SamplerState&gt; linearClamp;
+D3D11_SAMPLER_DESC sd = {};
+sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+device-&gt;CreateSamplerState(&amp;sd, &amp;linearClamp);
+
+// 깊이 스텐실 뷰(dsv)는 씬 렌더에 함께 사용 (생성 코드 생략)
+
+// --- 렌더 루프 ---
+// 1) hdrRTV에 씬 렌더 (톤매핑 없이 HDR 그대로 출력)
+float black[4] = { 0, 0, 0, 1 };
+ctx-&gt;OMSetRenderTargets(1, hdrRTV.GetAddressOf(), dsv.Get());
+ctx-&gt;ClearRenderTargetView(hdrRTV.Get(), black);
+ctx-&gt;ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+renderScene();
+
+// 2) 백버퍼에 풀스크린 삼각형으로 톤매핑
+ctx-&gt;OMSetRenderTargets(1, backbufferRTV.GetAddressOf(), nullptr);
+ctx-&gt;ClearRenderTargetView(backbufferRTV.Get(), black);
+ctx-&gt;VSSetShader(fullscreenVS.Get(), nullptr, 0);
+ctx-&gt;PSSetShader(toneMapPS.Get(), nullptr, 0);
+ctx-&gt;PSSetShaderResources(0, 1, hdrSRV.GetAddressOf());
+ctx-&gt;PSSetSamplers(0, 1, linearClamp.GetAddressOf());
+// exposure는 상수 버퍼로 전달 (Map/Unmap 또는 UpdateSubresource)
+ctx-&gt;PSSetConstantBuffers(0, 1, toneCB.GetAddressOf());
+ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+ctx-&gt;Draw(3, 0);   // 화면을 덮는 풀스크린 삼각형</code></pre>
+  </div>
+
+  <h3>1-1. ComPtr — "알아서 Release 해 주는 똑똑한 포인터"</h3>
+  <p>
+    <code>using Microsoft::WRL::ComPtr;</code> 부터 봅시다. Direct3D의 모든 객체(텍스처, 뷰, 샘플러 등)는 COM
+    객체라서, 다 쓰면 <code>obj-&gt;Release()</code>로 참조 카운트를 내려줘야 합니다. 이걸 손으로 하면 십중팔구 어딘가에서
+    빼먹어 메모리 누수가 납니다. <code>ComPtr&lt;T&gt;</code>는 <em>스마트 포인터</em>라서 자기가 스코프를 벗어날 때
+    자동으로 <code>Release()</code>를 호출해 줍니다. C++의 RAII(자원 획득이 곧 초기화) 관용구를 COM에 적용한 것이죠.
+  </p>
+  <ul>
+    <li><code>.Get()</code> → 안에 든 <em>날 포인터(raw <code>T*</code>)</em>를 돌려줍니다. API가 <code>ID3D11Texture2D*</code>를 원할 때 씁니다.</li>
+    <li><code>.GetAddressOf()</code> → <em>포인터의 주소(<code>T**</code>)</em>를 돌려줍니다. <code>OMSetRenderTargets</code>처럼 "포인터 배열의 시작 주소"를 요구하는 API에 넣습니다.</li>
+    <li><code>&amp;hdrTex</code> → 생성 함수가 <code>ComPtr</code> 안을 새 포인터로 채워줄 때 씁니다. (기존 내용을 먼저 <code>Release</code>하고 대입하도록 오버로딩돼 있습니다.)</li>
+  </ul>
+
+  <h3>1-2. <code>D3D11_TEXTURE2D_DESC td = {};</code> — 텍스처의 "설계도"</h3>
+  <p>
+    <strong>수학/API 원리:</strong> D3D는 객체를 만들 때 "이런 스펙으로 만들어 줘"라는 <em>서술(description) 구조체</em>를
+    먼저 채워서 넘깁니다. <code>td = {};</code>의 <code>{}</code>는 C++의 <strong>값 초기화(value-initialization)</strong>로,
+    구조체의 모든 멤버를 0으로 밀어 줍니다. 이게 중요한 이유는, 우리가 명시하지 않은 필드(예: <code>CPUAccessFlags</code>,
+    <code>MiscFlags</code>)가 쓰레기 값이 아니라 <em>0(기본값)</em>으로 확실히 세팅되기 때문입니다. 구조체를 <code>{}</code> 없이
+    선언했다가 필드 하나를 안 채워서 <code>CreateTexture2D</code>가 <code>E_INVALIDARG</code>를 뱉는 것이 초보자의 단골 실수입니다.
+  </p>
+  <table class="impl">
+    <tr><th>필드</th><th>넣은 값</th><th>의미</th></tr>
+    <tr><td><code>Width / Height</code></td><td><code>W / H</code></td><td>화면과 같은 해상도. 후처리는 픽셀 1:1 대응이 자연스럽습니다.</td></tr>
+    <tr><td><code>MipLevels</code></td><td><code>1</code></td><td>밉맵 없음. 후처리는 원본 해상도만 읽으므로 1이면 충분합니다.</td></tr>
+    <tr><td><code>ArraySize</code></td><td><code>1</code></td><td>텍스처 배열이 아닌 단일 텍스처.</td></tr>
+    <tr><td><code>Format</code></td><td><code>R16G16B16A16_FLOAT</code></td><td><strong>이 페이지의 핵심.</strong> 채널당 16비트 부동소수점 → 1.0을 훨씬 넘는 값도 저장.</td></tr>
+    <tr><td><code>SampleDesc.Count</code></td><td><code>1</code></td><td>MSAA 없음(샘플 1개). MSAA를 쓰면 후처리 전에 Resolve가 필요해 복잡해집니다.</td></tr>
+    <tr><td><code>Usage</code></td><td><code>DEFAULT</code></td><td>GPU가 읽고 쓰는 일반 용도. CPU 접근 불필요.</td></tr>
+    <tr><td><code>BindFlags</code></td><td><code>RENDER_TARGET | SHADER_RESOURCE</code></td><td>이 텍스처를 <strong>그리는 대상</strong>이자 <strong>읽는 텍스처</strong> 두 용도로 쓴다는 선언.</td></tr>
+  </table>
+
+  <h3>1-3. 왜 하필 <code>R16G16B16A16_FLOAT</code>인가 — 16비트 float의 저장 범위</h3>
+  <p>
+    <strong>수학적 의미:</strong> 16비트 반정밀도 float(half)은 부호 1비트 + 지수 5비트 + 가수 10비트로 구성됩니다.
+    표현할 수 있는 최대값이 약 <strong>65504</strong>이고, 아주 작은 값도 지수 덕분에 정밀하게 담깁니다. 반면
+    8비트 <code>UNORM</code>은 0~1 구간을 256단계로 <em>균등하게</em>만 나눌 수 있습니다.
+  </p>
+  <p>
+    <strong>기하 직관(그림글):</strong> 8비트 UNORM을 "0부터 1까지 256칸짜리 자"라고 하면, float은 "0.001도 담고
+    60000도 담는 고무줄 자"입니다. 태양처럼 밝은 픽셀(<code>8.0</code>)을 자르지 않고 그대로 저장했다가, 나중에
+    톤매핑에서 부드럽게 눌러 담을 여지를 남겨 두는 것이죠.
+  </p>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    16비트 float은 32비트 float(<code>R32G32B32A32_FLOAT</code>)의 <strong>절반</strong> 메모리·대역폭으로 충분히 넓은
+    범위를 담아, HDR 파이프라인의 사실상 표준입니다. 32비트는 대역폭만 2배로 먹고 후처리 품질 차이는 거의 없어 대개 과잉입니다.
+    반대로 8비트 <code>R11G11B10_FLOAT</code>은 알파가 없지만 더 가벼워, 알파가 필요 없는 조명 버퍼에는 좋은 절충안입니다.
+  </div>
+
+  <h3>1-4. RTV와 SRV — "같은 텍스처, 두 개의 얼굴"</h3>
+  <p>
+    <strong>원리:</strong> 텍스처 메모리(<code>hdrTex</code>)는 하나지만, GPU가 그것을 어떻게 볼지는 <em>뷰(View)</em>가
+    결정합니다. 같은 방을 "문(그리는 입구)"과 "창(들여다보는 창)"으로 각각 여는 셈입니다.
+  </p>
+  <ul>
+    <li><code>CreateRenderTargetView(hdrTex.Get(), nullptr, &amp;hdrRTV)</code> — <strong>RTV(그리는 문)</strong>. 이걸 출력으로 바인딩하면 픽셀 셰이더의 결과가 <code>hdrTex</code>에 <em>기록</em>됩니다. 두 번째 인자 <code>nullptr</code>은 "텍스처 포맷 그대로 뷰를 만들라"는 뜻입니다.</li>
+    <li><code>CreateShaderResourceView(hdrTex.Get(), nullptr, &amp;hdrSRV)</code> — <strong>SRV(읽는 창)</strong>. 후처리 셰이더가 이걸 통해 <code>hdrTex</code>를 <em>샘플</em>합니다.</li>
+  </ul>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>같은 텍스처를 RTV와 SRV로 동시에 바인딩하면 안 됩니다.</strong> 1패스에서 <code>hdrRTV</code>로 그리는 동안에는
+    <code>hdrSRV</code>가 어디에도 묶여 있으면 안 되고, 2패스에서 <code>hdrSRV</code>로 읽을 때는 <code>hdrRTV</code>를 출력에서
+    떼야 합니다. 위 코드에서 2패스 첫 줄이 출력을 <code>backbufferRTV</code>로 바꾸는 이유가 바로 이것입니다. 안 그러면 D3D 디버그
+    레이어가 "리소스가 입력과 출력에 동시에 묶였다"고 경고하며 SRV를 <code>null</code>로 강제합니다(화면이 까맣게 나옵니다).
+  </div>
+
+  <h3>1-5. 후처리 샘플러 — 선형 필터 + 클램프</h3>
+  <p>
+    <code>D3D11_FILTER_MIN_MAG_MIP_LINEAR</code>는 확대/축소/밉 전환 모두 <strong>이중선형 보간</strong>을 쓰라는 뜻입니다.
+    후처리에서 해상도가 1:1이면 보간이 거의 일어나지 않지만, 블룸처럼 저해상도 버퍼를 확대해 읽을 때 부드러워집니다.
+    <code>TEXTURE_ADDRESS_CLAMP</code>는 UV가 0~1 밖으로 나가면 <em>가장자리 픽셀 색을 그대로 유지</em>하라는 뜻입니다.
+    화면 밖을 참조하는 실수가 있어도 반대편 픽셀이 말려 들어오는(WRAP) 아티팩트를 막아 줍니다.
+  </p>
+
+  <h3>1-6. 렌더 루프 — 2패스의 실제 순서</h3>
+  <ol class="steps">
+    <li><strong>1패스(씬):</strong> <code>OMSetRenderTargets(1, hdrRTV.GetAddressOf(), dsv.Get())</code>로 HDR 타깃 + 깊이 버퍼를 출력에 겁니다. <code>ClearRenderTargetView</code>로 검게, <code>ClearDepthStencilView</code>로 깊이를 <code>1.0</code>(가장 먼 값)으로 초기화한 뒤 <code>renderScene()</code>. 이때 톤매핑은 <strong>절대 하지 않습니다</strong> — HDR 원본을 그대로 남겨야 하니까요.</li>
+    <li><strong>2패스(후처리):</strong> 출력을 <code>backbufferRTV</code>로 바꾸고(깊이는 <code>nullptr</code>, 풀스크린엔 깊이 테스트가 불필요), 풀스크린 VS/톤맵 PS를 걸고, 방금 그린 <code>hdrSRV</code>를 <code>t0</code>에, 샘플러를 <code>s0</code>에, 노출 상수 버퍼를 <code>b0</code>에 바인딩합니다.</li>
+    <li><code>Draw(3, 0)</code> — 정점 버퍼 없이 정점 3개만 그립니다. 그 3개가 화면 전체를 덮는 큰 삼각형을 이룹니다(다음 절에서 설명).</li>
+  </ol>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>PSSetShaderResources</code>의 인자는 <code>hdrSRV.GetAddressOf()</code>입니다. <code>Get()</code>이 아니라
+    <code>GetAddressOf()</code>인 이유는 이 API가 "SRV 포인터 <em>배열</em>의 시작 주소"를 받기 때문입니다(여기선 배열 길이 1).
+    <code>Get()</code>을 넣으면 컴파일은 되더라도 잘못된 주소를 넘겨 크래시하거나 SRV가 안 걸립니다. 초보자 크래시 1순위이니 주의하세요.
+  </div>
+
+  <h3>1-7. Direct3D 11 API 1:1 대응표</h3>
+  <table class="impl">
+    <tr><th>코드</th><th>역할</th><th>OpenGL/일반 개념 대응</th></tr>
+    <tr><td><code>CreateTexture2D</code></td><td>GPU 텍스처 메모리 할당</td><td><code>glTexImage2D</code></td></tr>
+    <tr><td><code>CreateRenderTargetView</code></td><td>텍스처를 그리기 대상으로 여는 뷰</td><td>FBO 컬러 어태치먼트</td></tr>
+    <tr><td><code>CreateShaderResourceView</code></td><td>텍스처를 읽기용으로 여는 뷰</td><td>텍스처 유닛 바인딩</td></tr>
+    <tr><td><code>OMSetRenderTargets</code></td><td>출력 병합 단계에 타깃 바인딩</td><td><code>glBindFramebuffer</code></td></tr>
+    <tr><td><code>Draw(3, 0)</code></td><td>정점 3개 드로우콜</td><td><code>glDrawArrays(GL_TRIANGLES,0,3)</code></td></tr>
+  </table>
+
+  <!-- ============================================================= -->
+  <h2>2. 톤매핑 픽셀 셰이더 (HLSL)</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> HDR 텍스처의 한 픽셀을 읽어, <em>노출을 곱하고 → 톤매핑 커브로 0~1에 압축하고 →
+    감마 보정</em>을 거쳐 최종 색을 내보내는 픽셀 셰이더입니다. 이 셰이더 하나가 "카메라의 노출계 + 필름 현상 + 모니터 대응"을
+    전부 담당합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>tonemap.hlsl (픽셀 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D    hdrBuffer : register(t0);
+SamplerState samp      : register(s0);
+
+cbuffer ToneConstants : register(b0) {
+    float exposure;
+    float3 _pad;
+};
+
+// ACES 필믹 근사 (Narkowicz 스타일의 자체 근사)
+float3 acesApprox(float3 x) {
+    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
+
+float4 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float3 hdr = hdrBuffer.Sample(samp, uv).rgb;
+
+    // 1) 노출 적용
+    float3 c = hdr * exposure;
+
+    // 2) 톤매핑 커브 선택 (둘 중 하나)
+    // Reinhard: 부드럽지만 하이라이트가 다소 밋밋
+    // float3 mapped = c / (c + (float3)1.0);
+    // ACES: 영화적 대비, 하이라이트 롤오프가 자연스럽다
+    float3 mapped = acesApprox(c);
+
+    // 3) 감마 보정 (선형 → sRGB)
+    mapped = pow(mapped, (float3)(1.0 / 2.2));
+    return float4(mapped, 1.0);
+}</code></pre>
+  </div>
+
+  <h3>2-1. 리소스 바인딩 — <code>register(t0)</code> / <code>register(s0)</code> / <code>register(b0)</code></h3>
+  <p>
+    HLSL의 <code>register(...)</code>는 "이 리소스를 몇 번 슬롯에서 받겠다"는 <strong>슬롯 번호 지정</strong>입니다.
+    C++ 쪽에서 <code>PSSetShaderResources(0, ...)</code>로 넣은 SRV가 <code>t0</code>로, <code>PSSetSamplers(0, ...)</code>가
+    <code>s0</code>로, <code>PSSetConstantBuffers(0, ...)</code>가 <code>b0</code>로 도착합니다.
+    문자 prefix가 리소스 종류를 뜻합니다.
+  </p>
+  <table class="impl">
+    <tr><th>prefix</th><th>종류</th><th>C++ 바인딩 함수</th></tr>
+    <tr><td><code>t</code></td><td>텍스처(SRV)</td><td><code>PSSetShaderResources</code></td></tr>
+    <tr><td><code>s</code></td><td>샘플러</td><td><code>PSSetSamplers</code></td></tr>
+    <tr><td><code>b</code></td><td>상수 버퍼(cbuffer)</td><td><code>PSSetConstantBuffers</code></td></tr>
+  </table>
+  <p>
+    <code>Texture2D</code>와 <code>SamplerState</code>가 <strong>분리</strong>돼 있는 점에 주목하세요. OpenGL은 텍스처와
+    샘플링 방식이 한 덩어리(sampler2D)지만, D3D는 "무엇을 읽을지(텍스처)"와 "어떻게 읽을지(샘플러)"를 따로 관리합니다.
+    덕분에 텍스처 하나를 여러 샘플러로, 혹은 샘플러 하나를 여러 텍스처로 자유롭게 조합할 수 있습니다.
+  </p>
+
+  <h3>2-2. cbuffer의 <code>float3 _pad;</code> — 눈에 안 보이는 정렬 규칙</h3>
+  <p>
+    <strong>수학/원리:</strong> HLSL 상수 버퍼는 <strong>16바이트(4×float) 정렬</strong> 규칙을 따릅니다. 하나의 변수가
+    16바이트 경계를 넘어가면 안 되고, 버퍼 전체 크기도 16의 배수여야 합니다. 우리가 실제로 쓰는 값은
+    <code>float exposure;</code> 하나(4바이트)뿐인데, 그러면 버퍼가 4바이트가 되어 규칙에 어긋납니다.
+  </p>
+  <p>
+    <strong>코드 매핑:</strong> 그래서 <code>float3 _pad;</code>(12바이트)를 덧붙여 <code>4 + 12 = 16</code>바이트로 딱 맞춥니다.
+    <code>_pad</code>는 실제로 쓰지 않는 "자리 채우기(padding)"입니다. C++ 쪽 구조체도 반드시 이 레이아웃과 정확히
+    일치시켜야 합니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>C++ 쪽 대응 구조체</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">struct ToneConstants {
+    float exposure;   // 4 bytes
+    float _pad[3];    // 12 bytes → 합 16바이트 (HLSL cbuffer와 정확히 일치)
+};
+static_assert(sizeof(ToneConstants) == 16, "cbuffer 크기 16의 배수여야 함");</code></pre>
+  </div>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    C++ 구조체와 HLSL cbuffer의 바이트 레이아웃이 어긋나면, 컴파일 에러 없이 <strong>엉뚱한 값이 셰이더로 들어갑니다.</strong>
+    예를 들어 <code>_pad</code>를 빼먹으면 다음 변수가 밀려 노출값이 잘못 읽히죠. <code>static_assert</code>로 크기를 못 박아
+    두면 이 계열의 버그를 컴파일 시점에 잡을 수 있습니다.
+  </div>
+
+  <h3>2-3. <code>main</code> 시그니처 — SV 시맨틱 해부</h3>
+  <p>
+    <code>float4 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target</code> 한 줄을 성분별로 뜯어봅시다.
+  </p>
+  <ul>
+    <li><code>float4 posH : SV_Position</code> — 래스터라이저가 채워주는 <strong>화면 픽셀 좌표</strong>입니다. <code>SV_</code>는 "System Value", 즉 하드웨어가 자동으로 넣어주는 값이라는 표식입니다. 여기선 안 쓰지만 시그니처에 있어야 UV가 올바른 슬롯으로 들어옵니다.</li>
+    <li><code>float2 uv : TEXCOORD0</code> — 풀스크린 VS가 넘겨준 <strong>0~1 텍스처 좌표</strong>. 이걸로 HDR 버퍼의 해당 픽셀을 찾습니다.</li>
+    <li><code>: SV_Target</code> — 반환하는 <code>float4</code>가 <strong>현재 렌더 타깃(백버퍼)의 픽셀 색</strong>이 된다는 표식입니다.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <code>uv = proj.xy * float2(0.5, -0.5) + 0.5</code> 같은 곳에서 보이듯, 이 시리즈는 <strong>텍스처 V축이 위→아래</strong>
+    입니다(D3D 기본). 풀스크린 VS에서 UV를 만들 때 이 규약과 어긋나면 화면이 상하로 뒤집혀 나옵니다.
+  </div>
+
+  <h3>2-4. 풀스크린 삼각형 — 정점 3개로 화면을 다 덮는 트릭</h3>
+  <p>
+    위 셰이더의 짝이 되는 정점 셰이더는 정점 버퍼 없이 <code>SV_VertexID</code>만으로 좌표를 만들어 냅니다.
+    개념을 확실히 잡기 위해 대표적인 구현을 보겠습니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>fullscreen.hlsl (정점 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 정점 버퍼 없이 vertexID(0,1,2)만으로 큰 삼각형 하나를 생성
+void main(uint id : SV_VertexID,
+          out float4 posH : SV_Position,
+          out float2 uv   : TEXCOORD0)
+{
+    // id=0 → (0,0), id=1 → (2,0), id=2 → (0,2)
+    uv = float2((id &lt;&lt; 1) &amp; 2, id &amp; 2);
+    // uv[0,2] → 클립좌표[-1,3]. y는 부호를 뒤집어 화면 위가 +y
+    posH = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+}</code></pre>
+  </div>
+  <p>
+    <strong>수학적 의미:</strong> <code>id</code>가 0,1,2일 때 UV는 각각 <code>(0,0), (2,0), (0,2)</code>가 됩니다.
+    비트 연산 <code>(id &lt;&lt; 1) &amp; 2</code>는 id를 왼쪽 1비트 밀고 2와 AND하는 것으로, <code>id=1</code>일 때만 2를 냅니다.
+    <code>id &amp; 2</code>는 <code>id=2</code>일 때만(이진수 10) 2를 냅니다. 결과적으로 세 점의 UV가 위 값이 됩니다.
+  </p>
+  <p>
+    <strong>기하 직관(그림글):</strong> UV <code>(0,0),(2,0),(0,2)</code>를 클립 좌표로 옮기면 <code>(-1,1),(3,1),(-1,-3)</code>가
+    됩니다. 이 삼각형은 화면(-1~1 정사각형)보다 훨씬 커서, 화면 영역이 그 삼각형 안에 <em>완전히 들어옵니다.</em>
+    래스터라이저가 화면 밖은 잘라내므로(clip), 결과적으로 화면 전체가 삼각형 하나로 덮입니다.
+  </p>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    왜 사각형(삼각형 2개)이 아니라 삼각형 1개일까요? 사각형은 두 삼각형이 만나는 <strong>대각선 경계</strong>에서 GPU가
+    픽셀을 두 번 처리(quad overdraw)해 미세하게 손해입니다. 큰 삼각형 하나는 경계선이 없어 이 낭비가 사라지고, 정점도
+    3개뿐이라 드로우콜이 가장 가볍습니다. 그래서 요즘 후처리는 거의 다 이 방식을 씁니다.
+  </div>
+
+  <h3>2-5. 1단계 — 노출(exposure) 적용</h3>
+  <p>
+    <code>float3 c = hdr * exposure;</code> — HDR 색에 스칼라 <code>exposure</code>를 곱합니다.
+  </p>
+  <p>
+    <strong>수학적 의미:</strong> 단순한 스칼라 곱이지만, 톤매핑 커브에 들어가기 <em>전에</em> 전체 밝기를 밀어 올리거나
+    내리는 "노브"입니다. <code>exposure &gt; 1</code>이면 어두운 씬을 밝게, <code>&lt; 1</code>이면 눈부신 씬을 어둡게 조절합니다.
+  </p>
+  <p>
+    <strong>기하 직관(그림글):</strong> 카메라의 조리개/셔터를 여닫는 것과 같습니다. 곱셈은 톤매핑 커브의
+    <em>어느 구간을 집중적으로 쓸지</em>를 정합니다. 밝은 값에 큰 exposure를 곱하면 커브의 완만한 상단(롤오프)으로
+    밀려 부드럽게 눌리고, 작은 값은 커브의 가파른 하단에 남아 대비가 살아납니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">참고</span>
+    실무 엔진은 이 <code>exposure</code>를 화면 평균 밝기에서 자동으로 계산합니다(auto-exposure / eye adaptation).
+    씬 전체를 밉맵으로 축소해 1×1 평균 휘도를 구하고, 목표 중간 회색(예: 0.18)에 맞도록 exposure를 시간에 따라 부드럽게
+    수렴시키면, 밝은 곳에서 어두운 동굴로 들어갈 때 사람 눈처럼 서서히 적응하는 효과가 납니다.
+  </div>
+
+  <h3>2-6. 2단계 — 톤매핑 커브: Reinhard vs ACES</h3>
+  <p>
+    이제 넓은 범위의 <code>c</code>를 0~1로 눌러 담아야 합니다. 무한대 범위를 유한한 [0,1]로 보내는 매끄러운 함수가
+    필요한데, 이것이 <strong>톤매핑 커브</strong>입니다. 코드는 두 가지를 보여줍니다.
+  </p>
+  <h4>Reinhard: <code>c / (c + 1)</code></h4>
+  <p>
+    <strong>수학적 의미:</strong> <code>f(x) = x / (x + 1)</code>은 <code>x=0</code>에서 0, <code>x→∞</code>에서 1로 수렴하는
+    단조 증가 함수입니다. 어떤 큰 값이 들어와도 절대 1을 넘지 않으므로 클램프 없이 안전하게 [0,1]에 매핑됩니다.
+  </p>
+  <p>
+    <strong>손계산:</strong> <code>x=0.5 → 0.5/1.5 = 0.333</code>, <code>x=1 → 1/2 = 0.5</code>,
+    <code>x=4 → 4/5 = 0.8</code>, <code>x=8 → 8/9 = 0.889</code>. 보다시피 밝은 쪽으로 갈수록 증가가 완만해져
+    하이라이트가 자연스럽게 눌립니다. 다만 아주 밝은 부분이 <em>다 비슷하게 0.9 언저리로</em> 몰려 계조가 밋밋해지는 게 단점입니다.
+  </p>
+  <h4>ACES: <code>acesApprox(x)</code></h4>
+  <p>
+    <strong>수학적 의미:</strong> ACES는 영화 산업 표준 색 파이프라인의 톤 커브를 흉내 낸 것으로, 코드의
+    <code>(x*(a*x+b)) / (x*(c*x+d)+e)</code>는 Krzysztof Narkowicz가 제안한 <em>유리함수(분자·분모가 다항식) 근사</em>입니다.
+    S자 곡선 모양이라 어두운 쪽은 대비를 살리고 밝은 쪽은 부드럽게 굴려(롤오프) 영화 같은 느낌을 줍니다.
+  </p>
+  <p>
+    <strong>계수 해부:</strong> <code>a=2.51, b=0.03, c=2.43, d=0.59, e=0.14</code>는 실측 ACES 커브에 최소제곱으로
+    맞춘 매직 넘버입니다. 물리적 의미를 하나하나 따질 필요는 없고, "이 다섯 숫자가 S커브의 모양을 결정한다" 정도로
+    이해하면 됩니다.
+  </p>
+  <p>
+    <strong>손계산:</strong> <code>x=0.5</code>를 넣어 봅시다. 분자 <code>0.5*(2.51*0.5+0.03) = 0.5*1.285 = 0.6425</code>,
+    분모 <code>0.5*(2.43*0.5+0.59)+0.14 = 0.5*1.805+0.14 = 1.0425</code>. 결과 <code>0.6425/1.0425 ≈ 0.616</code>.
+    같은 입력에 Reinhard가 0.333을 준 것에 비해 ACES는 0.616으로, 중간 톤을 더 밝고 대비 있게 살려 줍니다.
+  </p>
+  <p>
+    <strong>코드 매핑:</strong> <code>saturate(...)</code>는 결과를 <code>[0,1]</code>로 클램프합니다(HLSL 내장, GPU에서 공짜).
+    유리함수 근사는 극단적 입력에서 살짝 1을 넘거나 음수로 삐져나올 수 있어, 마지막에 <code>saturate</code>로 안전하게 잘라 줍니다.
+  </p>
+  <p>
+    <code>float3</code> 벡터에 대해 <code>a*x+b</code>, 나눗셈 등이 전부 <strong>성분별(component-wise)</strong>로 동작합니다.
+    즉 R,G,B 세 채널에 같은 커브가 독립적으로 적용됩니다.
+  </p>
+
+  <h3>2-7. 3단계 — 감마 보정 <code>pow(mapped, 1/2.2)</code></h3>
+  <p>
+    <strong>수학적 의미:</strong> 지금까지의 계산은 전부 <em>선형(linear)</em> 공간에서 이뤄졌습니다(빛의 물리량은 선형으로
+    더하고 곱해야 맞습니다). 하지만 모니터와 sRGB 표준은 <strong>비선형</strong>이라, 값 <code>v</code>를 화면이
+    대략 <code>v^2.2</code>로 어둡게 표시합니다. 그래서 우리가 미리 반대 지수 <code>1/2.2 ≈ 0.4545</code>로 밝혀 주면,
+    모니터의 <code>^2.2</code>와 상쇄되어 <em>사람 눈이 의도한 밝기</em>로 보입니다.
+  </p>
+  <p>
+    <strong>기하 직관(그림글):</strong> 감마 보정 없이 선형 값을 그대로 내보내면 중간 톤(회색)이 실제보다 훨씬 어둡게
+    보입니다. <code>0.5</code>를 <code>pow(0.5, 1/2.2) ≈ 0.73</code>으로 밝혀 두면, 모니터가 다시 <code>0.73^2.2 ≈ 0.5</code>로
+    돌려놓아 정확히 원래 값이 됩니다.
+  </p>
+  <p>
+    <strong>손계산:</strong> <code>pow(0.616, 1/2.2)</code>를 계산하면 약 <code>0.80</code>입니다. 즉 ACES가 준 0.616이
+    화면상으로는 0.80 밝기로 올라가, 눈이 보기에 적절한 중간 밝기가 됩니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    감마 보정을 <strong>두 번</strong> 하는 실수가 흔합니다. 만약 백버퍼를 <code>DXGI_FORMAT_R8G8B8A8_UNORM_SRGB</code>
+    (sRGB 포맷)로 만들면 <em>하드웨어가 자동으로 감마 인코딩</em>을 해 줍니다. 그 상태에서 셰이더에서도 <code>pow(.., 1/2.2)</code>를
+    하면 이중 보정이 되어 화면이 허옇게 뜹니다. 셰이더에서 수동 감마를 할 거면 백버퍼는 <strong>비-sRGB(UNORM)</strong>로,
+    sRGB 백버퍼를 쓸 거면 셰이더의 <code>pow</code> 줄을 <strong>지워야</strong> 합니다. 둘 중 하나만 하세요.
+  </div>
+  <p>
+    <code>return float4(mapped, 1.0);</code> — 알파를 <code>1.0</code>(불투명)으로 채워 최종 색을 백버퍼에 씁니다.
+    후처리 결과는 불투명한 최종 화면이므로 알파를 1로 고정하는 것이 안전합니다.
+  </p>
+
+  <!-- ============================================================= -->
+  <h2>3. 블룸(Bloom) — 밝은 부분이 번지는 효과</h2>
+  <p>
+    HDR을 갖추면 "진짜 밝은 픽셀"을 정확히 식별할 수 있어, 그 부분만 부드럽게 번지게 하는 <strong>블룸</strong>을 얹기 좋습니다.
+    현실에서 밝은 광원을 볼 때 빛이 눈·렌즈에서 번져 보이는 것을 흉내 낸 효과입니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    <strong>블룸 흐름:</strong> (1) 밝기 임계값 초과분만 뽑는 <em>bright-pass</em>, (2) 수평/수직 1D 가우시안 블러를
+    두 렌더 타깃을 번갈아 쓰는 <em>핑퐁(ping-pong) 블러</em>로 여러 번 반복, (3) 블러 결과를 HDR 원본에 <code>+</code>로
+    가산한 뒤 톤매핑합니다. 임계값을 너무 낮추면 화면 전체가 뿌옇게 번지니 주의하세요.
+  </div>
+  <ol class="steps">
+    <li><strong>bright-pass:</strong> HDR 버퍼를 읽어 <code>max(color - threshold, 0)</code>처럼 임계값 초과분만 남기고 나머지는 0으로. 밝은 곳만 남긴 별도 버퍼를 얻습니다.</li>
+    <li><strong>분리형 가우시안:</strong> 2D 가우시안 블러를 <em>가로 1D + 세로 1D</em> 두 번으로 나눠 계산합니다. N×N 커널을 한 번에 도는 것(O(N²))보다 두 번의 1D(O(2N))가 훨씬 싸기 때문입니다.</li>
+    <li><strong>핑퐁:</strong> 버퍼 A→B(가로), B→A(세로) 식으로 두 버퍼를 번갈아 입력/출력으로 쓰며 여러 번 반복해 번짐을 넓힙니다. 같은 버퍼를 입출력에 동시에 쓸 수 없어서 두 개가 필요합니다.</li>
+    <li><strong>합성:</strong> 블러된 밝은 부분을 HDR 원본에 더한 뒤, 앞의 톤매핑 셰이더로 함께 압축합니다. 블룸은 반드시 <em>톤매핑 이전</em>의 HDR 공간에서 더해야 자연스럽습니다.</li>
+  </ol>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    블룸 버퍼는 보통 화면의 <strong>1/2 또는 1/4 해상도</strong>로 만듭니다. 어차피 부드럽게 번질 거라 저해상도로 블러해도
+    티가 안 나고, 픽셀 수가 1/4~1/16로 줄어 블러 비용이 급감합니다. 앞서 후처리 샘플러를 <code>LINEAR</code>로 만든 것이
+    여기서 빛을 발합니다 — 저해상도 버퍼를 확대해 읽을 때 이중선형 보간이 자동으로 부드럽게 이어 줍니다.
+  </div>
+
+  <!-- ============================================================= -->
+  <h2>4. 전체 그림 다시 보기</h2>
+  <table class="impl">
+    <tr><th>단계</th><th>공간</th><th>핵심 연산</th><th>이유</th></tr>
+    <tr><td>씬 렌더</td><td>HDR (16f)</td><td>PBR 조명, 값 &gt; 1 허용</td><td>물리 밝기를 손실 없이 보존</td></tr>
+    <tr><td>(선택) 블룸</td><td>HDR (16f)</td><td>bright-pass + 가우시안 + 가산</td><td>밝은 부분의 자연스러운 번짐</td></tr>
+    <tr><td>노출</td><td>HDR (16f)</td><td><code>c = hdr * exposure</code></td><td>커브의 사용 구간 선택(카메라 노출)</td></tr>
+    <tr><td>톤매핑</td><td>HDR → [0,1]</td><td>Reinhard / ACES</td><td>넓은 범위를 표시 가능 범위로 압축</td></tr>
+    <tr><td>감마</td><td>[0,1] 선형 → sRGB</td><td><code>pow(x, 1/2.2)</code></td><td>모니터 비선형 응답 상쇄</td></tr>
+  </table>
+  <p>
+    핵심을 다시 새기면: <strong>"계산은 선형·넓은 범위(HDR)에서, 표시는 마지막에 한 번만 눌러 담아(톤매핑+감마)"</strong>가
+    현대 렌더링 파이프라인의 대원칙입니다. PBR·블룸·그림자·SSAO 등 어떤 기법을 얹어도 이 뼈대는 그대로 유지됩니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">실무 권장</span>
+    직접 짠 <code>acesApprox</code>는 학습용으로 훌륭하지만, 색 정확도가 중요한 프로덕션에서는 완전한 ACES RRT/ODT나
+    엔진이 제공하는 검증된 톤매퍼(예: Unreal의 필믹 톤매퍼, AgX 등)를 쓰는 것을 권장합니다. 마찬가지로 행렬·수학 파트는
+    <strong>DirectXMath</strong>를, 감마·sRGB 변환은 하드웨어 sRGB 포맷을 우선 고려하세요. 여기서 손으로 짠 코드는
+    "안에서 무슨 일이 일어나는지"를 아는 데 목적이 있습니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-pbr.html">← 물리 기반 렌더링 (PBR)</a>
+    <a href="./06-shadowmap.html">섀도우 맵 (Shadow Mapping) →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: Compute Shader — C++/DirectX 11</title>
+<meta name="description" content="렌더 파이프라인 밖에서 도는 범용 GPU 연산인 컴퓨트 셰이더를 파티클 시뮬레이션 예제로 한 줄 한 줄 해부: numthreads·SV_DispatchThreadID·RWStructuredBuffer·UAV·Dispatch·바인딩 해제를 성분 하나까지 설명하고 D3D11 API에 1:1로 매핑." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./04-shaders.html">4장. GPU · 셰이더</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">Compute Shader</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 4</span>
+  <h1>Compute Shader — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    <strong>컴퓨트 셰이더(Compute Shader)</strong>는 정점·픽셀이라는 고정 역할을 벗어나, GPU를
+    <strong>순수한 병렬 계산기</strong>로 쓰는 방법입니다. 화면에 삼각형을 그리는 것과 무관하게, 우리가 정의한
+    <strong>스레드 격자(thread grid)</strong> 위에서 수십만 개의 스레드가 동시에 버퍼·텍스처를 읽고 씁니다.
+    이 페이지에서는 <strong>파티클 10만 개를 매 프레임 물리 적분하는 시뮬레이션</strong>을 예제로,
+    HLSL 컴퓨트 셰이더와 이를 구동하는 C++/Direct3D 11 코드를 <strong>한 줄, 성분 하나까지</strong> 해부합니다.
+    <code>[numthreads]</code>·<code>SV_DispatchThreadID</code>·<code>RWStructuredBuffer</code>·<strong>UAV</strong>·
+    <code>Dispatch</code>·바인딩 해제까지, 왜 이렇게 쓰는지 그 원리와 기하 직관, 그리고 D3D11 API 대응을
+    빠짐없이 짚습니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    <strong>행 우선 저장</strong>, <strong>왼손 좌표계</strong>, 클립 <code>z ∈ [0,1]</code>, 텍스처 V축 위→아래.
+    컴퓨트 셰이더 자체는 행렬 변환을 거의 쓰지 않으므로 이 규약과 직접 부딪히는 지점은 적지만,
+    <strong>C++ 구조체와 HLSL 구조체의 메모리 레이아웃 일치</strong>라는 또 다른 규약이 핵심입니다. 아래에서 자세히 다룹니다.
+    실무에서는 검증된 라이브러리·헬퍼를 쓰는 것을 권장하며, 이 페이지의 직접 구현은 <strong>학습용</strong>입니다.
+  </div>
+
+  <!-- =========================================================
+       0. 무엇을, 왜 만드나
+       ========================================================= -->
+  <h2 style="margin-top:40px;">0. 무엇을, 왜 만드나</h2>
+  <p>
+    지금까지의 정점 셰이더·픽셀 셰이더는 <strong>렌더 파이프라인이라는 컨베이어 벨트의 정해진 자리</strong>에 놓입니다.
+    정점 셰이더는 "정점 하나당 한 번", 픽셀 셰이더는 "픽셀 하나당 한 번" 자동으로 불려집니다. 우리가 직접
+    "몇 번 돌려라"라고 지시할 수 없고, 입력·출력의 형태도 파이프라인이 강제합니다.
+  </p>
+  <p>
+    <strong>컴퓨트 셰이더</strong>는 이 벨트에서 완전히 떨어져 나온, <strong>범용 GPU 연산(GPGPU)</strong>입니다.
+    삼각형도, 래스터화도, 픽셀도 없습니다. 대신 우리가 직접 "스레드를 이만큼 띄워라"라고 지시하고
+    (<code>Dispatch</code>), 각 스레드는 <strong>자기 번호(<code>SV_DispatchThreadID</code>)</strong>를 받아
+    <strong>UAV(Unordered Access View)</strong>를 통해 버퍼·텍스처의 원하는 위치를 자유롭게 읽고 씁니다.
+  </p>
+  <ul>
+    <li><strong>파티클 시뮬레이션</strong>: 입자 수만 개의 위치·속도를 매 프레임 물리 법칙으로 갱신 (이 페이지 예제).</li>
+    <li><strong>물리·충돌</strong>: 강체·천·유체 시뮬레이션의 반복 계산.</li>
+    <li><strong>이미지 처리</strong>: 블러·톤매핑·히스토그램 등 픽셀당 병렬 후처리.</li>
+    <li><strong>일반 병렬 알고리즘</strong>: 정렬·리덕션(합/최대)·프리픽스 합 등.</li>
+  </ul>
+  <p>
+    컴퓨트 셰이더는 <strong>Direct3D 11의 표준 기능</strong>이며, 셰이더 모델 <code>cs_5_0</code> 프로파일로 컴파일합니다.
+    이 예제의 전체 흐름은 다음 다섯 단계입니다.
+  </p>
+  <ol class="steps">
+    <li>파티클 배열을 담을 <strong>Structured Buffer</strong>를 만든다 (<code>CreateBuffer</code> + <code>D3D11_RESOURCE_MISC_BUFFER_STRUCTURED</code>)</li>
+    <li>그 버퍼에 대한 <strong>UAV</strong>(<code>ID3D11UnorderedAccessView</code>)를 만든다 (<code>CreateUnorderedAccessView</code>)</li>
+    <li>매 프레임 상수(델타타임·중력·개수)를 <strong>cbuffer</strong>에 올린다</li>
+    <li><code>CSSetShader</code> + <code>CSSetUnorderedAccessViews</code>로 바인딩하고 <code>Dispatch</code>로 스레드 그룹 개수를 지정해 실행</li>
+    <li>다음 단계에서 이 버퍼를 <strong>읽으려면</strong> UAV 바인딩을 <strong>해제</strong>(nullptr 재설정)한 뒤 SRV/VB로 다시 바인딩한다</li>
+  </ol>
+
+  <!-- =========================================================
+       1. HLSL 컴퓨트 셰이더
+       ========================================================= -->
+  <h2 style="margin-top:44px;">1. HLSL 컴퓨트 셰이더 — 파티클 물리 적분</h2>
+  <p>
+    먼저 GPU에서 실제로 도는 코드입니다. 이 짧은 셰이더 하나가 <strong>파티클 하나</strong>를 처리하며,
+    GPU가 이것을 <strong>동시에 수만 번</strong> 실행합니다. "내가 몇 번째 파티클인가"는 각 스레드가 받는
+    번호로 구분합니다. 전체를 먼저 본 뒤, 한 줄씩 뜯어보겠습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>shaders/particles_cs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">struct Particle {
+    float4 pos;   // xyz = 위치, w = 수명
+    float4 vel;   // xyz = 속도, w = 여분(정렬용)
+};
+
+// 읽고 쓰는 구조화 버퍼(UAV), u0 슬롯
+RWStructuredBuffer&lt;Particle&gt; particles : register(u0);
+
+cbuffer SimCB : register(b0) {
+    float  uDt;         // 프레임 델타타임
+    uint   uCount;      // 파티클 개수 (범위 체크용)
+    float2 _pad0;
+    float3 uGravity;    // 예: (0, -9.8, 0)
+    float  _pad1;
+};
+
+// 스레드 그룹 하나에 64개 스레드 (1차원)
+[numthreads(64, 1, 1)]
+void CSMain(uint3 dtid : SV_DispatchThreadID) {
+    uint i = dtid.x;                           // 전역 스레드 인덱스
+    if (i &gt;= uCount) return;                    // 범위 밖 스레드는 종료
+
+    Particle p = particles[i];
+    p.vel.xyz += uGravity * uDt;               // 중력 적분
+    p.pos.xyz += p.vel.xyz * uDt;              // 위치 적분
+    p.pos.w   -= uDt;                          // 수명 감소
+
+    // 바닥에 닿으면 튕김 + 리스폰(수명 소진 시)
+    if (p.pos.y &lt; 0.0) { p.pos.y = 0.0; p.vel.y *= -0.6; }
+    if (p.pos.w &lt;= 0.0) { p.pos.xyz = float3(0,0,0); p.pos.w = 3.0; }
+
+    particles[i] = p;                          // 다시 써넣는다
+}</code></pre>
+  </div>
+
+  <!-- 1.1 struct -->
+  <h3 style="margin-top:30px;">1.1 <code>struct Particle</code> — GPU와 CPU가 공유할 데이터 한 칸</h3>
+  <p>
+    <strong>무엇을 만드나:</strong> 파티클 하나의 상태를 담는 데이터 구조입니다. <strong>왜 필요한가:</strong>
+    버퍼는 결국 바이트의 나열일 뿐이라, "몇 바이트마다 하나의 파티클이고, 그 안에서 어느 바이트가 위치이고
+    어느 바이트가 속도인가"를 GPU와 CPU가 <strong>똑같이</strong> 약속해야 합니다. 이 <code>struct</code>가 그 약속입니다.
+  </p>
+  <ul>
+    <li><code>float4 pos</code> — <strong>4개의 float</strong>. <code>xyz</code>는 3차원 위치, <code>w</code>는 "수명(초)"으로 재활용합니다.
+      위치는 3개면 충분한데 왜 <code>float4</code>일까요? 하나는 <strong>남는 <code>w</code>에 수명을 실어 공짜로 얹기</strong> 위해서고,
+      더 중요한 이유는 아래 정렬 절에서 설명하는 <strong>16바이트 정렬</strong> 때문입니다.</li>
+    <li><code>float4 vel</code> — 속도. <code>xyz</code>가 초당 이동량, <code>w</code>는 지금은 쓰지 않는 <strong>여분</strong>입니다.
+      역시 정렬을 맞추려고 <code>float3</code>이 아니라 <code>float4</code>로 둡니다.</li>
+  </ul>
+  <p>
+    <strong>수식 → 직관 → 코드:</strong> 파티클 하나는 물리에서 "질점(point mass)"입니다. 질점의 상태는
+    <em>위치 <code>x</code>와 속도 <code>v</code></em> 두 벡터로 완전히 기술됩니다. 여기에 "얼마나 더 살아있나"라는
+    수명 스칼라를 더해, 이 <code>struct</code>는 <strong>질점 하나의 완전한 스냅샷</strong>이 됩니다.
+    이 한 칸이 버퍼 안에 10만 개 줄지어 있고, 스레드 10만 개가 각자 자기 칸을 갱신합니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    HLSL의 <code>float4</code>는 정확히 <strong>16바이트</strong>(4바이트 float × 4)입니다. 따라서 이 <code>Particle</code>은
+    <code>16 + 16 = 32바이트</code>입니다. 뒤에서 C++ <code>struct Particle { XMFLOAT4 pos; XMFLOAT4 vel; }</code>도
+    <strong>정확히 32바이트</strong>여야 하고, 이 값이 <code>StructureByteStride</code>로 GPU에 전달됩니다. 한쪽이라도
+    크기가 어긋나면 파티클이 <strong>엉뚱한 바이트를 자기 데이터로 읽어</strong> 화면이 폭발합니다. 그래서 처음부터
+    <code>float3</code>가 아니라 <code>float4</code>로 깔끔하게 16의 배수로 맞춘 것입니다.
+  </div>
+
+  <!-- 1.2 RWStructuredBuffer -->
+  <h3 style="margin-top:30px;">1.2 <code>RWStructuredBuffer&lt;Particle&gt; particles : register(u0)</code></h3>
+  <p>
+    <strong>무엇인가:</strong> 컴퓨트 셰이더가 <strong>읽고(Read) 쓰는(Write)</strong> 구조화 버퍼 선언입니다.
+    이 한 줄이 이 페이지의 핵심입니다. 시그니처를 조각내 보겠습니다.
+  </p>
+  <ul>
+    <li><code>RWStructuredBuffer</code> — 접두사 <strong><code>RW</code>는 Read-Write</strong>. 그냥 <code>StructuredBuffer</code>는
+      읽기 전용(SRV로 바인딩)이지만, <code>RW</code>는 <strong>쓰기까지 허용</strong>하며 반드시 <strong>UAV</strong>로 바인딩됩니다.
+      우리는 파티클을 읽어 갱신하고 다시 써야 하므로 <code>RW</code>가 필수입니다.</li>
+    <li><code>&lt;Particle&gt;</code> — 이 버퍼의 <strong>원소 타입</strong>. "이 버퍼는 <code>Particle</code>이 죽 늘어선 배열"이라고 알려줍니다.
+      덕분에 <code>particles[i]</code>가 곧바로 <code>Particle</code>로 취급되고, <code>.pos</code>·<code>.vel</code>에 이름으로 접근할 수 있습니다.</li>
+    <li><code>particles</code> — 셰이더 안에서 이 버퍼를 부르는 변수 이름. 배열처럼 <code>particles[i]</code>로 인덱싱합니다.</li>
+    <li><code>: register(u0)</code> — <strong>바인딩 슬롯</strong>. <code>u</code>는 UAV용 레지스터 공간이고 번호는 0번입니다.
+      C++ 쪽에서 <code>CSSetUnorderedAccessViews(0, ...)</code>의 <strong>첫 인자 0</strong>이 바로 이 <code>u0</code>과 짝을 이룹니다.</li>
+  </ul>
+  <p>
+    <strong>기하/구조 직관:</strong> 이 버퍼를 <strong>거대한 사물함(로커) 한 줄</strong>이라고 상상해 보세요.
+    사물함 한 칸이 <code>Particle</code> 하나(32바이트)이고, 칸이 10만 개 있습니다. 스레드 <code>i</code>번은
+    <strong>정확히 <code>i</code>번 칸만</strong> 열어 내용을 꺼내(<code>particles[i]</code> 읽기), 물리로 갱신하고,
+    다시 넣습니다(<code>particles[i] = p</code> 쓰기). 각 스레드가 서로 다른 칸을 건드리므로 충돌이 없고,
+    이것이 GPU가 10만 칸을 동시에 처리할 수 있는 이유입니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    "Unordered"라는 말은 <strong>쓰기 순서를 보장하지 않는다</strong>는 뜻입니다. 이 예제처럼 각 스레드가
+    <em>자기 인덱스만</em> 건드리면 문제가 없지만, 여러 스레드가 <strong>같은 칸에 동시에 쓰거나</strong>
+    이웃 칸을 읽으려 하면 경쟁 상태가 생깁니다. 그럴 땐 <code>InterlockedAdd</code> 같은
+    <strong>원자적 연산</strong>이나 <code>groupshared</code> 메모리 + 배리어가 필요합니다. 이 예제는 그런 의존이 없어 안전합니다.
+  </div>
+
+  <!-- 1.3 cbuffer -->
+  <h3 style="margin-top:30px;">1.3 <code>cbuffer SimCB : register(b0)</code> — 모든 스레드가 공유하는 상수</h3>
+  <p>
+    <strong>무엇인가:</strong> 이번 <code>Dispatch</code> 동안 <strong>모든 스레드가 똑같이 읽는</strong> 값들입니다.
+    파티클마다 다른 값(위치·속도)은 버퍼에, 모두에게 공통인 값(델타타임·중력·개수)은 이 상수 버퍼에 둡니다.
+    <code>register(b0)</code>의 <code>b</code>는 constant <strong>b</strong>uffer 슬롯, 0번입니다.
+  </p>
+  <ul>
+    <li><code>float uDt</code> — 이번 프레임의 <strong>델타타임(초)</strong>. 물리 적분의 시간 간격입니다. (4바이트)</li>
+    <li><code>uint uCount</code> — 전체 파티클 개수. <strong>범위 체크</strong>(<code>i &gt;= uCount</code>)에 씁니다. (4바이트)</li>
+    <li><code>float2 _pad0</code> — <strong>패딩</strong>. 실제 의미는 없고 정렬을 맞추기 위한 채움입니다. (8바이트)</li>
+    <li><code>float3 uGravity</code> — 중력 가속도 벡터, 예: <code>(0, -9.8, 0)</code>. (12바이트)</li>
+    <li><code>float _pad1</code> — 다시 패딩. (4바이트)</li>
+  </ul>
+  <p>
+    왜 이렇게 패딩 멤버를 끼워 넣을까요? cbuffer에는 <strong>"어떤 원소도 16바이트 경계(하나의 float4 슬롯)를
+    가로질러 걸치면 안 된다"</strong>는 정렬 규칙이 있기 때문입니다. 손으로 바이트를 세어 봅시다.
+  </p>
+  <table class="impl">
+    <thead><tr><th>멤버</th><th>크기</th><th>바이트 오프셋</th><th>속한 16바이트 슬롯</th></tr></thead>
+    <tbody>
+      <tr><td><code>uDt</code></td><td>4</td><td>0 ~ 3</td><td>슬롯0 [0,16)</td></tr>
+      <tr><td><code>uCount</code></td><td>4</td><td>4 ~ 7</td><td>슬롯0</td></tr>
+      <tr><td><code>_pad0</code></td><td>8</td><td>8 ~ 15</td><td>슬롯0 (여기서 첫 16바이트 정확히 채움)</td></tr>
+      <tr><td><code>uGravity</code></td><td>12</td><td>16 ~ 27</td><td>슬롯1 [16,32) — 경계 걸침 없음 ✓</td></tr>
+      <tr><td><code>_pad1</code></td><td>4</td><td>28 ~ 31</td><td>슬롯1 (두 번째 16바이트 채움)</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>_pad0</code>가 없다면 <code>uGravity</code>(float3)가 오프셋 8에서 시작해 8~19바이트를 차지하는데, 이는
+    슬롯0[0,16)과 슬롯1[16,32)의 <strong>경계 16을 가로질러</strong> 걸칩니다. 그러면 컴파일러가
+    <code>uGravity</code>를 강제로 오프셋 16으로 밀어내면서 <strong>C++ 구조체와 오프셋이 어긋나는</strong>
+    치명적 버그가 생깁니다. 그래서 명시적으로 <code>_pad0</code>를 넣어 오프셋을 우리 손으로 통제하는 것입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    cbuffer의 <code>float3</code>는 "12바이트짜리인데 16바이트처럼 정렬되는" 가장 흔한 실수의 원흉입니다.
+    가능하면 <strong>float4로 쓰거나</strong>, 부득이하게 float3를 쓸 땐 예제처럼 <strong>명시적 <code>_pad</code></strong>로
+    오프셋을 눈에 보이게 통제하세요. C++ 쪽 <code>struct SimCB</code>도 <em>바이트 단위로 똑같이</em> 패딩을 맞춰야 합니다.
+  </div>
+
+  <!-- 1.4 numthreads -->
+  <h3 style="margin-top:30px;">1.4 <code>[numthreads(64, 1, 1)]</code> — 그룹 하나의 스레드 배치</h3>
+  <p>
+    <strong>무엇인가:</strong> 이 컴퓨트 셰이더의 <strong>스레드 그룹(thread group) 하나</strong>가 몇 개의 스레드를
+    어떤 모양으로 담는지를 컴파일 타임에 고정하는 특성(attribute)입니다. <code>(64, 1, 1)</code>은
+    <strong>X방향 64개 × Y 1개 × Z 1개 = 그룹당 64 스레드</strong>, 즉 1차원 배치입니다.
+  </p>
+  <p>
+    <strong>왜 이 숫자인가:</strong> GPU는 스레드를 <strong>워프/웨이브</strong>라는 묶음(NVIDIA 32, AMD 32/64)으로
+    실제 실행합니다. 그룹 크기를 이 묶음 크기의 <strong>배수</strong>로 잡아야 낭비 없이 꽉 채워 돌릴 수 있어,
+    <strong>64</strong>는 두 벤더 모두에서 안전한 무난한 값입니다. 파티클처럼 1차원 배열이면 <code>(64,1,1)</code>,
+    이미지처럼 2차원 격자면 <code>(8,8,1)</code>=64처럼 모양만 바꿉니다.
+  </p>
+  <p>
+    <strong>디스패치와의 관계:</strong> C++에서 <code>Dispatch(groups, 1, 1)</code>로 그룹 개수를 지정하면,
+    전체 스레드 수 = <code>groups × 64</code>가 됩니다. 즉 "그룹당 몇 스레드"는 셰이더가(<code>numthreads</code>),
+    "그룹을 몇 개"는 CPU가(<code>Dispatch</code>) 정합니다. 둘을 곱한 값이 실제로 뜨는 스레드 총수입니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    그룹 크기가 워프 크기의 배수가 아니면(예: <code>numthreads(50,1,1)</code>) GPU는 64칸을 잡고 14칸을 놀립니다 —
+    약 22% 낭비입니다. 반대로 그룹이 너무 크면 <code>groupshared</code> 메모리·레지스터 압박으로 <strong>점유율</strong>이 떨어집니다.
+    보통 <strong>64~256</strong> 범위에서 실측으로 고릅니다. 확신이 없으면 64가 안전한 출발점입니다.
+  </div>
+
+  <!-- 1.5 CSMain signature -->
+  <h3 style="margin-top:30px;">1.5 <code>void CSMain(uint3 dtid : SV_DispatchThreadID)</code> — 내가 몇 번인지 알아내기</h3>
+  <p>
+    컴퓨트 셰이더는 반환값이 없습니다(<code>void</code>). 화면에 색을 내보내는 대신 <strong>버퍼에 직접 쓰기</strong>가
+    최종 결과이기 때문입니다. 진짜 핵심은 <strong>인자</strong>에 있습니다.
+  </p>
+  <ul>
+    <li><code>uint3 dtid</code> — 부호 없는 정수 3개짜리 벡터. 이 스레드의 <strong>3차원 격자 좌표</strong>가 들어옵니다.</li>
+    <li><code>: SV_DispatchThreadID</code> — <strong>시스템 값 시맨틱</strong>. GPU가 이 인자에 "너는 전체 격자에서
+      몇 번째 스레드다"라는 <strong>전역 좌표</strong>를 자동으로 채워 줍니다. SV(System Value)는 우리가 계산하는 게 아니라
+      하드웨어가 주는 값입니다.</li>
+  </ul>
+  <p>
+    <strong>SV_DispatchThreadID의 정확한 정의:</strong>
+    <code>SV_DispatchThreadID = SV_GroupID × numthreads + SV_GroupThreadID</code> 입니다. 즉
+    "내 그룹의 번호 × 그룹 크기 + 그룹 안에서 내 번호". 손계산으로 확인해 봅시다. 그룹 3번,
+    그룹 안 5번 스레드라면 X좌표는 <code>3 × 64 + 5 = 197</code>. 이 스레드는 전역에서 197번이므로
+    <strong>197번 파티클</strong>을 담당합니다. 이렇게 각 스레드가 겹치지 않는 고유 번호를 얻습니다.
+  </p>
+
+  <table class="impl">
+    <thead><tr><th>시맨틱</th><th>의미</th><th>이 예제에서</th></tr></thead>
+    <tbody>
+      <tr><td><code>SV_DispatchThreadID</code></td><td>전체 격자에서의 전역 스레드 좌표</td><td>파티클 인덱스 <code>i</code>로 사용</td></tr>
+      <tr><td><code>SV_GroupID</code></td><td>몇 번째 그룹인가</td><td>이 예제에선 미사용</td></tr>
+      <tr><td><code>SV_GroupThreadID</code></td><td>그룹 안에서 몇 번째인가 (0~63)</td><td>groupshared 쓸 때 필요</td></tr>
+      <tr><td><code>SV_GroupIndex</code></td><td>그룹 내 번호를 1차원으로 평탄화</td><td>이 예제에선 미사용</td></tr>
+    </tbody>
+  </table>
+
+  <!-- 1.6 body -->
+  <h3 style="margin-top:30px;">1.6 본문 — 물리 적분 한 줄씩</h3>
+
+  <div class="code">
+    <div class="code-head"><span>CSMain 본문</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">    uint i = dtid.x;                           // 전역 스레드 인덱스
+    if (i &gt;= uCount) return;                    // 범위 밖 스레드는 종료
+
+    Particle p = particles[i];
+    p.vel.xyz += uGravity * uDt;               // 중력 적분
+    p.pos.xyz += p.vel.xyz * uDt;              // 위치 적분
+    p.pos.w   -= uDt;                          // 수명 감소
+
+    if (p.pos.y &lt; 0.0) { p.pos.y = 0.0; p.vel.y *= -0.6; }
+    if (p.pos.w &lt;= 0.0) { p.pos.xyz = float3(0,0,0); p.pos.w = 3.0; }
+
+    particles[i] = p;                          // 다시 써넣는다</code></pre>
+  </div>
+
+  <h4 style="margin-top:22px;"><code>uint i = dtid.x;</code></h4>
+  <p>
+    1차원 배열이므로 <code>dtid</code>의 <strong>x 성분만</strong> 의미가 있습니다(y·z는 <code>numthreads</code>가
+    1이라 항상 0). 이 <code>i</code>가 바로 "내가 담당할 파티클 번호"입니다. 사물함 비유로는 "내가 열 칸 번호"죠.
+  </p>
+
+  <h4 style="margin-top:22px;"><code>if (i &gt;= uCount) return;</code> — 반드시 있어야 하는 안전장치</h4>
+  <p>
+    <strong>왜 필요한가:</strong> 그룹은 64개 단위라 <code>Dispatch</code>가 띄우는 전체 스레드 수는
+    <strong>파티클 수보다 클 수 있습니다.</strong> 예를 들어 파티클 100,000개면 그룹은
+    <code>ceil(100000 / 64) = 1563</code>개, 전체 스레드는 <code>1563 × 64 = 100,032</code>개입니다.
+    남는 <strong>32개 스레드</strong>(인덱스 100,000~100,031)는 버퍼 밖입니다.
+  </p>
+  <p>
+    이 방어선이 없으면 그 32개 스레드가 존재하지 않는 <code>particles[100000]</code>을 읽고 써서
+    <strong>버퍼 오버런</strong>을 일으킵니다. <code>i &gt;= uCount</code>일 때 즉시 <code>return</code>해
+    범위 밖 스레드는 아무것도 하지 않고 조용히 끝냅니다. <strong>컴퓨트 셰이더의 거의 모든 커널에
+    등장하는 관용구</strong>이니 반드시 습관화하세요.
+  </p>
+
+  <h4 style="margin-top:22px;"><code>Particle p = particles[i];</code></h4>
+  <p>
+    UAV 버퍼에서 <strong>내 칸을 로컬 변수 <code>p</code>로 복사</strong>합니다. 이후 계산은 레지스터에 있는
+    <code>p</code>에 대해서만 하고, 맨 마지막에 한 번만 되씁니다. 버퍼(비교적 느린 메모리)를 매번 건드리는 대신
+    <strong>읽기 1번 → 계산 → 쓰기 1번</strong>으로 메모리 접근을 최소화하는 좋은 습관입니다.
+  </p>
+
+  <h4 style="margin-top:22px;"><code>p.vel.xyz += uGravity * uDt;</code> — 오일러 적분 ①</h4>
+  <p>
+    <strong>수학:</strong> 뉴턴 역학에서 속도의 변화는 가속도 × 시간입니다: <code>Δv = a · Δt</code>.
+    중력만 작용한다면 <code>a = g = (0, -9.8, 0)</code>. 따라서 <code>v_new = v_old + g · Δt</code>.
+  </p>
+  <p>
+    <strong>기하 직관:</strong> 매 프레임 속도 화살표가 아래로 <code>9.8 · Δt</code>만큼 자라납니다. 프레임이 반복되면
+    속도가 점점 아래로 커지며 낙하가 가속됩니다. <strong>코드 매핑:</strong> <code>.xyz</code> 스위즐로 위치의 x·y·z
+    세 성분에 동시에 적용하고(<code>w</code>=수명은 건드리지 않음), <code>uGravity * uDt</code>는 벡터×스칼라라
+    각 성분이 <code>uDt</code>배 됩니다. y성분만 예로 들면 <code>uDt=0.016</code>일 때
+    <code>vel.y += (-9.8) × 0.016 = -0.157</code>씩 매 프레임 감소합니다.
+  </p>
+
+  <h4 style="margin-top:22px;"><code>p.pos.xyz += p.vel.xyz * uDt;</code> — 오일러 적분 ②</h4>
+  <p>
+    <strong>수학:</strong> 위치의 변화는 속도 × 시간입니다: <code>Δx = v · Δt</code>, 즉
+    <code>x_new = x_old + v · Δt</code>. 방금 갱신한 <strong>새 속도</strong>로 위치를 옮깁니다
+    (속도를 먼저 갱신하고 위치를 나중에 갱신하는 이 순서를 <strong>세미-임플리싯 오일러</strong>라 하며,
+    단순 오일러보다 진동에 안정적입니다).
+  </p>
+  <p>
+    <strong>직관 + 매핑:</strong> "지금 속도로 <code>Δt</code>초 동안 직선으로 움직였다"고 근사하는 것입니다.
+    <code>Δt</code>가 작을수록 실제 곡선 궤적에 가까워집니다. 역시 <code>.xyz</code>로 세 성분에 적용하고
+    <code>pos.w</code>(수명)는 건드리지 않습니다.
+  </p>
+
+  <h4 style="margin-top:22px;"><code>p.pos.w -= uDt;</code> — 수명 감소</h4>
+  <p>
+    <code>pos.w</code>에 실어 둔 수명(초)을 매 프레임 <code>Δt</code>초씩 깎습니다. 3.0초로 시작했다면
+    약 3초 뒤 0 이하가 되어 아래의 리스폰 조건에 걸립니다. 위치의 남는 <code>w</code> 성분을 이렇게
+    <strong>공짜 저장 공간</strong>으로 재활용한 것입니다.
+  </p>
+
+  <h4 style="margin-top:22px;"><code>if (p.pos.y &lt; 0.0) { p.pos.y = 0.0; p.vel.y *= -0.6; }</code> — 바닥 튕김</h4>
+  <p>
+    <strong>수학/물리:</strong> 파티클이 바닥(<code>y=0</code>) 아래로 내려가면, 위치를 바닥으로 <strong>고정</strong>(<code>pos.y = 0</code>)하고
+    수직 속도를 <strong>반전 + 감쇠</strong>합니다(<code>vel.y *= -0.6</code>). 부호를 뒤집으면(<code>-</code>) "튕겨 올라감",
+    0.6을 곱하면 "40% 에너지를 잃음"입니다. 반발계수(coefficient of restitution) 0.6에 해당합니다.
+  </p>
+  <p>
+    <strong>직관:</strong> 공이 바닥에 부딪혀 되튀되, 매번 조금씩 낮게 튀어 결국 멈추는 현실적인 감쇠 바운스입니다.
+    <code>*= -1.0</code>이면 영원히 같은 높이로 튀고(에너지 보존), <code>*= 0</code>이면 그 자리에 붙습니다.
+  </p>
+
+  <h4 style="margin-top:22px;"><code>if (p.pos.w &lt;= 0.0) { p.pos.xyz = float3(0,0,0); p.pos.w = 3.0; }</code> — 리스폰</h4>
+  <p>
+    수명이 다하면 파티클을 <strong>원점으로 되돌리고 수명을 3.0초로 리셋</strong>합니다. 죽은 파티클을 재활용해
+    분수처럼 끊임없이 뿜어져 나오는 효과를 만듭니다. 참고로 이 예제는 속도를 리셋하지 않아 마지막 속도를 이어받는데,
+    실무에선 보통 초기 속도도 새로 난수로 부여합니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>if</code> 분기는 <strong>분기 발산(divergence)</strong>을 부를 수 있습니다. 같은 워프의 32개 스레드 중
+    일부만 튕김 조건에 걸리면, GPU는 양쪽 경로를 모두 실행하고 마스크로 결과를 고릅니다. 이 예제는 분기 몸통이
+    짧아 비용이 작지만, 무거운 분기라면 <code>step</code>·<code>lerp</code> 같은 <strong>분기 없는(branchless)</strong>
+    수식으로 바꾸는 것이 GPU 친화적입니다.
+  </div>
+
+  <h4 style="margin-top:22px;"><code>particles[i] = p;</code> — 되쓰기</h4>
+  <p>
+    로컬에서 갱신을 끝낸 <code>p</code>를 <strong>내 칸에 통째로 저장</strong>합니다. 이 쓰기가 UAV를 통해
+    실제 버퍼 메모리에 반영되고, 다음 프레임의 시뮬레이션 또는 렌더링이 이 갱신된 값을 읽습니다.
+    읽기는 함수 시작에 1번, 쓰기는 끝에 1번 — 앞서 말한 메모리 접근 최소화가 여기서 완성됩니다.
+  </p>
+
+  <!-- =========================================================
+       2. C++ / D3D11 구동 코드
+       ========================================================= -->
+  <h2 style="margin-top:44px;">2. C++ / Direct3D 11 — 버퍼·UAV·디스패치</h2>
+  <p>
+    이제 위 셰이더를 실제로 돌리는 CPU 쪽 코드입니다. 크게 <strong>(1) 버퍼 생성 → (2) UAV 생성 →
+    (3) 매 프레임 상수 업로드·바인딩·디스패치 → (4) 바인딩 해제</strong> 순서입니다. 한 덩어리로 본 뒤 나눠 해부합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>src/particles.cpp (요지)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+#include &lt;vector&gt;
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+struct Particle { XMFLOAT4 pos; XMFLOAT4 vel; };
+
+const UINT COUNT = 100000;
+const UINT LOCAL_SIZE = 64;
+
+// device, context 는 D3D11 초기화에서 만든 것.
+ComPtr&lt;ID3D11Device&gt;        device;   /* ... */
+ComPtr&lt;ID3D11DeviceContext&gt; context;  /* ... */
+
+// ── 초기화 ──
+std::vector&lt;Particle&gt; init(COUNT);
+for (auto&amp; p : init) {
+    p.pos = XMFLOAT4(0.0f, 0.0f, 0.0f, 3.0f);             // 위치, 수명
+    p.vel = XMFLOAT4((rand()%200-100)/50.0f, 5.0f, 0.0f, 0.0f);
+}
+
+// 구조화 버퍼: 셰이더 접근용(UAV) + CPU에서 개별 요소 스트라이드 지정
+D3D11_BUFFER_DESC bd{};
+bd.ByteWidth           = UINT(init.size() * sizeof(Particle));
+bd.Usage               = D3D11_USAGE_DEFAULT;
+bd.BindFlags           = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+bd.MiscFlags           = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+bd.StructureByteStride = sizeof(Particle);
+D3D11_SUBRESOURCE_DATA sd{ init.data(), 0, 0 };
+ComPtr&lt;ID3D11Buffer&gt; ssbo;
+device-&gt;CreateBuffer(&amp;bd, &amp;sd, &amp;ssbo);
+
+// 이 버퍼에 대한 UAV (셰이더의 register(u0) 에 연결)
+D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+ud.Format              = DXGI_FORMAT_UNKNOWN;   // 구조화 버퍼는 UNKNOWN
+ud.ViewDimension       = D3D11_UAV_DIMENSION_BUFFER;
+ud.Buffer.NumElements  = COUNT;
+ComPtr&lt;ID3D11UnorderedAccessView&gt; ssboUAV;
+device-&gt;CreateUnorderedAccessView(ssbo.Get(), &amp;ud, &amp;ssboUAV);
+
+// computeCS 는 compileShader(..., "CSMain", "cs_5_0") + CreateComputeShader 로 만든 것
+ComPtr&lt;ID3D11ComputeShader&gt; computeCS;  /* ... */
+ComPtr&lt;ID3D11Buffer&gt; simCB;             /* createConstantBuffer&lt;SimCB&gt;(device.Get()) */
+
+// ── 매 프레임: 시뮬레이션 한 스텝 ──
+struct SimCB { float dt; UINT count; float pad0[2]; XMFLOAT3 gravity; float pad1; };
+SimCB s{ dt, COUNT, {}, XMFLOAT3(0.0f, -9.8f, 0.0f), 0 };
+updateConstantBuffer(context.Get(), simCB.Get(), s);   // 앞서 만든 Map/Unmap 헬퍼
+
+context-&gt;CSSetShader(computeCS.Get(), nullptr, 0);
+context-&gt;CSSetConstantBuffers(0, 1, simCB.GetAddressOf());
+UINT initCounts = 0;
+context-&gt;CSSetUnorderedAccessViews(0, 1, ssboUAV.GetAddressOf(), &amp;initCounts);
+
+// 필요한 스레드 그룹 수 = ceil(COUNT / LOCAL_SIZE)
+UINT groups = (COUNT + LOCAL_SIZE - 1) / LOCAL_SIZE;
+context-&gt;Dispatch(groups, 1, 1);
+
+// 이후 이 버퍼를 렌더링/읽기에 쓰려면 UAV 바인딩을 반드시 해제한다.
+// (같은 리소스가 UAV로 묶인 채 다른 스테이지에 바인딩되면 D3D가 경고하고 무시함)
+ID3D11UnorderedAccessView* nullUAV = nullptr;
+context-&gt;CSSetUnorderedAccessViews(0, 1, &amp;nullUAV, &amp;initCounts);
+
+// 이후: 같은 ssbo 에 SRV/VB 뷰를 만들어 점으로 렌더링하거나,
+// STAGING 버퍼로 CopyResource 후 Map 으로 CPU에서 읽어올 수도 있다.</code></pre>
+  </div>
+
+  <!-- 2.1 includes / struct -->
+  <h3 style="margin-top:30px;">2.1 헤더·타입·상수</h3>
+  <ul>
+    <li><code>&lt;d3d11.h&gt;</code> — Direct3D 11 API 전체(디바이스·버퍼·뷰·컨텍스트).</li>
+    <li><code>&lt;DirectXMath.h&gt;</code> — <code>XMFLOAT4</code>·<code>XMFLOAT3</code> 등 SIMD 친화 수학 타입.</li>
+    <li><code>&lt;wrl/client.h&gt;</code> — <code>ComPtr</code>. COM 객체의 참조 카운트를 자동 관리하는 스마트 포인터라
+      <code>Release()</code>를 손으로 부르지 않아도 됩니다.</li>
+  </ul>
+  <p>
+    <code>struct Particle { XMFLOAT4 pos; XMFLOAT4 vel; };</code> — <strong>HLSL의 <code>struct Particle</code>과
+    바이트 단위로 정확히 일치</strong>합니다. <code>XMFLOAT4</code>는 16바이트이므로 이 구조체도 32바이트로,
+    HLSL과 완벽히 맞습니다. 이것이 앞서 강조한 "양쪽 레이아웃 일치"의 실물입니다.
+  </p>
+  <p>
+    <code>COUNT = 100000</code>은 파티클 수, <code>LOCAL_SIZE = 64</code>는 셰이더의 <code>numthreads(64,...)</code>와
+    <strong>반드시 같은 값</strong>이어야 합니다(그룹 수 계산에 쓰이므로). 셰이더의 64와 C++의 64는 <strong>손으로 맞추는
+    약속</strong>이며, 어긋나면 일부 파티클이 갱신되지 않거나 초과 실행됩니다.
+  </p>
+
+  <!-- 2.2 init -->
+  <h3 style="margin-top:30px;">2.2 초기 파티클 생성</h3>
+  <p>
+    <code>std::vector&lt;Particle&gt; init(COUNT)</code>로 10만 개짜리 배열을 CPU에서 만들고 초기값을 채웁니다.
+  </p>
+  <ul>
+    <li><code>p.pos = XMFLOAT4(0,0,0, 3.0f)</code> — 모두 <strong>원점</strong>에서 시작, 수명 <strong>3초</strong>(<code>w=3.0</code>).</li>
+    <li><code>p.vel = XMFLOAT4((rand()%200-100)/50.0f, 5.0f, 0, 0)</code> — x속도는
+      <code>(rand()%200 - 100)/50</code>로 <strong>-2.0 ~ +1.98</strong> 범위의 좌우 흩뿌림,
+      y속도는 <strong>+5.0</strong>으로 위로 솟구침, z·w는 0. 원점에서 부채꼴로 위로 뿜어지는 분수 초기 조건입니다.</li>
+  </ul>
+  <p>
+    <code>for (auto&amp; p : init)</code>의 <code>auto&amp;</code>는 <strong>참조</strong>라 각 원소를 복사 없이 직접 수정합니다.
+    <code>&amp;</code>를 빼면 사본을 수정하게 되어 원본이 안 바뀌는 흔한 함정이 됩니다.
+  </p>
+
+  <!-- 2.3 CreateBuffer -->
+  <h3 style="margin-top:30px;">2.3 <code>D3D11_BUFFER_DESC</code> — 구조화 버퍼 만들기</h3>
+  <p>
+    GPU 메모리에 파티클 버퍼를 올립니다. <code>D3D11_BUFFER_DESC bd{}</code>의 <code>{}</code>는
+    <strong>값 초기화</strong>로 모든 필드를 0으로 밀어 둡니다(쓰레기값 방지). 필드별로 봅시다.
+  </p>
+  <table class="impl">
+    <thead><tr><th>필드</th><th>값</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td><code>ByteWidth</code></td><td><code>init.size() * sizeof(Particle)</code></td><td>버퍼 총 크기 = 100000 × 32 = 3,200,000바이트(약 3MB)</td></tr>
+      <tr><td><code>Usage</code></td><td><code>D3D11_USAGE_DEFAULT</code></td><td>GPU가 읽고 쓰는 기본 용도. CPU 직접 접근은 안 함</td></tr>
+      <tr><td><code>BindFlags</code></td><td><code>UNORDERED_ACCESS | SHADER_RESOURCE</code></td><td>UAV(컴퓨트 쓰기) <strong>겸</strong> SRV(렌더 읽기)로 쓸 수 있게</td></tr>
+      <tr><td><code>MiscFlags</code></td><td><code>BUFFER_STRUCTURED</code></td><td>"구조화 버퍼"임을 표시 — 원소 타입이 있는 배열</td></tr>
+      <tr><td><code>StructureByteStride</code></td><td><code>sizeof(Particle)</code> = 32</td><td>원소 하나의 바이트 크기. HLSL <code>Particle</code>과 일치해야 함</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>BindFlags</code>에 <code>|</code>(비트 OR)로 두 플래그를 합친 이유는, 같은 버퍼를 <strong>컴퓨트에서는 UAV로 쓰고</strong>
+    나중에 <strong>렌더에서는 SRV(또는 정점 버퍼)로 읽기</strong> 위해서입니다. 한 리소스에 여러 용도를 미리 열어 둔 것이죠.
+  </p>
+  <p>
+    <code>D3D11_SUBRESOURCE_DATA sd{ init.data(), 0, 0 }</code>는 <strong>초기 데이터 포인터</strong>입니다.
+    첫 인자가 CPU의 파티클 배열 시작 주소이고, 이 버퍼를 만드는 순간 GPU로 복사됩니다. 나머지 두 0은
+    버퍼에는 무의미한 행/깊이 피치입니다.
+  </p>
+  <p>
+    <code>device-&gt;CreateBuffer(&amp;bd, &amp;sd, &amp;ssbo)</code> — 서술자(<code>&amp;bd</code>)와 초기 데이터(<code>&amp;sd</code>)로
+    실제 GPU 버퍼를 만들어 <code>ssbo</code>(<code>ComPtr&lt;ID3D11Buffer&gt;</code>)에 받습니다. <code>&amp;ssbo</code>가 아니라
+    <code>ComPtr</code>의 주소 연산자가 내부 포인터의 주소를 넘겨줍니다.
+  </p>
+
+  <!-- 2.4 UAV -->
+  <h3 style="margin-top:30px;">2.4 <code>CreateUnorderedAccessView</code> — 셰이더가 볼 창(view)</h3>
+  <p>
+    버퍼(원본 데이터)와 <strong>UAV(그 데이터를 어떻게 볼지 알려주는 뷰)</strong>는 별개입니다. 셰이더는 버퍼를
+    직접 만지지 않고 <strong>뷰를 통해서만</strong> 접근합니다. UAV는 "쓰기 가능한 뷰"입니다.
+  </p>
+  <ul>
+    <li><code>ud.Format = DXGI_FORMAT_UNKNOWN</code> — 구조화 버퍼는 원소가 우리 <code>struct</code>라 픽셀 포맷이 없습니다.
+      그래서 반드시 <strong>UNKNOWN</strong>으로 두어 "포맷 없는 구조화 버퍼"임을 알립니다.</li>
+    <li><code>ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER</code> — 이 뷰가 <strong>버퍼</strong>(텍스처가 아니라)를 본다고 지정.</li>
+    <li><code>ud.Buffer.NumElements = COUNT</code> — 뷰가 노출할 원소 개수(100000). "몇 번 칸까지 접근 가능한가"입니다.</li>
+  </ul>
+  <p>
+    <code>device-&gt;CreateUnorderedAccessView(ssbo.Get(), &amp;ud, &amp;ssboUAV)</code> — 첫 인자 <code>ssbo.Get()</code>은
+    뷰가 가리킬 실제 버퍼(<code>ComPtr</code>에서 raw 포인터를 꺼내는 <code>.Get()</code>), 둘째는 서술자, 셋째는
+    결과 UAV를 받을 <code>ssboUAV</code>입니다. 이 <code>ssboUAV</code>가 셰이더의 <code>register(u0)</code>에 꽂힙니다.
+  </p>
+
+  <!-- 2.5 shader/cbuffer objects -->
+  <h3 style="margin-top:30px;">2.5 컴퓨트 셰이더·상수 버퍼 객체</h3>
+  <p>
+    <code>computeCS</code>는 HLSL을 <code>compileShader(..., "CSMain", "cs_5_0")</code>로 컴파일한 바이트코드를
+    <code>CreateComputeShader</code>로 감싼 것입니다. 진입점 이름 <strong><code>"CSMain"</code>은 셰이더의 함수명과
+    정확히 일치</strong>해야 하고, 프로파일 <strong><code>"cs_5_0"</code></strong>이 "컴퓨트 셰이더 5.0"을 뜻합니다
+    (정점은 <code>vs_5_0</code>, 픽셀은 <code>ps_5_0</code>). <code>simCB</code>는 <code>SimCB</code> 크기만큼의 상수 버퍼입니다.
+  </p>
+
+  <!-- 2.6 per-frame -->
+  <h3 style="margin-top:30px;">2.6 매 프레임: 상수 채우기</h3>
+  <p>
+    <code>struct SimCB { float dt; UINT count; float pad0[2]; XMFLOAT3 gravity; float pad1; };</code> —
+    이 C++ 구조체는 HLSL <code>cbuffer SimCB</code>와 <strong>바이트 단위로 정확히 대응</strong>합니다. 하나씩 짝지으면:
+  </p>
+  <table class="impl">
+    <thead><tr><th>C++</th><th>HLSL</th><th>바이트</th></tr></thead>
+    <tbody>
+      <tr><td><code>float dt</code></td><td><code>float uDt</code></td><td>4</td></tr>
+      <tr><td><code>UINT count</code></td><td><code>uint uCount</code></td><td>4</td></tr>
+      <tr><td><code>float pad0[2]</code></td><td><code>float2 _pad0</code></td><td>8</td></tr>
+      <tr><td><code>XMFLOAT3 gravity</code></td><td><code>float3 uGravity</code></td><td>12</td></tr>
+      <tr><td><code>float pad1</code></td><td><code>float _pad1</code></td><td>4</td></tr>
+    </tbody>
+  </table>
+  <p>
+    합계 <strong>32바이트</strong>. <code>pad0[2]</code>·<code>pad1</code>이 있어야 <code>gravity</code>가 오프셋 16에
+    딱 떨어져 HLSL의 정렬과 맞아떨어집니다. 이 패딩을 빼면 <code>gravity</code>가 8바이트 앞으로 밀려
+    셰이더가 <strong>엉뚱한 중력값</strong>을 읽습니다.
+  </p>
+  <p>
+    <code>SimCB s{ dt, COUNT, {}, XMFLOAT3(0, -9.8f, 0), 0 }</code>로 값을 채웁니다. 세 번째 <code>{}</code>가
+    <code>pad0[2]</code>를 0으로 채우는 부분입니다. <code>updateConstantBuffer(...)</code>는 앞 절에서 만든
+    <code>Map</code>/<code>Unmap</code> 헬퍼로, 이 32바이트를 GPU의 <code>simCB</code>로 올립니다.
+  </p>
+
+  <!-- 2.7 bind + dispatch -->
+  <h3 style="margin-top:30px;">2.7 바인딩과 <code>Dispatch</code></h3>
+  <ul>
+    <li><code>CSSetShader(computeCS.Get(), nullptr, 0)</code> — <strong>컴퓨트 스테이지(CS)에 셰이더를 장착</strong>.
+      가운데 두 인자는 클래스 인스턴스 관련이라 여기선 사용하지 않아 <code>nullptr, 0</code>.</li>
+    <li><code>CSSetConstantBuffers(0, 1, simCB.GetAddressOf())</code> — 상수 버퍼를 <strong><code>b0</code> 슬롯</strong>에 1개 바인딩.
+      첫 인자 0이 셰이더의 <code>register(b0)</code>와 짝을 이룹니다. <code>GetAddressOf()</code>는 포인터의 주소(포인터 배열의 시작)를 넘깁니다.</li>
+    <li><code>CSSetUnorderedAccessViews(0, 1, ssboUAV.GetAddressOf(), &amp;initCounts)</code> —
+      UAV를 <strong><code>u0</code> 슬롯</strong>에 1개 바인딩. 첫 0이 <code>register(u0)</code>과 짝. 마지막
+      <code>&amp;initCounts</code>(=0)는 append/consume 버퍼의 초기 카운터 값으로, 일반 구조화 버퍼엔 영향 없습니다.</li>
+  </ul>
+  <p>
+    <strong><code>UINT groups = (COUNT + LOCAL_SIZE - 1) / LOCAL_SIZE;</code></strong> — 필요한 그룹 수를
+    <strong>올림 나눗셈</strong>으로 계산합니다. 정수 나눗셈은 내림이라, 그냥 <code>COUNT/LOCAL_SIZE</code>면
+    <code>100000/64 = 1562</code>로 마지막 <strong>32개 파티클을 빠뜨립니다</strong>. <code>+ LOCAL_SIZE - 1</code>을
+    더한 뒤 나누면 <code>(100000 + 63)/64 = 100063/64 = 1563</code>이 되어 모두 덮습니다. 이것이
+    <code>ceil(a/b)</code>를 정수만으로 계산하는 관용구입니다.
+  </p>
+  <p>
+    <strong><code>context-&gt;Dispatch(groups, 1, 1)</code></strong> — 드디어 실행. X방향 1563그룹, Y·Z 1그룹씩 띄웁니다.
+    총 스레드 = <code>1563 × 64 = 100,032</code>개. 이 중 100,000개가 실제 파티클을 처리하고, 남는 32개는
+    셰이더의 <code>if (i &gt;= uCount) return;</code>으로 즉시 종료됩니다. <strong>셰이더의 <code>numthreads</code>와
+    여기 <code>Dispatch</code>의 곱</strong>이 전체 격자 크기라는 점을 다시 확인하세요.
+  </p>
+
+  <!-- 2.8 unbind -->
+  <h3 style="margin-top:30px;">2.8 UAV 바인딩 해제 — 잊으면 안 되는 마무리</h3>
+  <p>
+    <code>ID3D11UnorderedAccessView* nullUAV = nullptr;</code>로 <strong>널 포인터</strong>를 만들고,
+    <code>CSSetUnorderedAccessViews(0, 1, &amp;nullUAV, &amp;initCounts)</code>로 <code>u0</code> 슬롯을 <strong>비웁니다.</strong>
+    방금 파티클을 갱신한 그 버퍼를, 다음 단계에서 <strong>정점 버퍼나 SRV로 읽어</strong> 화면에 점으로 그리려면
+    UAV 바인딩이 남아 있으면 안 되기 때문입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    D3D11에는 OpenGL의 <code>glMemoryBarrier</code> 같은 <strong>명시적 배리어를 직접 호출하지 않습니다.</strong>
+    대신 규칙이 단순합니다: <strong>같은 리소스가 UAV로 묶인 채 다른 스테이지(정점 버퍼·SRV)에 바인딩되면 안 됩니다.</strong>
+    그래서 <code>Dispatch</code> 뒤 반드시 <strong>UAV를 nullptr로 해제</strong>한 다음 그 리소스를 읽기 뷰로 다시 바인딩하세요.
+    드라이버가 스테이지 간 의존성을 <strong>자동으로 직렬화</strong>해 줍니다(컴퓨트 쓰기가 끝난 뒤에 읽기가 시작되도록).
+    해제를 빠뜨리면 D3D 디버그 레이어가 경고를 뿜고 해당 바인딩을 <strong>무시</strong>해, 화면이 비거나 이전 프레임이 그대로 보입니다.
+  </div>
+
+  <p>
+    마지막 주석대로, 이후에는 (a) 같은 <code>ssbo</code>에 <strong>SRV/정점 버퍼 뷰</strong>를 만들어 점으로 렌더링하거나,
+    (b) <code>D3D11_USAGE_STAGING</code> 버퍼로 <code>CopyResource</code>한 뒤 <code>Map</code>으로 CPU에서 결과를
+    읽어올 수 있습니다. STAGING 경로는 GPU→CPU 복사라 느리므로, 시각화가 목적이면 (a)가 정석입니다.
+  </p>
+
+  <!-- =========================================================
+       3. D3D11 API 대응 요약
+       ========================================================= -->
+  <h2 style="margin-top:44px;">3. 흐름 · D3D11 API 대응 한눈에</h2>
+  <p>
+    지금까지의 단계와 그것을 담당하는 D3D11 API를 1:1로 정리합니다. 컴퓨트 파이프라인은 이 표만
+    외워도 절반은 끝납니다.
+  </p>
+  <table class="impl">
+    <thead><tr><th>단계</th><th>D3D11 API / HLSL</th><th>역할</th></tr></thead>
+    <tbody>
+      <tr><td>버퍼 생성</td><td><code>ID3D11Device::CreateBuffer</code> + <code>MISC_BUFFER_STRUCTURED</code></td><td>GPU에 파티클 배열 할당·업로드</td></tr>
+      <tr><td>쓰기 뷰 생성</td><td><code>CreateUnorderedAccessView</code></td><td>셰이더 <code>register(u0)</code>에 연결할 UAV</td></tr>
+      <tr><td>셰이더 컴파일</td><td><code>D3DCompile(..., "cs_5_0")</code> + <code>CreateComputeShader</code></td><td>HLSL → GPU 바이트코드 → 셰이더 객체</td></tr>
+      <tr><td>상수 업로드</td><td><code>Map</code>/<code>Unmap</code> (헬퍼)</td><td>dt·중력·개수를 <code>cbuffer b0</code>로</td></tr>
+      <tr><td>바인딩</td><td><code>CSSetShader</code> / <code>CSSetConstantBuffers</code> / <code>CSSetUnorderedAccessViews</code></td><td>셰이더·상수·UAV를 CS 스테이지에 장착</td></tr>
+      <tr><td>실행</td><td><code>Dispatch(groups,1,1)</code> ↔ <code>[numthreads(64,1,1)]</code></td><td>그룹 수 × 그룹 크기 = 전체 스레드</td></tr>
+      <tr><td>동기화</td><td>UAV를 <code>nullptr</code>로 재바인딩</td><td>읽기 전 의존성 해제(암묵적 배리어)</td></tr>
+      <tr><td>결과 사용</td><td>SRV/VB로 렌더 <em>또는</em> STAGING + <code>CopyResource</code> + <code>Map</code></td><td>화면 표시 또는 CPU 회수</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    HLSL의 <strong>구조화 버퍼는 C++ 구조체와 바이트 단위로 정확히 일치</strong>해야 합니다. 특히
+    cbuffer의 <code>float3</code>은 16바이트 경계에서 정렬되므로, 예제처럼 <code>float4</code>를 쓰거나
+    명시적 <code>_pad</code> 멤버로 채워 C++ <code>struct</code>와 <code>StructureByteStride</code>가 어긋나는 함정을 피하세요.
+    이 한 가지 규약이 컴퓨트 셰이더 디버깅의 대부분을 차지합니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./04-fragshader.html">← Pixel Shader</a>
+    <a href="./04-shaderlang.html">HLSL 요점 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

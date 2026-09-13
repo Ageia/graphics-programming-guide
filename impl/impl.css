@@ -1,5 +1,5 @@
 /* ============================================================
-   impl.css — 구현 가이드(C++/OpenGL) 전용 스타일
+   impl.css — 구현 가이드(C++/DirectX 11) 전용 스타일
    ../css/style.css 위에 얹어 코드 중심 레이아웃을 보강한다.
    ============================================================ */
 
@@ -97,7 +97,7 @@
 .tok-key  { color: #ff7b72; font-weight: 600; }      /* 키워드 */
 .tok-type { color: #56d4dd; }                        /* 타입 */
 .tok-fn   { color: #6ea8fe; }                        /* 함수 호출 */
-.tok-bi   { color: #ffb86c; }                        /* 내장/GL 함수 */
+.tok-bi   { color: #ffb86c; }                        /* 내장/D3D·DXGI 함수 */
 
 /* 단계 번호 리스트 */
 ol.steps { counter-reset: step; list-style: none; padding-left: 0; }
@@ -183,6 +183,28 @@ table.impl th, table.impl td {
 }
 table.impl th { color: var(--accent); }
 table.impl code { font-size: 0.86em; }
+
+/* 세부 페이지 하단 이전/다음 네비 */
+.page-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 40px 0 8px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+}
+.page-nav a {
+  color: var(--accent2);
+  text-decoration: none;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.page-nav a:hover { border-color: var(--accent2); background: rgba(126, 231, 135, 0.08); }
+.page-nav a:only-child { margin-left: auto; }
 
 /* 목차(오른쪽 고정) */
 .page-toc {

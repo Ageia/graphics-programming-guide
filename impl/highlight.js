@@ -1,6 +1,6 @@
 /* ============================================================
-   highlight.js — 경량 C++/GLSL 구문 강조기 (외부 의존성 없음)
-   <pre><code class="language-cpp"> / language-glsl / language-bash
+   highlight.js — 경량 C++/HLSL 구문 강조기 (외부 의존성 없음)
+   <pre><code class="language-cpp"> / language-hlsl / language-bash
    블록을 토큰화하여 span.tok-* 로 감싼다.
    토큰 스캔 방식이라 문자열/주석 안의 키워드를 오인하지 않는다.
    ============================================================ */
@@ -16,10 +16,12 @@
     "protected","public","register","reinterpret_cast","return","sizeof","static",
     "static_cast","struct","switch","template","this","throw","true","try","typedef",
     "typename","union","using","virtual","volatile","while","not","final",
-    // GLSL
-    "attribute","varying","uniform","in","out","inout","layout","flat","smooth","precision",
-    "highp","mediump","lowp","discard","location","binding","buffer","shared","readonly",
-    "writeonly","coherent","std140","std430",
+    // HLSL
+    "cbuffer","tbuffer","register","packoffset","in","out","inout","uniform","linear",
+    "centroid","nointerpolation","noperspective","sample","precise","groupshared",
+    "discard","numthreads","row_major","column_major","technique","pass","SamplerState",
+    "SamplerComparisonState","RWStructuredBuffer","StructuredBuffer","ByteAddressBuffer",
+    "RWByteAddressBuffer","RWTexture2D","RWBuffer","ConstantBuffer","snorm","unorm",
   ]);
 
   const TYPES = new Set([
@@ -27,23 +29,27 @@
     "void","bool","char","short","int","long","float","double","unsigned","signed",
     "wchar_t","size_t","int8_t","uint8_t","int16_t","uint16_t","int32_t","uint32_t",
     "int64_t","uint64_t","string","vector","array","map",
-    // GL 타입
-    "GLuint","GLint","GLfloat","GLchar","GLenum","GLsizei","GLboolean","GLvoid","GLbitfield",
-    "GLdouble","GLubyte",
-    // GLSL 타입
-    "vec2","vec3","vec4","ivec2","ivec3","ivec4","uvec2","uvec3","uvec4","bvec2","bvec3","bvec4",
-    "mat2","mat3","mat4","sampler2D","sampler3D","samplerCube","sampler2DShadow","sampler2DArray",
-    "image2D","dvec2","dvec3","dvec4",
-    // GLM 타입
-    "mat2x2","mat3x3","mat4x4","quat",
+    // Win32 / D3D11 타입
+    "HRESULT","HWND","HINSTANCE","LRESULT","WPARAM","LPARAM","UINT","DWORD","BOOL","LPCWSTR",
+    "ID3D11Device","ID3D11DeviceContext","IDXGISwapChain","ID3D11Buffer","ID3D11InputLayout",
+    "ID3D11VertexShader","ID3D11PixelShader","ID3D11ComputeShader","ID3D11GeometryShader",
+    "ID3D11RenderTargetView","ID3D11DepthStencilView","ID3D11ShaderResourceView",
+    "ID3D11UnorderedAccessView","ID3D11Texture2D","ID3D11SamplerState","ID3D11BlendState",
+    "ID3D11RasterizerState","ID3D11DepthStencilState","ID3DBlob","ComPtr","D3D11_VIEWPORT",
+    // HLSL 타입
+    "float2","float3","float4","float2x2","float3x3","float4x4","int2","int3","int4",
+    "uint2","uint3","uint4","bool2","bool3","bool4","double2","double3","double4","half",
+    "matrix","Texture2D","Texture3D","TextureCube","Texture2DArray","Texture2DMS",
+    // DirectXMath 타입
+    "XMFLOAT2","XMFLOAT3","XMFLOAT4","XMFLOAT4X4","XMVECTOR","XMMATRIX","FXMVECTOR","CXMMATRIX",
   ]);
 
-  // glm:: 네임스페이스 함수/GL 함수 등은 접두사로 별도 색
+  // D3D/DXGI/DirectXMath 함수는 접두사로 별도 색
   function classifyIdent(word, prev) {
     if (KEYWORDS.has(word)) return "tok-key";
     if (TYPES.has(word)) return "tok-type";
-    // gl* / glfw* / glm 관련 내장 느낌
-    if (/^(gl[A-Z]|glfw|GL_|GLFW_)/.test(word)) return "tok-bi";
+    // D3D11* / DXGI* / XM* / D3DCompile 등 내장 느낌
+    if (/^(D3D|DXGI|XM|CreateDXGI|D3D11_|DXGI_|D3D_)/.test(word)) return "tok-bi";
     return null;
   }
 
@@ -87,7 +93,7 @@
   document.addEventListener("DOMContentLoaded", function () {
     document.querySelectorAll("pre > code").forEach(function (el) {
       const cls = el.className || "";
-      if (!/language-(cpp|c|glsl|bash|sh|glsl-frag|glsl-vert)/.test(cls)) return;
+      if (!/language-(cpp|c|hlsl|bash|sh|hlsl-ps|hlsl-vs)/.test(cls)) return;
       // 이미 강조됨 방지
       if (el.dataset.hl) return;
       el.dataset.hl = "1";

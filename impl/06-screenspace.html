@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 스크린 스페이스 효과 (SSAO 포함) — C++/DirectX 11</title>
+<meta name="description" content="G-buffer의 깊이·법선만으로 틈새를 어둡게 만드는 SSAO를, 반구 커널 생성부터 뷰 공간 투영·깊이 비교·박스 블러까지 C++/HLSL 한 줄씩 성분 단위로 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">스크린 스페이스 효과 (SSAO 포함)</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6</span>
+  <h1>스크린 스페이스 효과 (SSAO 포함) — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    이미 화면에 그려진 정보 — <strong>깊이</strong>·<strong>법선</strong>·<strong>컬러</strong> — 만 가지고
+    후처리로 새로운 효과를 만드는 기법군이 <strong>스크린 스페이스 효과</strong>입니다. 그 대표주자가
+    <strong>SSAO(Screen-Space Ambient Occlusion)</strong>: 물체가 서로 만나 생기는 <em>틈새·모서리·주름</em>을
+    화면 공간에서 값싸게 어둡게 만들어, 앰비언트(환경광)만으로는 평평해 보이던 장면에 입체감을 되살립니다.
+    이 페이지는 SSAO를 <strong>반구 커널 생성(C++) → 노이즈 텍스처 → SSAO 셰이더(HLSL) → 블러(HLSL)</strong>
+    네 단계로 나누어, 각 코드의 시그니처·인자·수식·성분·부호까지 입문자 눈높이로 하나하나 뜯어봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 페이지는 D3D11 규약으로 통일합니다: <strong>왼손 좌표계</strong>, <strong>행벡터</strong>
+    <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), <strong>행 우선 저장</strong>, 클립 공간
+    <strong>z ∈ [0,1]</strong>, 텍스처 <strong>V축 위→아래</strong>. DirectXMath도 행벡터이므로 cbuffer에
+    행렬을 올릴 때는 <code>XMMatrixTranspose</code>가 필요합니다(뒤에서 설명). 다른 자료(OpenGL 기준)의
+    부호·V축·행렬 곱 순서를 그대로 옮기면 결과가 뒤집히니 주의하세요.
+  </div>
+
+  <div class="callout">
+    <span class="tag">전제</span>
+    SSAO는 <a href="./06-deferred.html">디퍼드 렌더링</a>의 <strong>G-buffer</strong>와 짝입니다. 앞선 지오메트리
+    패스에서 화면 크기 텍스처에 <em>뷰 공간 위치</em>(<code>gPosition</code>)와 <em>뷰 공간 법선</em>(<code>gNormal</code>)을
+    이미 기록해 두었다고 가정합니다. SSAO는 그 두 장을 읽어 픽셀당 "얼마나 가려졌나(0~1)"를 계산하는
+    <strong>풀스크린 후처리 패스</strong>일 뿐입니다.
+  </div>
+
+  <h2 style="margin-top:40px;">먼저: SSAO가 하는 일, 한 문장 직관</h2>
+  <p>
+    현실의 앰비언트 오클루전은 "구석진 곳일수록 하늘·주변에서 오는 산란광이 덜 도달해서 어둡다"는 물리 현상입니다.
+    두 벽이 만나는 모서리, 물체가 바닥에 닿는 접점, 옷의 주름 안쪽 — 이런 곳은 주변 표면이 빛을 가로막기 때문에
+    미묘하게 그늘집니다. 이걸 제대로 계산하려면 각 점의 반구 전체에 대해 "얼마나 열려 있나"를 적분해야 하는데,
+    실시간에는 너무 비쌉니다.
+  </p>
+  <p>
+    SSAO의 아이디어는 이 적분을 <strong>화면에 이미 있는 깊이 정보로 근사</strong>하는 것입니다. 각 픽셀의
+    3D 위치 주변 반구에 <strong>샘플 점을 여러 개 뿌리고</strong>, 각 샘플을 다시 화면으로 투영해 "그 자리에 저장된
+    깊이(=거기 실제로 있는 표면)가 내 샘플보다 카메라에 <em>더 가까운가</em>"를 봅니다. 더 가깝다면 그 샘플 방향은
+    다른 물체에 <strong>막혀 있다</strong>는 뜻이므로 가림(occlusion) 카운트를 올립니다. 반구 샘플 중 막힌 비율이
+    높을수록 그 픽셀은 더 어두워집니다. 즉 <strong>"내 주변 반구 중 몇 %가 막혀 있나"</strong>를 세는 것이 SSAO의 전부입니다.
+  </p>
+  <ol class="steps">
+    <li><strong>반구 커널</strong>: 법선(+z) 방향 반구 안에 샘플 벡터 64개를 생성한다(가까운 가림이 중요하니 중심에 몰리게 가중).</li>
+    <li><strong>노이즈 텍스처</strong>: 4×4 랜덤 회전 벡터를 REPEAT 샘플러로 화면에 타일링해, 커널을 픽셀마다 살짝 돌려 밴딩(줄무늬)을 없앤다.</li>
+    <li><strong>SSAO 셰이더</strong>: 커널을 각 픽셀의 뷰 공간 주변에 놓고, 화면으로 투영 → 저장 깊이와 비교 + 거리 범위 체크로 가림을 누적한다.</li>
+    <li><strong>블러</strong>: 노이즈 회전 탓에 결과가 지저분하므로, 노이즈 타일 크기와 같은 4×4 박스 블러로 매끈하게 다듬는다.</li>
+  </ol>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:48px;">1) 준비 (C++) — 반구 커널과 노이즈 텍스처</h2>
+  <p>
+    SSAO 셰이더가 돌기 전에, CPU에서 두 가지 재료를 미리 만들어 GPU로 올려야 합니다. 하나는 <strong>반구 커널</strong>
+    — 각 픽셀 주변을 어디어디 찔러볼지 정하는 샘플 방향 64개. 다른 하나는 <strong>노이즈 텍스처</strong> —
+    픽셀마다 커널을 조금씩 회전시켜 규칙적인 무늬가 생기지 않게 하는 4×4 랜덤 벡터 묶음입니다.
+    이 둘은 매 프레임 바뀌지 않으므로 <strong>초기화 때 한 번만</strong> 만듭니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>ssao_setup.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;random&gt;
+#include &lt;vector&gt;
+#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+using Microsoft::WRL::ComPtr;
+
+std::uniform_real_distribution&lt;float&gt; rnd(0.0f, 1.0f);
+std::default_random_engine gen;
+auto lerpf = [](float a, float b, float t){ return a + t * (b - a); };
+
+// 1) 반구 커널: 법선(+z) 반구 안의 샘플 64개. cbuffer 정렬을 위해 float4로
+std::vector&lt;XMFLOAT4&gt; kernel;
+for (unsigned i = 0; i &lt; 64; ++i) {
+    XMVECTOR s = XMVectorSet(rnd(gen) * 2.0f - 1.0f,   // x: -1..1
+                            rnd(gen) * 2.0f - 1.0f,    // y: -1..1
+                            rnd(gen),                  // z:  0..1 → 반구
+                            0.0f);
+    s = XMVector3Normalize(s) * rnd(gen);
+    // 중심에 샘플을 더 몰아준다 (가까운 가림이 중요)
+    float scale = (float)i / 64.0f;
+    s = s * lerpf(0.1f, 1.0f, scale * scale);
+    XMFLOAT4 v; XMStoreFloat4(&amp;v, s);
+    kernel.push_back(v);
+}
+
+// 2) 4x4 랜덤 회전 노이즈 (z=0인 접평면 벡터)
+std::vector&lt;XMFLOAT4&gt; noise;
+for (unsigned i = 0; i &lt; 16; ++i)
+    noise.push_back({ rnd(gen) * 2.0f - 1.0f, rnd(gen) * 2.0f - 1.0f, 0.0f, 0.0f });
+
+// 노이즈 텍스처: 4x4, REPEAT 샘플러로 화면에 타일링
+ComPtr&lt;ID3D11Texture2D&gt;           noiseTex;
+ComPtr&lt;ID3D11ShaderResourceView&gt;  noiseSRV;
+D3D11_TEXTURE2D_DESC td = {};
+td.Width = 4; td.Height = 4; td.MipLevels = 1; td.ArraySize = 1;
+td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE;
+td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+D3D11_SUBRESOURCE_DATA init = { noise.data(), 4 * sizeof(XMFLOAT4), 0 };
+device->CreateTexture2D(&amp;td, &amp;init, &amp;noiseTex);
+device->CreateShaderResourceView(noiseTex.Get(), nullptr, &amp;noiseSRV);
+
+// 커널은 상수 버퍼(BIND_CONSTANT_BUFFER)로 셰이더에 업로드
+// 노이즈 샘플러: POINT + WRAP (타일링)</code></pre>
+  </div>
+
+  <h3>1-a. 난수 준비 — <code>rnd</code>, <code>gen</code>, <code>lerpf</code></h3>
+  <p>
+    맨 위 세 줄은 이 파일 전체에서 쓸 난수 발생기와 보조 도구를 세팅합니다.
+  </p>
+  <ul>
+    <li><code>std::default_random_engine gen;</code> — C++ 표준 라이브러리의 <strong>난수 엔진</strong>입니다.
+      이 자체는 "원시 비트 난수"를 뱉는 톱니바퀴이고, 사람이 원하는 범위·분포로 바꿔 주는 건 아래의 분포 객체입니다.</li>
+    <li><code>std::uniform_real_distribution&lt;float&gt; rnd(0.0f, 1.0f);</code> — 엔진의 출력을
+      <strong>0.0 이상 1.0 미만의 실수로 균등(uniform)하게</strong> 변환하는 분포입니다. <code>rnd(gen)</code>처럼
+      엔진을 넣어 호출하면 <code>[0, 1)</code> 범위 float 하나가 나옵니다. 이 페이지의 모든 랜덤 값이 이 한 줄에서 나옵니다.</li>
+    <li><code>auto lerpf = [](float a, float b, float t){ return a + t * (b - a); };</code> —
+      <strong>선형 보간(linear interpolation)</strong> 람다입니다. <code>t=0</code>이면 <code>a</code>,
+      <code>t=1</code>이면 <code>b</code>, 중간이면 그 사이 값을 냅니다. 전개하면 <code>a + t*(b-a) = (1-t)*a + t*b</code>로,
+      두 끝값을 <code>t : (1-t)</code> 비율로 섞는 것입니다. 커널 스케일을 부드럽게 키울 때 씁니다.</li>
+  </ul>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>gen</code>과 <code>rnd</code>는 스레드마다 상태를 갖습니다. 이 코드는 초기화 때 한 번만 도는 준비 단계라
+    성능이 문제되지 않지만, 만약 매 프레임 커널을 다시 만든다면 낭비입니다. 커널·노이즈는
+    <strong>한 번 만들어 재사용</strong>하는 게 정석입니다.
+  </div>
+
+  <h3>1-b. 반구 커널 한 샘플을 만드는 5줄 해부</h3>
+  <p>
+    <code>for</code> 루프 몸통이 커널 샘플 <strong>하나</strong>를 만드는 과정입니다. 목표는
+    "법선 방향(+z)을 축으로 하는 <strong>반구 안</strong>에, 중심 쪽으로 몰린 랜덤 점 하나"를 얻는 것입니다.
+    왜 반구냐면, 표면 아래쪽(법선 반대편)은 물체 내부라 샘플링해 봐야 의미가 없기 때문입니다.
+  </p>
+
+  <h4>① 반구 방향 뽑기 — <code>XMVectorSet</code></h4>
+<pre><code class="language-cpp">XMVECTOR s = XMVectorSet(rnd(gen) * 2.0f - 1.0f,   // x: -1..1
+                        rnd(gen) * 2.0f - 1.0f,    // y: -1..1
+                        rnd(gen),                  // z:  0..1 → 반구
+                        0.0f);</code></pre>
+  <p>
+    <strong>수학적 의미</strong>: 세 성분으로 3D 벡터 하나를 만듭니다. 핵심은 <strong>범위</strong>가
+    x·y와 z에서 다르다는 점입니다.
+  </p>
+  <ul>
+    <li><code>rnd(gen) * 2.0f - 1.0f</code> — <code>[0, 1)</code> 난수를 <code>[-1, 1)</code>로 늘립니다.
+      (0→−1, 0.5→0, 1→1). x와 y는 <strong>양·음 모두</strong> 가능 → 반구의 옆으로 넓게 퍼집니다.</li>
+    <li>z는 <code>rnd(gen)</code> 그대로 → <code>[0, 1)</code>, 즉 <strong>항상 양수</strong>입니다.
+      바로 이 한 곳이 "구(sphere)"가 아니라 "반구(hemisphere)"를 만드는 스위치입니다. z가 음수가 될 수 없으니
+      +z 쪽 절반만 채워집니다.</li>
+  </ul>
+  <p>
+    <strong>기하 직관(그림글)</strong>: 정육면체 <code>[-1,1]×[-1,1]×[0,1]</code>(위쪽 절반 상자) 안에 점을 하나
+    무작위로 찍는다고 상상하세요. 아직은 상자 모양이라 모서리에 점이 몰릴 수 있는데, 다음 줄에서 정규화로
+    "껍질"에 붙였다가 다시 반지름을 곱해 안쪽으로 끌어들입니다.
+  </p>
+  <p>
+    <strong>코드 매핑</strong>: <code>XMVECTOR</code>는 DirectXMath의 SIMD 벡터 타입(x,y,z,w 4개 float을
+    한 레지스터에)입니다. <code>XMVectorSet(x, y, z, w)</code>가 네 성분을 직접 채워 넣습니다. 넷째 인자
+    <code>0.0f</code>는 <strong>방향 벡터</strong>임을 나타내는 w=0입니다(점이면 w=1). 여기선 방향이므로 0.</p>
+
+  <h4>② 껍질로 정규화 후 반지름 곱 — 부피 채우기</h4>
+<pre><code class="language-cpp">s = XMVector3Normalize(s) * rnd(gen);</code></pre>
+  <p>
+    <strong>수학적 의미</strong>: 두 연산의 합성입니다.
+  </p>
+  <ol>
+    <li><code>XMVector3Normalize(s)</code> — <code>s</code>를 <strong>길이 1</strong>로 만듭니다(방향만 남김).
+      결과는 반구 <em>표면(껍질)</em> 위의 점입니다.</li>
+    <li><code>* rnd(gen)</code> — 여기에 <code>[0, 1)</code> 난수 길이를 곱해 <strong>안쪽으로 끌어들입니다</strong>.
+      이제 점이 껍질이 아니라 반구 <em>내부 어딘가</em>에 놓입니다.</li>
+  </ol>
+  <div class="callout">
+    <span class="tag">함정</span>
+    난수 길이를 그냥 곱하면 완벽하게 균일한 부피 분포는 아닙니다(중심에 살짝 몰림). SSAO에는 오히려
+    "중심 쪽(가까운 곳) 가림을 더 중시"하는 게 좋아서 문제가 안 되고, 다음 ③에서 <em>일부러</em> 더 몰아줍니다.
+    엄밀한 균일 구 분포가 필요하면 <code>r = cbrt(rnd)</code>처럼 세제곱근을 써야 하지만, 여기선 불필요합니다.
+  </div>
+
+  <h4>③ 중심 가중 — 제곱 보간으로 가까운 샘플 강화</h4>
+<pre><code class="language-cpp">float scale = (float)i / 64.0f;
+s = s * lerpf(0.1f, 1.0f, scale * scale);</code></pre>
+  <p>
+    <strong>수학적 의미</strong>: 루프 인덱스 <code>i</code>를 <code>[0, 1)</code>로 정규화한 <code>scale</code>을
+    만들고, 그것을 <strong>제곱</strong>한 값으로 <code>0.1 ~ 1.0</code> 사이를 보간해 추가 스케일을 만듭니다.
+  </p>
+  <ul>
+    <li><code>scale = i/64</code> — 첫 샘플은 0, 마지막은 거의 1로 커집니다.</li>
+    <li><code>scale * scale</code> — 제곱하면 앞부분(작은 i)에서는 매우 천천히 커지고, 뒷부분에서 급히 커지는
+      <strong>가속 곡선</strong>이 됩니다. 예: scale=0.25 → 제곱 0.0625(여전히 작음), scale=0.75 → 제곱 0.5625.</li>
+    <li><code>lerpf(0.1, 1.0, ...)</code> — 그 곡선을 최소 0.1배 ~ 최대 1.0배로 매핑합니다.</li>
+  </ul>
+  <p>
+    <strong>기하 직관</strong>: 결과적으로 <strong>많은 샘플이 픽셀 아주 가까이(중심)에 밀집</strong>하고, 소수만 멀리
+    퍼집니다. AO에서 시각적으로 중요한 건 "코앞의 틈새"이므로, 가까운 곳을 촘촘히 찔러보는 게 품질에 유리합니다.</p>
+  <p>
+    <strong>손계산 예</strong>: i=0이면 scale²=0 → <code>lerpf(0.1,1.0,0)=0.1</code>배(중심 근처).
+    i=32면 scale=0.5, scale²=0.25 → <code>lerpf=0.1+0.25*0.9=0.325</code>배. i=63이면 scale≈0.984,
+    scale²≈0.969 → <code>≈0.972</code>배(거의 최대 반경). 즉 앞쪽 절반이 반경 0.3 이하에 몰립니다.
+  </p>
+
+  <h4>④ SIMD → 저장 포맷 변환 — <code>XMStoreFloat4</code></h4>
+<pre><code class="language-cpp">XMFLOAT4 v; XMStoreFloat4(&amp;v, s);
+kernel.push_back(v);</code></pre>
+  <p>
+    <code>XMVECTOR</code>는 SIMD 레지스터 표현이라 CPU 배열이나 상수 버퍼에 <em>그대로 담을 수 없습니다</em>.
+    <code>XMStoreFloat4(&amp;v, s)</code>가 SIMD 값을 메모리 친화적인 <code>XMFLOAT4</code>(x,y,z,w 연속 4 float)로
+    풀어 씁니다. 반대로 읽을 때는 <code>XMLoadFloat4</code>를 씁니다. 이 "Load/Store로 SIMD↔메모리 왕복"이
+    DirectXMath의 기본 리듬입니다.
+  </p>
+  <div class="callout">
+    <span class="tag">함정</span>
+    왜 <code>XMFLOAT3</code>가 아니라 <strong><code>XMFLOAT4</code></strong>일까요? HLSL 상수 버퍼는
+    <strong>16바이트(=float4) 정렬</strong> 규칙이 있어서, <code>float3</code> 배열을 올리면 각 원소가 16바이트로
+    패딩되며 C++ 쪽 <code>XMFLOAT3</code>(12바이트) 배열과 <strong>메모리 레이아웃이 어긋납니다</strong>.
+    처음부터 <code>float4</code>로 맞춰 두면 이 지뢰를 피합니다. 셰이더에서는 <code>.xyz</code>만 씁니다.
+  </div>
+
+  <h3>1-c. 노이즈 텍스처 — 왜 4×4 랜덤 회전인가</h3>
+<pre><code class="language-cpp">std::vector&lt;XMFLOAT4&gt; noise;
+for (unsigned i = 0; i &lt; 16; ++i)
+    noise.push_back({ rnd(gen) * 2.0f - 1.0f, rnd(gen) * 2.0f - 1.0f, 0.0f, 0.0f });</code></pre>
+  <p>
+    <strong>무엇을 만드나</strong>: 4×4=16개의 랜덤 벡터입니다. 각 벡터는 <code>(x, y, 0, 0)</code> 꼴로,
+    <strong>z=0</strong>인 게 핵심입니다. z=0이면 이 벡터는 <em>표면의 접평면(tangent plane) 안</em>에 놓입니다 —
+    즉 법선 축을 중심으로 한 <strong>회전 방향</strong>만 나타냅니다.
+  </p>
+  <p>
+    <strong>왜 필요한가</strong>: 만약 모든 픽셀이 <em>똑같은</em> 커널을 쓰면, 화면 전체에 규칙적인 밴딩(줄무늬·계단
+    무늬)이 생깁니다. 픽셀마다 커널을 조금씩 다른 각도로 <strong>돌려주면</strong> 이 규칙성이 랜덤 노이즈로
+    흩어지고, 그 노이즈는 나중에 블러로 지웁니다. "규칙적 오차 → 랜덤 오차 → 블러로 평균화"가 SSAO 품질의
+    핵심 전략입니다. 4×4로 작게 만들어 화면 전체에 <strong>타일링(반복)</strong>해서 씁니다.
+  </p>
+
+  <h3>1-d. 노이즈를 GPU 텍스처로 — <code>D3D11_TEXTURE2D_DESC</code></h3>
+<pre><code class="language-cpp">D3D11_TEXTURE2D_DESC td = {};
+td.Width = 4; td.Height = 4; td.MipLevels = 1; td.ArraySize = 1;
+td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE;
+td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+D3D11_SUBRESOURCE_DATA init = { noise.data(), 4 * sizeof(XMFLOAT4), 0 };
+device->CreateTexture2D(&amp;td, &amp;init, &amp;noiseTex);
+device->CreateShaderResourceView(noiseTex.Get(), nullptr, &amp;noiseSRV);</code></pre>
+  <p>디스크립터 각 필드를 뜯어봅니다.</p>
+  <table class="impl">
+    <tr><th>필드</th><th>값</th><th>의미</th></tr>
+    <tr><td><code>Width/Height</code></td><td>4, 4</td><td>4×4 픽셀 텍스처. 노이즈 타일 하나 크기.</td></tr>
+    <tr><td><code>MipLevels</code></td><td>1</td><td>밉맵 없음. 노이즈는 항상 원본 해상도로만 읽어야 함(밉이 섞이면 회전이 뭉개짐).</td></tr>
+    <tr><td><code>ArraySize</code></td><td>1</td><td>텍스처 배열 아님, 단일 2D 텍스처.</td></tr>
+    <tr><td><code>Format</code></td><td><code>R32G32B32A32_FLOAT</code></td><td>채널당 32비트 float. 벡터 성분 <code>-1~1</code>을 손실 없이 담기 위함(8비트면 정밀도 부족).</td></tr>
+    <tr><td><code>SampleDesc.Count</code></td><td>1</td><td>MSAA 안 씀(1 = 단일 샘플).</td></tr>
+    <tr><td><code>Usage</code></td><td><code>IMMUTABLE</code></td><td>생성 후 <strong>절대 안 바뀜</strong>. GPU가 가장 빠르게 배치할 수 있는 힌트. 그래서 생성 시 초기 데이터가 필수.</td></tr>
+    <tr><td><code>BindFlags</code></td><td><code>SHADER_RESOURCE</code></td><td>셰이더에서 <em>읽기 전용</em>으로만 바인딩. 렌더 타깃 아님.</td></tr>
+  </table>
+  <p>
+    <code>D3D11_SUBRESOURCE_DATA init = { noise.data(), 4 * sizeof(XMFLOAT4), 0 };</code> —
+    초기 데이터입니다. 세 필드는 순서대로 <strong>{ 데이터 포인터, 행 피치(row pitch), 깊이 피치 }</strong>입니다.
+  </p>
+  <ul>
+    <li><code>noise.data()</code> — 16개 벡터가 담긴 배열 시작 주소.</li>
+    <li><code>4 * sizeof(XMFLOAT4)</code> — <strong>한 행(row)의 바이트 수</strong>. 가로 4픽셀 × float4(16바이트) = 64바이트.
+      GPU는 이 값으로 "다음 행이 어디서 시작하는지"를 압니다. 이걸 틀리면 텍스처가 어긋나거나 깨집니다.</li>
+    <li>깊이 피치 <code>0</code> — 2D라 3D 깊이 방향이 없어 0.</li>
+  </ul>
+  <p>
+    <code>CreateTexture2D(&amp;td, &amp;init, &amp;noiseTex)</code>가 디스크립터+초기데이터로 텍스처 자원을 만들고,
+    <code>CreateShaderResourceView(noiseTex.Get(), nullptr, &amp;noiseSRV)</code>가 그 자원을 셰이더에서 읽을 수 있는
+    <strong>SRV(뷰)</strong>로 감쌉니다. 둘째 인자 <code>nullptr</code>은 "텍스처 포맷 그대로 뷰를 만들라"는 뜻입니다.
+    셰이더에는 자원(리소스)이 아니라 이 <strong>뷰</strong>를 바인딩합니다.
+  </p>
+  <div class="callout">
+    <span class="tag">함정</span>
+    노이즈 <strong>샘플러</strong>는 반드시 <code>POINT</code> 필터 + <code>WRAP</code> 주소 모드여야 합니다.
+    <code>WRAP</code>이라야 4×4 타일이 화면 전체에 반복되고, <code>POINT</code>라야 이웃 랜덤 벡터가 선형 보간으로
+    섞이지 않습니다(회전 벡터를 섞으면 방향이 뭉개짐). 반면 G-buffer 샘플러는 정확한 픽셀을 집기 위해
+    <code>CLAMP</code>를 씁니다. 이 둘을 헷갈리면 SSAO가 이상하게 번집니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:48px;">2) SSAO 픽셀 셰이더 (HLSL) — 가림 계산의 심장</h2>
+  <p>
+    이제 본체입니다. 풀스크린 삼각형을 그리며 <strong>모든 픽셀마다</strong> 이 셰이더가 한 번씩 돕니다.
+    입력은 G-buffer(위치·법선)와 노이즈·커널이고, 출력은 그 픽셀의 <strong>가림 계수 하나</strong>(1=완전히 열림,
+    0=완전히 막힘)입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>ssao.hlsl (픽셀 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D    gPosition : register(t0);  // 뷰공간 위치
+Texture2D    gNormal   : register(t1);  // 뷰공간 법선
+Texture2D    texNoise  : register(t2);  // 4x4 회전 노이즈
+SamplerState sampGB    : register(s0);  // POINT/LINEAR + CLAMP
+SamplerState sampNoise : register(s1);  // POINT + WRAP (타일링)
+
+#define KERNEL 64
+cbuffer SSAOConstants : register(b0) {
+    float4   samples[KERNEL];   // 반구 커널 (.xyz 사용)
+    float4x4 projection;        // 뷰 → 클립
+    float2   screenSize;        // 화면 해상도
+    float2   _pad;
+};
+
+static const float radius = 0.5;
+static const float bias   = 0.025;
+
+float4 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 noiseScale = screenSize / 4.0;   // 노이즈 타일 스케일
+
+    float3 fragPos = gPosition.Sample(sampGB, uv).xyz;
+    float3 normal  = normalize(gNormal.Sample(sampGB, uv).xyz);
+    float3 randVec = normalize(texNoise.Sample(sampNoise, uv * noiseScale).xyz);
+
+    // Gram-Schmidt로 픽셀별 회전 TBN 기저 구성
+    float3 tangent   = normalize(randVec - normal * dot(randVec, normal));
+    float3 bitangent = cross(normal, tangent);
+    float3x3 TBN     = float3x3(tangent, bitangent, normal);
+
+    float occlusion = 0.0;
+    for (int i = 0; i &lt; KERNEL; ++i) {
+        // 커널 샘플을 뷰 공간의 픽셀 주변으로 이동
+        float3 samplePos = fragPos + mul(samples[i].xyz, TBN) * radius;
+
+        // 그 샘플을 화면 좌표로 투영해 저장된 깊이를 얻는다
+        float4 offset = mul(float4(samplePos, 1.0), projection);
+        offset.xyz /= offset.w;
+        offset.xy = offset.xy * float2(0.5, -0.5) + 0.5;  // v 뒤집기
+
+        float sampleDepth = gPosition.Sample(sampGB, offset.xy).z;
+
+        // 범위 체크: 깊이 차가 반지름을 넘으면 무시(경계 오검출 방지)
+        float rangeCheck = smoothstep(0.0, 1.0, radius / abs(fragPos.z - sampleDepth));
+        // 저장 깊이가 샘플보다 카메라에 가까우면 가려진 것
+        occlusion += (sampleDepth &gt;= samplePos.z + bias ? 1.0 : 0.0) * rangeCheck;
+    }
+    return 1.0 - (occlusion / (float)KERNEL);  // 1=열림, 0=완전 가림
+}</code></pre>
+  </div>
+
+  <h3>2-a. 자원 선언과 레지스터 — <code>register(t/s/b)</code></h3>
+  <p>
+    HLSL에서 모든 외부 입력은 <strong>레지스터 슬롯</strong>에 묶입니다. 앞글자가 종류를 뜻합니다.
+  </p>
+  <ul>
+    <li><code>t#</code> — 텍스처(SRV). <code>gPosition(t0)</code>·<code>gNormal(t1)</code>·<code>texNoise(t2)</code>.
+      C++에서 <code>PSSetShaderResources(0, ...)</code>로 바인딩한 순서와 <strong>번호가 일치</strong>해야 합니다.</li>
+    <li><code>s#</code> — 샘플러. <code>sampGB(s0)</code>는 G-buffer용(CLAMP), <code>sampNoise(s1)</code>는 노이즈용(WRAP).
+      "어떻게 읽을지(필터·주소 모드)"를 담은 객체입니다.</li>
+    <li><code>b#</code> — 상수 버퍼. <code>SSAOConstants(b0)</code>. CPU가 채워 올리는 상수 묶음.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    <code>gPosition</code>·<code>gNormal</code>이 담은 값은 반드시 <strong>뷰 공간</strong>이어야 합니다.
+    월드 공간이나 클립 공간을 넣으면 뒤의 깊이 비교(<code>fragPos.z</code>)와 재투영이 전부 어긋납니다.
+    왼손 좌표·클립 z[0,1] 규약 아래에서 뷰 공간 z는 카메라에서 멀수록 <strong>커지는(더 음수가 아니라 더 큰 양수)</strong>
+    방향임을 기억하세요 — 이 부호 감각이 아래 깊이 비교의 방향을 결정합니다.
+  </div>
+
+  <h3>2-b. 상수 버퍼 레이아웃과 패딩</h3>
+<pre><code class="language-hlsl">cbuffer SSAOConstants : register(b0) {
+    float4   samples[KERNEL];   // 반구 커널 (.xyz 사용)
+    float4x4 projection;        // 뷰 → 클립
+    float2   screenSize;        // 화면 해상도
+    float2   _pad;
+};</code></pre>
+  <p>
+    <code>samples[64]</code>가 1-b에서 만든 커널입니다. <code>float4</code> 배열이라 C++의 <code>XMFLOAT4</code>
+    배열과 바이트 단위로 정확히 맞습니다(1-b의 함정 콜아웃 참고). <code>projection</code>은 뷰→클립 투영 행렬,
+    <code>screenSize</code>는 화면 해상도(픽셀).
+  </p>
+  <p>
+    <code>float2 _pad;</code>는 <strong>쓰지 않는 패딩</strong>입니다. <code>screenSize</code>(float2=8바이트) 뒤에
+    8바이트를 더해 16바이트 경계를 맞추기 위한 것입니다. cbuffer 안에서 <strong>하나의 원소가 16바이트 경계를
+    넘어가면 안 된다</strong>는 규칙 때문에, float2 다음에 딱 float2를 넣어 한 줄(16바이트)을 채웁니다.
+    이 패딩을 빼먹으면 C++ 구조체 크기와 어긋나 <code>screenSize</code>에 쓰레기 값이 들어갑니다.
+  </p>
+
+  <h3>2-c. 상수 두 개 — <code>radius</code>와 <code>bias</code></h3>
+<pre><code class="language-hlsl">static const float radius = 0.5;
+static const float bias   = 0.025;</code></pre>
+  <ul>
+    <li><code>radius = 0.5</code> — 가림을 찾는 <strong>탐색 반경</strong>(뷰 공간 단위). 크면 넓은 영역의 큰 가림을
+      잡지만 멀리 있는 무관한 물체까지 어둡게 하고, 작으면 좁고 섬세한 틈새만 잡습니다. 씬 규모에 맞춰 조절합니다.</li>
+    <li><code>bias = 0.025</code> — 깊이 비교 시 더할 <strong>여유값</strong>입니다. 평평한 면에서 표면이 자기 자신을
+      가렸다고 오판(self-occlusion)해 어둡게 얼룩지는 <em>아크네(acne)</em>를 막습니다. 뒤 비교식에서 다시 봅니다.</li>
+  </ul>
+
+  <h3>2-d. 입력 읽기 — 위치·법선·랜덤벡터</h3>
+<pre><code class="language-hlsl">float2 noiseScale = screenSize / 4.0;   // 노이즈 타일 스케일
+
+float3 fragPos = gPosition.Sample(sampGB, uv).xyz;
+float3 normal  = normalize(gNormal.Sample(sampGB, uv).xyz);
+float3 randVec = normalize(texNoise.Sample(sampNoise, uv * noiseScale).xyz);</code></pre>
+  <p>
+    <code>noiseScale = screenSize / 4.0</code> — 화면 해상도를 노이즈 타일 크기(4)로 나눕니다. 예를 들어
+    1920×1080이면 <code>(480, 270)</code>. 아래에서 <code>uv * noiseScale</code>을 노이즈 UV로 쓰면, 화면 UV
+    <code>0~1</code>이 노이즈 좌표 <code>0~480</code>으로 늘어나고, WRAP 샘플러가 정수부를 잘라내며
+    <strong>4×4 타일을 480번 반복</strong>합니다. 즉 화면 4픽셀마다 노이즈 한 픽셀이 대응해, 픽셀마다 회전이 달라집니다.
+  </p>
+  <ul>
+    <li><code>fragPos</code> — 이 픽셀의 <strong>뷰 공간 3D 위치</strong>. 커널을 놓을 기준점입니다.</li>
+    <li><code>normal</code> — 이 픽셀의 <strong>뷰 공간 법선</strong>. G-buffer에 저장하며 정밀도가 조금 떨어졌을 수 있어
+      <code>normalize</code>로 다시 길이 1로 맞춥니다.</li>
+    <li><code>randVec</code> — 노이즈에서 읽은 랜덤 회전 벡터(z=0 접평면 방향). 이것으로 커널 기저를 픽셀마다 돌립니다.</li>
+  </ul>
+
+  <h3>2-e. 픽셀별 회전 기저 — Gram-Schmidt TBN</h3>
+<pre><code class="language-hlsl">float3 tangent   = normalize(randVec - normal * dot(randVec, normal));
+float3 bitangent = cross(normal, tangent);
+float3x3 TBN     = float3x3(tangent, bitangent, normal);</code></pre>
+  <p>
+    <strong>무엇을 만드나</strong>: 커널 샘플(법선이 +z인 좌표계에서 정의됨)을 이 픽셀의 실제 표면 방향으로 옮겨줄
+    <strong>회전 행렬 TBN</strong>입니다. T=탄젠트, B=바이탄젠트, N=법선 세 축으로 이루어집니다.
+  </p>
+  <p>
+    <strong>1행 — 탄젠트를 Gram-Schmidt로 뽑기</strong>. <code>randVec</code>는 랜덤 방향이라 법선과 수직이 아닐 수
+    있습니다. <code>dot(randVec, normal)</code>은 randVec가 법선 방향으로 얼마나 뻗어 있는지(투영 길이)이고,
+    <code>normal * dot(...)</code>은 그 법선 성분을 벡터로 만든 것입니다. <code>randVec</code>에서 이 성분을
+    <strong>빼면</strong> 법선에 <strong>수직인 성분만</strong> 남습니다. 이것이 Gram-Schmidt 직교화입니다.
+    정규화해서 길이 1의 탄젠트로 만듭니다.
+  </p>
+  <p>
+    <strong>기하 직관(그림글)</strong>: randVec 화살표에서 "법선 방향으로 삐져나온 그림자"를 잘라내면, 표면에 딱
+    붙어 누운 화살표(탄젠트)가 남습니다. randVec이 랜덤이었으니 이 탄젠트도 픽셀마다 랜덤 각도 → 픽셀마다 커널이
+    다른 각도로 회전.
+  </p>
+  <p>
+    <strong>2행 — 바이탄젠트는 외적</strong>. <code>cross(normal, tangent)</code>는 두 벡터 모두에 수직인
+    세 번째 축입니다. 이미 N과 T가 직교·단위이므로 외적 결과도 자동으로 단위 길이입니다. 이제 T·B·N이 서로
+    직교하는 <strong>정규직교 기저</strong>가 완성됩니다.
+  </p>
+  <p>
+    <strong>3행 — 세 축을 행으로 쌓아 행렬</strong>. <code>float3x3(tangent, bitangent, normal)</code>은 세 벡터를
+    <strong>행(row)</strong>으로 넣습니다. 행벡터 규약(<code>v * M</code>)에서 이 배치라야 아래 <code>mul(samples, TBN)</code>이
+    "커널의 x를 T, y를 B, z를 N 방향으로 보내는" 올바른 회전이 됩니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    OpenGL 자료는 열 우선이라 <code>TBN = mat3(t, b, n)</code> 뒤 <code>TBN * sample</code>로 곱하지만, 여기선
+    <strong>행벡터·행 우선</strong>이므로 <code>mul(sample, TBN)</code>(벡터가 앞)입니다. 순서를 뒤집으면
+    전치(transpose)된 회전이 적용되어 커널이 엉뚱한 방향으로 뿌려집니다.
+  </div>
+
+  <h3>2-f. 커널 루프 ① — 샘플을 뷰 공간에 놓기</h3>
+<pre><code class="language-hlsl">float3 samplePos = fragPos + mul(samples[i].xyz, TBN) * radius;</code></pre>
+  <p>
+    <code>samples[i].xyz</code>는 "법선이 +z인 표준 반구" 안의 방향입니다. <code>mul(samples[i].xyz, TBN)</code>이
+    그 방향을 이 픽셀의 실제 표면 기저로 <strong>회전</strong>시켜, 표면 위 반구로 돌려놓습니다.
+    <code>* radius</code>로 탐색 반경만큼 늘린 뒤, <code>fragPos +</code>로 픽셀 위치를 기준점 삼아 더합니다.
+    결과 <code>samplePos</code>는 "이 픽셀 주변 반구 안의 어떤 3D 점"의 뷰 공간 좌표입니다.
+  </p>
+
+  <h3>2-g. 커널 루프 ② — 그 점을 화면으로 재투영</h3>
+<pre><code class="language-hlsl">float4 offset = mul(float4(samplePos, 1.0), projection);
+offset.xyz /= offset.w;
+offset.xy = offset.xy * float2(0.5, -0.5) + 0.5;  // v 뒤집기</code></pre>
+  <p>
+    <strong>목적</strong>: 방금 만든 3D 샘플 점이 화면의 <em>어느 UV</em>에 찍히는지 알아내, 그 자리에 저장된 실제
+    표면 깊이를 읽으려는 것입니다. 이게 "스크린 스페이스" 기법의 정수입니다.
+  </p>
+  <ol>
+    <li><code>mul(float4(samplePos, 1.0), projection)</code> — 점(w=1)에 투영 행렬을 곱해 <strong>클립 공간</strong>으로
+      보냅니다. 행벡터라 벡터가 앞, 행렬이 뒤입니다.</li>
+    <li><code>offset.xyz /= offset.w;</code> — <strong>원근 나누기(perspective divide)</strong>. 클립 좌표를 w로 나눠
+      NDC(정규화 장치 좌표)로 만듭니다. 이 나눗셈이 원근감(멀수록 작게)을 실제로 적용하는 단계입니다.
+      결과 xy는 <code>[-1, 1]</code> 범위.</li>
+    <li><code>offset.xy * float2(0.5, -0.5) + 0.5</code> — NDC <code>[-1,1]</code>을 텍스처 UV <code>[0,1]</code>로 매핑합니다.
+      x는 <code>*0.5+0.5</code>로 그대로, <strong>y는 <code>*(-0.5)+0.5</code>로 뒤집습니다</strong>. NDC는 위가 +y지만
+      D3D 텍스처 V축은 위→아래(위가 0)이기 때문입니다(규약 참고). 이 부호 하나 빠뜨리면 SSAO가 상하로 뒤집힙니다.</li>
+  </ol>
+  <p>
+    <strong>손계산 예</strong>: NDC x=0(화면 중앙) → <code>0*0.5+0.5=0.5</code>. NDC y=+1(화면 위끝) →
+    <code>1*(-0.5)+0.5=0.0</code>(UV V=0, 즉 텍스처 위끝). 좌표계가 정확히 맞습니다.
+  </p>
+
+  <h3>2-h. 커널 루프 ③ — 저장 깊이 읽고 비교</h3>
+<pre><code class="language-hlsl">float sampleDepth = gPosition.Sample(sampGB, offset.xy).z;
+
+float rangeCheck = smoothstep(0.0, 1.0, radius / abs(fragPos.z - sampleDepth));
+occlusion += (sampleDepth &gt;= samplePos.z + bias ? 1.0 : 0.0) * rangeCheck;</code></pre>
+  <p>
+    <strong>1줄 — 그 UV에 저장된 실제 표면의 깊이</strong>. <code>offset.xy</code> 자리에 원래 그려진 물체의 뷰 공간 z를
+    G-buffer에서 읽습니다. 이게 "그 방향에 진짜로 뭐가 있는가"의 깊이입니다.
+  </p>
+  <p>
+    <strong>3줄 — 가림 판정</strong>. 핵심 비교는 <code>sampleDepth &gt;= samplePos.z + bias</code>입니다.
+    왼손 좌표에서 뷰 공간 z는 카메라에서 멀수록 큽니다. 저장 깊이(실제 표면)가 내 샘플 점보다 <strong>더 크다(=더 멀다)</strong>가
+    아니라 여기서는 부등호가 <code>&gt;=</code>인데, 이는 "그 자리 실제 표면이 내 샘플 점보다 카메라에 더 <em>가까이</em>
+    막고 있다"를 판정하는 형태입니다 — 즉 내 샘플이 어떤 표면 <em>뒤에</em> 들어가 있으면 그 방향은 막힌 것입니다.
+    막혔으면 <code>1.0</code>, 아니면 <code>0.0</code>을 더합니다. <code>bias</code>를 더해 아슬아슬한 동일 깊이(평면
+    자기 가림)를 걸러냅니다.
+  </p>
+  <p>
+    <strong>2줄 — 거리 범위 체크</strong>. <code>radius / abs(fragPos.z - sampleDepth)</code>는 "내 픽셀과 저장 표면의
+    깊이 차"가 탐색 반경에 비해 얼마나 작은가를 재는 비율입니다. 깊이 차가 작으면(가까운 표면끼리) 값이 크고,
+    깊이 차가 반경보다 크면(멀리 떨어진 배경 등) 값이 작아집니다. <code>smoothstep(0,1,...)</code>으로 이를
+    <code>0~1</code>로 부드럽게 눌러, <strong>멀리 있는 무관한 물체가 갑자기 가림으로 잡혀 생기는 검은 후광(halo)</strong>을
+    없앱니다. 가림 기여에 이 계수를 곱해 감쇠시킵니다.
+  </p>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    이 루프는 픽셀마다 64번 돌고, 매 반복에서 <code>gPosition.Sample</code>로 텍스처를 <strong>다시 읽습니다</strong>.
+    이 텍스처 페치가 SSAO 비용의 대부분입니다. 커널 수를 32로 줄이거나(품질과 트레이드오프), SSAO를 절반
+    해상도에서 계산 후 업스케일하는 게 흔한 최적화입니다. <code>radius</code>가 너무 크면 샘플이 화면 곳곳으로
+    흩어져 캐시 적중률이 떨어지니 성능에도 영향을 줍니다.
+  </div>
+
+  <h3>2-i. 최종 출력</h3>
+<pre><code class="language-hlsl">return 1.0 - (occlusion / (float)KERNEL);  // 1=열림, 0=완전 가림</code></pre>
+  <p>
+    <code>occlusion</code>은 64개 샘플 중 막힌 것들의 (범위 가중) 합입니다. <code>/ KERNEL</code>로 평균 내면
+    "막힌 비율" <code>0~1</code>이 되고, <code>1.0 -</code>로 뒤집어 <strong>1=완전히 열림, 0=완전히 막힘</strong>인
+    가림 계수로 만듭니다. 이 값 한 장을 화면 크기 R 텍스처에 렌더링합니다. 뒤 라이팅 패스에서
+    <code>ambient *= ssao;</code>로 곱하면 틈새만 어두워집니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:48px;">3) 블러 (HLSL) — 노이즈 지우기</h2>
+  <p>
+    노이즈 텍스처로 픽셀마다 커널을 돌렸기 때문에, 원본 SSAO 결과에는 4픽셀 주기의 자잘한 얼룩이 남습니다.
+    그 주기와 <strong>정확히 같은 크기</strong>의 박스 블러로 평균을 내면 얼룩이 상쇄되고 부드러운 AO만 남습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>ssao_blur.hlsl (픽셀 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D    ssaoInput : register(t0);
+SamplerState samp      : register(s0);
+
+// 4x4 박스 블러: 노이즈 텍스처 타일 크기와 같게 맞춰 잔상을 없앤다
+float4 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 texel;
+    ssaoInput.GetDimensions(texel.x, texel.y);
+    texel = 1.0 / texel;
+    float result = 0.0;
+    [unroll] for (int x = -2; x &lt; 2; ++x)
+    [unroll] for (int y = -2; y &lt; 2; ++y)
+        result += ssaoInput.Sample(samp, uv + float2(x, y) * texel).r;
+    return result / 16.0;
+    // 최종 라이팅 패스에서 ambient *= ssaoBlur.Sample(samp, uv).r; 로 곱해 적용
+}</code></pre>
+  </div>
+
+  <h3>3-a. 텍셀 크기 구하기 — <code>GetDimensions</code></h3>
+<pre><code class="language-hlsl">float2 texel;
+ssaoInput.GetDimensions(texel.x, texel.y);
+texel = 1.0 / texel;</code></pre>
+  <p>
+    <code>GetDimensions(w, h)</code>는 텍스처의 <strong>픽셀 크기</strong>(가로·세로 픽셀 수)를 돌려줍니다. 예: 1920, 1080.
+    <code>texel = 1.0 / texel</code>로 역수를 취하면 <strong>텍셀 하나의 UV 폭</strong>이 됩니다(<code>1/1920, 1/1080</code>).
+    이웃 픽셀로 이동하려면 UV에 이 텍셀 크기를 더하면 됩니다. 해상도를 하드코딩하지 않고 런타임에 구하므로,
+    해상도가 바뀌어도 셰이더 수정이 필요 없습니다.
+  </p>
+
+  <h3>3-b. 4×4 이웃 평균 — 이중 루프</h3>
+<pre><code class="language-hlsl">float result = 0.0;
+[unroll] for (int x = -2; x &lt; 2; ++x)
+[unroll] for (int y = -2; y &lt; 2; ++y)
+    result += ssaoInput.Sample(samp, uv + float2(x, y) * texel).r;
+return result / 16.0;</code></pre>
+  <p>
+    <code>x</code>, <code>y</code>가 각각 <code>-2, -1, 0, 1</code> 네 값을 도니 총 <strong>4×4=16 텍셀</strong>을
+    읽습니다(중심 기준 왼쪽·위로 2, 오른쪽·아래로 1). <code>uv + float2(x,y)*texel</code>이 이웃 UV이고,
+    거기서 SSAO 값(<code>.r</code> 채널, AO는 단일 값)을 읽어 모두 더한 뒤 <code>/16</code>으로 나눠 <strong>단순 평균</strong>을
+    냅니다. 노이즈 주기(4)와 창 크기(4)가 같아, 회전이 만든 얼룩이 한 창 안에서 골고루 섞여 상쇄됩니다.
+  </p>
+  <p>
+    <code>[unroll]</code>은 컴파일러에게 "이 루프를 <strong>펼쳐서</strong> 16개의 개별 문장으로 만들라"는 지시입니다.
+    반복 횟수가 고정(16)이라 분기·카운터 오버헤드 없이 텍스처 페치만 남아 GPU에서 빠릅니다.
+  </p>
+  <div class="callout">
+    <span class="tag">함정</span>
+    창 범위가 <code>-2 ~ 1</code>(4칸)이라 중심에서 딱 대칭은 아닙니다(왼쪽으로 2, 오른쪽으로 1). AO처럼 저주파
+    신호에는 이 반 픽셀 치우침이 눈에 띄지 않아 무시합니다. 완벽 대칭이 필요하면 <code>-1.5 ~ 1.5</code>처럼
+    반 텍셀 보정을 넣거나 가우시안 블러로 교체합니다.
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    블룸·비네트·색보정 같은 다른 후처리도 원리는 똑같습니다 — 화면 이미지(또는 G-buffer)를 텍스처로 받아
+    <strong>풀스크린 삼각형</strong>에서 픽셀 단위로 변형합니다. 비네트는 <code>uv</code>의 중심 거리로 밝기를 낮추고,
+    블룸은 밝기 추출 + 블러를 재사용하며, 톤매핑·감마는 최종 컬러에 함수를 한 번 씌우는 것뿐입니다. SSAO에서
+    익힌 "G-buffer 읽기 → 계산 → 한 장 출력" 패턴이 후처리 전체에 그대로 통합니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:48px;">DirectXMath / D3D11 대응 요약</h2>
+  <table class="impl">
+    <tr><th>원본 요소</th><th>API / 함수</th><th>역할</th></tr>
+    <tr><td>반구 샘플 방향</td><td><code>XMVectorSet</code></td><td>x,y ∈ [-1,1], z ∈ [0,1]로 4성분 SIMD 벡터 생성</td></tr>
+    <tr><td>껍질 정규화</td><td><code>XMVector3Normalize</code></td><td>길이 1로 만든 뒤 난수 곱해 부피 채우기</td></tr>
+    <tr><td>SIMD→메모리</td><td><code>XMStoreFloat4</code></td><td>cbuffer/배열에 담을 수 있는 XMFLOAT4로 변환</td></tr>
+    <tr><td>노이즈 자원</td><td><code>CreateTexture2D</code> + <code>CreateShaderResourceView</code></td><td>4×4 float4 텍스처와 읽기 뷰 생성</td></tr>
+    <tr><td>커널/행렬 업로드</td><td>cbuffer(b0) + <code>XMMatrixTranspose</code></td><td>행벡터 규약이라 <code>projection</code> 올릴 때 전치 필요</td></tr>
+    <tr><td>커널 회전</td><td>HLSL <code>mul(v, TBN)</code></td><td>표준 반구 커널을 픽셀 표면 기저로 회전</td></tr>
+    <tr><td>재투영</td><td>HLSL <code>mul(p, projection)</code> + w나누기</td><td>뷰 공간 점 → 화면 UV</td></tr>
+    <tr><td>V축 뒤집기</td><td><code>xy*float2(0.5,-0.5)+0.5</code></td><td>NDC[-1,1] → 텍스처 UV[0,1](V 위→아래)</td></tr>
+  </table>
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <code>projection</code>을 cbuffer에 넣기 전 C++에서 반드시 <code>XMMatrixTranspose(proj)</code>로 전치하세요.
+    DirectXMath는 행벡터·행 우선이라 셰이더의 <code>mul(v, M)</code>과 맞추려면 전치가 필요합니다. 이걸 빼먹으면
+    재투영이 완전히 어긋나 SSAO가 전면 검게 나오는 대표적 버그가 됩니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-deferred.html">← 디퍼드 렌더링 (Deferred Rendering)</a>
+    <a href="./06-raytracing.html">레이 트레이싱 (CPU) →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

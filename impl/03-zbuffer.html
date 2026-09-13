@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 깊이 버퍼 (Z-Buffer) — C++/DirectX 11</title>
+<meta name="description" content="깊이 텍스처·DSV·깊이 스텐실 상태를 D3D11로 한 줄씩 만들며 은면 제거 원리, 비선형 깊이 정밀도, z-파이팅과 리버스드-Z까지 성분 단위로 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./03-opengl3d.html">3장. 3D 그래픽스</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">깊이 버퍼 (Z-Buffer)</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 3</span>
+  <h1>깊이 버퍼 (Z-Buffer) — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    3D 장면을 그릴 때 가장 먼저 부딪히는 문제는 <strong>"무엇이 무엇을 가리는가"</strong>입니다. 카메라에서 가까운
+    면은 먼 면을 덮어야 하는데, 우리가 삼각형을 <em>그리는 순서</em>는 그 앞뒤 관계와 아무 상관이 없습니다.
+    이 문제를 그리기 순서와 무관하게 픽셀 단위로 자동 해결하는 장치가 <strong>깊이 버퍼(Z-Buffer)</strong>입니다.
+    OpenGL에서는 <code>glEnable(GL_DEPTH_TEST)</code> 한 줄이면 끝났지만, Direct3D 11은 <strong>깊이 텍스처 →
+    깊이 스텐실 뷰(DSV) → 깊이 스텐실 상태</strong>를 하나하나 명시적으로 만들어 파이프라인에 꽂아야 합니다.
+    이 페이지에서는 그 세 덩어리를 <strong>구조체 필드 하나, API 인자 하나까지</strong> 뜯어보고, 왜 깊이 값이
+    <em>비선형</em>인지, z-파이팅이 왜 생기고 어떻게 없애는지를 손계산 수치까지 곁들여 풀어냅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 페이지는 <strong>왼손 좌표계</strong>, <strong>클립 공간 z 범위 <code>[0,1]</code></strong>(D3D 기본),
+    행벡터 규약(<code>v' = v * M</code>, HLSL <code>mul(v, M)</code>), 행 우선 저장을 따릅니다. OpenGL은 클립 z가
+    <code>[-1,1]</code>이라 깊이 정밀도 분포가 다르니, 다른 자료의 near/far 수치를 그대로 옮기지 마세요.
+  </div>
+
+  <div class="callout">
+    <span class="tag">전제</span>
+    아래 코드는 이미 <a href="./03-opengl3d.html">3장 초기화</a>에서 만든 <code>device</code>(<code>ID3D11Device</code>),
+    <code>context</code>(<code>ID3D11DeviceContext</code>), 스왑체인의 백버퍼로 만든 <code>rtv</code>
+    (<code>ID3D11RenderTargetView</code>), 그리고 <code>swapChain</code>이 있다고 가정합니다. 여기서는 그 위에
+    <strong>깊이</strong>를 얹는 부분만 다룹니다.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:40px;">왜 깊이 버퍼가 필요한가 — 문제부터</h2>
+  <p>
+    삼각형 세 개가 카메라 앞에 겹쳐 있다고 합시다. 화가처럼 <strong>먼 것부터 그리고 가까운 것을 그 위에 덧칠</strong>하면
+    (이걸 "화가 알고리즘"이라 부릅니다) 될 것 같지만, 실제로는 잘 안 됩니다. 삼각형들이 서로 <em>관통</em>하거나,
+    A가 B를 가리면서 동시에 B가 C를 가리고 C가 다시 A를 가리는 <strong>순환 겹침</strong>이 생기면 "먼 것부터"라는
+    전역 순서 자체가 존재하지 않기 때문입니다. 삼각형 단위 정렬로는 근본적으로 풀 수 없습니다.
+  </p>
+  <p>
+    깊이 버퍼의 발상은 정렬을 <strong>삼각형 단위가 아니라 픽셀 단위</strong>로 내려버리는 것입니다. 화면의 픽셀
+    하나하나마다 "지금까지 이 픽셀에 찍힌 것 중 가장 가까운 깊이"를 숫자로 저장해 둡니다. 새 프래그먼트(픽셀
+    후보)가 도착하면, 그 프래그먼트의 깊이와 저장된 깊이를 <strong>비교</strong>해서 더 가까울 때만 색을 쓰고
+    깊이도 갱신합니다. 이러면 삼각형을 <strong>어떤 순서로 그려도</strong> 최종 결과가 같아집니다. 순서 의존성이
+    사라지는 것이 이 기법의 핵심 가치입니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">직관</span>
+    깊이 버퍼는 색 버퍼(화면에 보이는 RGBA)와 <strong>같은 해상도의 회색조 이미지</strong>라고 생각하면 됩니다.
+    각 픽셀에 색 대신 "얼마나 멀리 있나"라는 하나의 숫자가 들어 있고, 그 숫자는 보통 <code>0.0</code>(가장 가까움,
+    near 평면)에서 <code>1.0</code>(가장 멈, far 평면) 사이입니다. 매 프레임 시작 때 이 이미지를 전부
+    <code>1.0</code>(무한히 멀다)으로 지우고 시작합니다.
+  </div>
+
+  <ol class="steps">
+    <li>깊이를 담을 <code>ID3D11Texture2D</code>를 <code>DXGI_FORMAT_D24_UNORM_S8_UINT</code> 포맷으로 만든다.</li>
+    <li>그 텍스처를 파이프라인이 <em>깊이 대상</em>으로 볼 수 있게 <code>ID3D11DepthStencilView</code>(DSV)를 만든다.</li>
+    <li><code>ID3D11DepthStencilState</code>에서 <code>DepthEnable=TRUE</code>, <code>DepthFunc=LESS</code>로 "더 가까운 것만 통과" 규칙을 정한다.</li>
+    <li>렌더 루프에서 DSV를 색 타깃과 함께 <code>OMSetRenderTargets</code>로 바인딩하고, 상태를 <code>OMSetDepthStencilState</code>로 건다.</li>
+    <li>매 프레임 <code>ClearDepthStencilView</code>로 깊이를 <code>1.0</code>으로 초기화한 뒤 그린다.</li>
+  </ol>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:40px;">전체 코드 — 깊이 버퍼 3종 세트 만들기</h2>
+  <p>
+    먼저 원본 전체를 봅니다. 크게 <strong>①깊이 텍스처</strong>, <strong>②DSV</strong>, <strong>③깊이 스텐실 상태</strong>
+    세 덩어리를 만들고, 렌더 루프에서 그것들을 바인딩·초기화하는 흐름입니다. 아래에서 이 코드를 필드·인자 단위로
+    잘게 해부하겠습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>src/main.cpp — 깊이 버퍼 + 상태 생성</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 1) 깊이 텍스처 (백버퍼와 같은 크기)
+D3D11_TEXTURE2D_DESC dtDesc{};
+dtDesc.Width      = 1280;
+dtDesc.Height     = 720;
+dtDesc.MipLevels  = 1;
+dtDesc.ArraySize  = 1;
+dtDesc.Format     = DXGI_FORMAT_D24_UNORM_S8_UINT;  // 24비트 깊이 + 8비트 스텐실
+dtDesc.SampleDesc.Count = 1;
+dtDesc.Usage      = D3D11_USAGE_DEFAULT;
+dtDesc.BindFlags  = D3D11_BIND_DEPTH_STENCIL;
+ComPtr&lt;ID3D11Texture2D&gt; depthTex;
+device-&gt;CreateTexture2D(&amp;dtDesc, nullptr, &amp;depthTex);
+
+// 2) 깊이 스텐실 뷰(DSV)
+ComPtr&lt;ID3D11DepthStencilView&gt; dsv;
+device-&gt;CreateDepthStencilView(depthTex.Get(), nullptr, &amp;dsv);
+
+// 3) 깊이 스텐실 상태: 더 작은(가까운) 깊이만 통과
+D3D11_DEPTH_STENCIL_DESC dsDesc{};
+dsDesc.DepthEnable    = TRUE;
+dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+dsDesc.DepthFunc      = D3D11_COMPARISON_LESS;   // GL_LESS 대응
+ComPtr&lt;ID3D11DepthStencilState&gt; dsState;
+device-&gt;CreateDepthStencilState(&amp;dsDesc, &amp;dsState);
+
+// 렌더 루프 안:
+context-&gt;OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());  // 색+깊이 함께 바인딩
+context-&gt;OMSetDepthStencilState(dsState.Get(), 0);
+
+// 색 + 깊이 버퍼를 모두 지워야 한다.
+// 깊이를 안 지우면 이전 프레임 깊이가 남아 물체가 사라진다.
+const float clearColor[4] = { 0.06f, 0.07f, 0.10f, 1.0f };
+context-&gt;ClearRenderTargetView(rtv.Get(), clearColor);
+context-&gt;ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+// ... 그리기 ...
+swapChain-&gt;Present(1, 0);</code></pre>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:40px;">① 깊이 텍스처 만들기 — <code>D3D11_TEXTURE2D_DESC</code> 필드 해부</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> GPU 메모리에 화면과 같은 크기의 2D 배열을 하나 잡습니다. 이 배열의 각 칸에는
+    색이 아니라 <em>깊이 값</em>이 들어갑니다. <strong>왜 필요한가:</strong> 깊이 테스트가 픽셀마다 "예전 깊이"를
+    읽고 "새 깊이"와 비교하려면, 그 예전 깊이를 어딘가에 저장해 둬야 합니다. 그 저장소가 바로 이 텍스처입니다.
+    색 버퍼(백버퍼)와 별개의 메모리라는 점이 중요합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>깊이 텍스처 서술자</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">D3D11_TEXTURE2D_DESC dtDesc{};
+dtDesc.Width      = 1280;
+dtDesc.Height     = 720;
+dtDesc.MipLevels  = 1;
+dtDesc.ArraySize  = 1;
+dtDesc.Format     = DXGI_FORMAT_D24_UNORM_S8_UINT;  // 24비트 깊이 + 8비트 스텐실
+dtDesc.SampleDesc.Count = 1;
+dtDesc.Usage      = D3D11_USAGE_DEFAULT;
+dtDesc.BindFlags  = D3D11_BIND_DEPTH_STENCIL;
+ComPtr&lt;ID3D11Texture2D&gt; depthTex;
+device-&gt;CreateTexture2D(&amp;dtDesc, nullptr, &amp;depthTex);</code></pre>
+  </div>
+
+  <h3><code>D3D11_TEXTURE2D_DESC dtDesc{};</code> — 서술자를 0으로 초기화</h3>
+  <p>
+    <code>D3D11_TEXTURE2D_DESC</code>는 "어떤 텍스처를 만들지"를 적는 <strong>설명서(서술자)</strong> 구조체입니다.
+    D3D11은 리소스를 만들 때 인자를 잔뜩 나열하는 대신, 이런 <em>Desc 구조체</em>를 채워서 넘기는 방식을 씁니다.
+    필드가 많아서 실수로 빼먹기 쉬운데, 끝의 <code>{}</code>가 그걸 막아줍니다.
+  </p>
+  <p>
+    <code>{}</code>는 C++의 <strong>집합 초기화(aggregate/value initialization)</strong>입니다. 구조체의 모든
+    멤버를 <strong>0</strong>(포인터는 <code>nullptr</code>, 정수는 <code>0</code>)으로 채웁니다. 이렇게 해두면
+    아래에서 우리가 <em>명시적으로 건드리지 않은</em> 필드(예: <code>CPUAccessFlags</code>,
+    <code>MiscFlags</code>)가 쓰레기 값이 아니라 확실히 0이 됩니다. Desc 구조체는 반드시 <code>{}</code>로
+    초기화하는 습관을 들이세요 — 0이 대부분의 필드에서 "기본/사용 안 함"을 뜻하기 때문에 안전합니다.
+  </p>
+
+  <h3><code>Width</code> / <code>Height</code> — 백버퍼와 정확히 같아야 한다</h3>
+  <p>
+    깊이 버퍼는 색 버퍼와 <strong>픽셀 대 픽셀로 짝</strong>을 이룹니다. 색 버퍼의 (x, y) 픽셀을 그릴 때 깊이
+    버퍼의 같은 (x, y) 칸을 읽고 씁니다. 따라서 두 버퍼의 가로·세로가 <strong>정확히 일치</strong>해야 합니다.
+    여기서는 백버퍼가 1280×720이라고 가정하고 그대로 적었습니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    창 크기 조절(resize)을 지원한다면, 백버퍼를 <code>ResizeBuffers</code>로 다시 만들 때 <strong>이 깊이
+    텍스처와 DSV도 반드시 함께 다시 만들어야</strong> 합니다. 옛 크기의 깊이 버퍼를 새 크기 백버퍼와 같이
+    바인딩하려 하면 D3D가 바인딩을 거부하거나(디버그 레이어 에러) 화면이 깨집니다. 실전에서는 크기를 상수
+    <code>1280</code>/<code>720</code>으로 박지 말고 실제 백버퍼 크기 변수를 쓰세요.
+  </div>
+
+  <h3><code>MipLevels = 1</code> / <code>ArraySize = 1</code></h3>
+  <p>
+    <code>MipLevels</code>는 밉맵(축소 사본) 단계 수입니다. 깊이 버퍼는 렌더 대상이지 <em>샘플링해서 확대·축소할
+    텍스처</em>가 아니므로 밉맵이 필요 없습니다. <code>1</code>은 "원본 한 장만"이라는 뜻입니다.
+    <code>ArraySize</code>는 텍스처 배열의 장수인데, 큐브맵이나 배열 렌더링이 아니라면 <code>1</code>입니다.
+    둘 다 "가장 단순한 한 장짜리"를 뜻합니다.
+  </p>
+
+  <h3><code>Format = DXGI_FORMAT_D24_UNORM_S8_UINT</code> — 깊이 24비트 + 스텐실 8비트</h3>
+  <p>
+    이 필드가 깊이 버퍼의 정밀도를 결정합니다. 이름을 쪼개보면 뜻이 그대로 보입니다.
+  </p>
+  <ul>
+    <li><strong><code>D24_UNORM</code></strong> — 깊이(Depth)를 <strong>24비트</strong>로, <code>UNORM</code>
+      (unsigned normalized) 방식으로 저장합니다. 즉 <code>[0, 1]</code> 실수 범위를 24비트 정수
+      <code>0 ~ 2<sup>24</sup>-1</code>(= 0 ~ 16,777,215)로 균등 매핑합니다. 깊이 <code>0.5</code>는 정수
+      약 8,388,607로 저장되는 식입니다.</li>
+    <li><strong><code>S8_UINT</code></strong> — 스텐실(Stencil)을 <strong>8비트</strong> 부호 없는 정수로 저장합니다.
+      스텐실은 깊이와 별개로 "마스킹" 용도로 쓰는데(외곽선, 거울, 포털 등), 이 페이지에서는 쓰지 않습니다.
+      하지만 D24는 32비트 한 칸을 채우고 남는 8비트를 스텐실이 자연스럽게 차지하므로, 이 포맷이 가장
+      <strong>메모리 효율적</strong>이고 하드웨어 지원도 넓어 사실상 표준입니다.</li>
+  </ul>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    더 높은 정밀도가 필요하면 <code>DXGI_FORMAT_D32_FLOAT</code>(부동소수점 32비트 깊이)가 있습니다. 부동소수점은
+    특히 <strong>리버스드-Z</strong>(뒤에서 설명)와 만나면 near·far 전 구간에서 정밀도가 크게 좋아집니다. 대신
+    스텐실이 필요하면 <code>D32_FLOAT_S8X24_UINT</code>가 되고 픽셀당 8바이트로 메모리가 두 배가 됩니다.
+    스텐실을 안 쓰는 학습용이라면 <code>D24_UNORM_S8_UINT</code>로 충분합니다.
+  </div>
+
+  <h3><code>SampleDesc.Count = 1</code> — MSAA 없음</h3>
+  <p>
+    <code>SampleDesc</code>는 멀티샘플 안티에일리어싱(MSAA) 설정입니다. <code>Count = 1</code>은 픽셀당 1샘플, 즉
+    <strong>MSAA를 쓰지 않는다</strong>는 뜻입니다. 여기서 결정적으로 중요한 규칙은, <strong>깊이 버퍼의
+    <code>SampleDesc</code>는 색 버퍼의 <code>SampleDesc</code>와 반드시 같아야 한다</strong>는 것입니다.
+    백버퍼를 4×MSAA로 만들었다면 깊이 텍스처도 <code>Count = 4</code>여야 합니다. 안 맞으면 바인딩이 실패합니다.
+  </p>
+
+  <h3><code>Usage = D3D11_USAGE_DEFAULT</code> / <code>BindFlags = D3D11_BIND_DEPTH_STENCIL</code></h3>
+  <p>
+    <code>Usage</code>는 이 리소스를 어떻게 접근할지에 대한 큰 분류입니다. <code>D3D11_USAGE_DEFAULT</code>는
+    "GPU가 읽고 쓰는, CPU는 직접 손대지 않는 리소스"입니다. 깊이 버퍼는 매 프레임 GPU가 수백만 번 읽고 쓰는
+    대상이므로 이게 맞습니다.
+  </p>
+  <p>
+    <code>BindFlags</code>는 이 리소스를 파이프라인의 어느 슬롯에 꽂을 수 있는지를 나타내는 <strong>비트 플래그</strong>입니다.
+    <code>D3D11_BIND_DEPTH_STENCIL</code>은 "이 텍스처는 깊이·스텐실 대상으로 쓸 수 있다"는 허가증입니다. 이
+    플래그가 없으면 다음 단계에서 이 텍스처로 DSV를 만들려 할 때 실패합니다. 만약 나중에 이 깊이 버퍼를
+    셰이더에서 <em>읽고</em> 싶다면(예: 소프트 파티클, SSAO) <code>| D3D11_BIND_SHADER_RESOURCE</code>를 OR로
+    추가하고 포맷을 typeless 계열로 바꿔야 하지만, 지금은 순수 깊이 대상이므로 이 한 플래그면 됩니다.
+  </p>
+
+  <h3><code>ComPtr&lt;ID3D11Texture2D&gt; depthTex;</code> — 스마트 포인터로 수명 관리</h3>
+  <p>
+    <code>ComPtr</code>(<code>Microsoft::WRL::ComPtr</code>)는 COM 객체용 <strong>스마트 포인터</strong>입니다.
+    D3D11의 모든 인터페이스(<code>ID3D11...</code>)는 COM 객체라 참조 카운트로 수명을 관리하는데,
+    <code>ComPtr</code>이 <code>AddRef</code>/<code>Release</code>를 자동으로 호출해 줍니다. 변수가 스코프를
+    벗어나면 알아서 <code>Release</code>가 불려 메모리 누수를 막아줍니다. 각괄호 <code>&lt;ID3D11Texture2D&gt;</code>는
+    "이 스마트 포인터가 가리킬 타입"을 지정하는 템플릿 인자입니다.
+  </p>
+
+  <h3><code>device-&gt;CreateTexture2D(&amp;dtDesc, nullptr, &amp;depthTex);</code></h3>
+  <p>
+    실제로 GPU 메모리를 할당하는 호출입니다. 인자를 하나씩 봅시다.
+  </p>
+  <ul>
+    <li><strong><code>&amp;dtDesc</code></strong> — 방금 채운 서술자의 <em>주소</em>를 넘깁니다. <code>&amp;</code>는
+      "주소 연산자"로, 구조체 자체가 아니라 그 구조체가 있는 메모리 위치를 넘긴다는 뜻입니다. API는 이 포인터를
+      따라가 서술자 내용을 읽습니다.</li>
+    <li><strong><code>nullptr</code></strong> — 초기 데이터 포인터입니다. 정적 텍스처라면 여기에 픽셀 데이터를
+      넘기지만, 깊이 버퍼는 매 프레임 <code>Clear</code>로 새로 채우므로 초기값이 필요 없어 <code>nullptr</code>입니다.</li>
+    <li><strong><code>&amp;depthTex</code></strong> — 만들어진 텍스처 포인터를 <em>받아올</em> 출력 인자입니다.
+      <code>ComPtr</code>에 <code>&amp;</code>를 쓰면 내부적으로 빈 포인터의 주소를 넘겨 결과를 받아옵니다.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    실전에서는 <code>CreateTexture2D</code>의 반환값(<code>HRESULT</code>)을 <strong>반드시 확인</strong>하세요.
+    <code>if (FAILED(hr)) { ... }</code> 또는 <code>ThrowIfFailed(hr)</code> 같은 헬퍼로 감싸는 게 표준입니다.
+    지면상 여기서는 생략했지만, 실패를 무시하면 다음 줄에서 <code>nullptr</code>을 역참조해 크래시가 납니다.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:40px;">② 깊이 스텐실 뷰(DSV) 만들기</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 방금 만든 텍스처를 파이프라인이 "깊이 대상"으로 인식할 수 있게 감싸는
+    <strong>뷰(view)</strong>를 만듭니다. <strong>왜 필요한가:</strong> D3D11에서 리소스(메모리 덩어리)와 뷰
+    (그 메모리를 어떻게 해석할지)는 분리되어 있습니다. 같은 텍스처라도 "렌더 대상으로 볼 때(RTV)", "셰이더에서
+    읽을 때(SRV)", "깊이 대상으로 볼 때(DSV)" 해석이 다릅니다. <code>OMSetRenderTargets</code>에 넘길 수 있는 것은
+    <em>텍스처가 아니라 뷰</em>이므로, 깊이 텍스처를 쓰려면 DSV로 감싸야 합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>깊이 스텐실 뷰 생성</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">ComPtr&lt;ID3D11DepthStencilView&gt; dsv;
+device-&gt;CreateDepthStencilView(depthTex.Get(), nullptr, &amp;dsv);</code></pre>
+  </div>
+
+  <h3>인자 해부</h3>
+  <ul>
+    <li><strong><code>depthTex.Get()</code></strong> — DSV로 감쌀 원본 리소스입니다. <code>ComPtr::Get()</code>은
+      스마트 포인터가 관리하는 <strong>날 포인터(raw <code>ID3D11Texture2D*</code>)</strong>를 참조 카운트를
+      건드리지 않고 꺼내줍니다. API는 이 포인터로 어떤 텍스처를 감쌀지 압니다.</li>
+    <li><strong><code>nullptr</code></strong> (두 번째 인자, <code>D3D11_DEPTH_STENCIL_VIEW_DESC*</code>) — 뷰
+      서술자입니다. <code>nullptr</code>을 주면 "<strong>원본 텍스처의 포맷과 밉 레벨 0을 그대로 써서 기본
+      뷰를 만들라</strong>"는 뜻입니다. 텍스처가 이미 <code>D24_UNORM_S8_UINT</code>로 구체적인 포맷이라
+      기본 뷰로 충분합니다. (텍스처를 typeless로 만들었다면 여기서 구체 포맷을 지정하는 서술자가 필요합니다.)</li>
+    <li><strong><code>&amp;dsv</code></strong> — 만들어진 DSV를 받아올 출력 인자입니다.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag">직관</span>
+    "리소스 대 뷰"는 <strong>파일 대 파일 핸들</strong>에 비유하면 이해가 쉽습니다. 디스크의 같은 파일(리소스)을
+    "읽기 모드로 연 핸들", "쓰기 모드로 연 핸들"처럼 여러 방식으로 열 수 있듯, 하나의 GPU 텍스처를 용도별 뷰로
+    여러 번 감쌀 수 있습니다. 파이프라인은 언제나 <em>뷰</em>를 통해 리소스에 접근합니다.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:40px;">③ 깊이 스텐실 상태 — 비교 규칙 정하기</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> "새 프래그먼트를 통과시킬지 말지"를 결정하는 <strong>규칙</strong>을 담은 상태
+    객체입니다. <strong>왜 필요한가:</strong> 깊이 버퍼가 있다고 자동으로 비교가 되는 게 아닙니다. 파이프라인의
+    출력 병합기(Output Merger, OM) 단계에게 "<em>깊이 테스트를 켜라, 새 깊이가 저장된 깊이보다 작을 때만
+    통과시켜라, 통과하면 깊이를 갱신하라</em>"고 명시적으로 지시해야 합니다. 그 지시서가 이 상태 객체입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>깊이 스텐실 상태 생성</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">D3D11_DEPTH_STENCIL_DESC dsDesc{};
+dsDesc.DepthEnable    = TRUE;
+dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+dsDesc.DepthFunc      = D3D11_COMPARISON_LESS;   // GL_LESS 대응
+ComPtr&lt;ID3D11DepthStencilState&gt; dsState;
+device-&gt;CreateDepthStencilState(&amp;dsDesc, &amp;dsState);</code></pre>
+  </div>
+
+  <h3><code>DepthEnable = TRUE</code> — 깊이 테스트를 켠다</h3>
+  <p>
+    이 필드가 <code>FALSE</code>면 깊이 버퍼가 있어도 <strong>비교를 아예 하지 않습니다.</strong> 모든 프래그먼트가
+    무조건 통과하고, 나중에 그린 것이 앞서 그린 것을 덮습니다(화가 알고리즘으로 퇴화). <code>TRUE</code>로 켜야
+    비로소 "가까운 것이 이긴다"가 작동합니다. 참고로 <code>DepthEnable = FALSE</code>는 UI/오버레이처럼 항상 위에
+    그려야 하는 요소에서 일부러 쓰기도 합니다.
+  </p>
+
+  <h3><code>DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL</code> — 통과하면 깊이도 갱신</h3>
+  <p>
+    깊이 <strong>테스트</strong>(읽고 비교)와 깊이 <strong>쓰기</strong>(갱신)는 별개의 스위치입니다. 이 필드가
+    <code>_ALL</code>이면 "테스트를 통과한 프래그먼트는 자기 깊이를 버퍼에 <strong>기록</strong>한다"는 뜻입니다.
+    이래야 그다음에 오는 더 먼 프래그먼트가 "아, 여긴 이미 더 가까운 게 있네" 하고 걸러집니다.
+  </p>
+  <p>
+    반대로 <code>D3D11_DEPTH_WRITE_MASK_ZERO</code>는 "테스트는 하되 깊이는 <strong>안 쓴다</strong>"입니다. 이건
+    <strong>반투명(알파 블렌딩) 물체</strong>를 그릴 때 핵심입니다. 반투명 물체는 뒤가 비쳐야 하므로 깊이를 써서
+    뒤 물체를 가려버리면 안 되기 때문입니다. 그래서 실전 렌더러는 보통 <strong>불투명 패스(WRITE_ALL)</strong>를
+    먼저 그리고, <strong>반투명 패스(WRITE_ZERO)</strong>를 나중에 그립니다.
+  </p>
+
+  <h3><code>DepthFunc = D3D11_COMPARISON_LESS</code> — 비교 연산자</h3>
+  <p>
+    <strong>수학적 의미:</strong> 이 필드는 "새 깊이 <em>vs</em> 저장된 깊이"를 어떤 부등호로 비교할지 정합니다.
+    <code>LESS</code>는 조건 <code>새깊이 &lt; 저장된깊이</code>일 때만 통과입니다. D3D에서 깊이는
+    <code>0</code>(near, 가까움)에서 <code>1</code>(far, 멈)로 커지므로, "값이 더 작다 = 더 가깝다"이고, 따라서
+    <code>LESS</code>가 곧 "더 가까운 것만 통과"가 됩니다.
+  </p>
+  <p>
+    <strong>기하 직관:</strong> 픽셀 하나를 위에서 내려다본다고 상상해 보세요. 그 픽셀 방향으로 광선을 쏘면 여러
+    삼각형과 만납니다. 각 교점의 깊이(0~1)를 비교해 <strong>가장 작은(가장 가까운)</strong> 하나만 화면에 남기는
+    것이 은면 제거입니다. <code>LESS</code>는 새로 도착한 교점이 지금까지의 최소보다 더 작으면 갱신, 아니면 버리는
+    "달리기 최소값 갱신"과 정확히 같습니다.
+  </p>
+  <p>
+    <strong>코드 매핑 / 다른 자료와의 대응:</strong> 주석의 <code>GL_LESS 대응</code>이 가리키듯, OpenGL의
+    <code>glDepthFunc(GL_LESS)</code>와 같은 규칙입니다. 다른 비교자도 있습니다:
+  </p>
+  <table class="impl">
+    <thead><tr><th>DepthFunc</th><th>통과 조건</th><th>쓰임</th></tr></thead>
+    <tbody>
+      <tr><td><code>LESS</code></td><td>새 &lt; 저장</td><td>표준 은면 제거(가까운 것 우선)</td></tr>
+      <tr><td><code>LESS_EQUAL</code></td><td>새 ≤ 저장</td><td>같은 깊이 다시 그리기(스카이박스, 데칼)</td></tr>
+      <tr><td><code>GREATER</code></td><td>새 &gt; 저장</td><td><strong>리버스드-Z</strong>(near=1, far=0로 뒤집을 때)</td></tr>
+      <tr><td><code>ALWAYS</code></td><td>항상 통과</td><td>깊이 무시하고 덮어쓰기(오버레이)</td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <span class="tag">직관</span>
+    스카이박스(배경 하늘)를 <strong>가장 나중에</strong> 그리면서 깊이를 far(1.0)로 두고 <code>LESS_EQUAL</code>을
+    쓰면, 이미 그려진 물체가 있는 픽셀은 "1.0 ≤ 1.0"이 아니라 "물체깊이 &lt; 1.0"이라 하늘이 물체 뒤로 밀려
+    보이지 않고, 빈 픽셀만 하늘로 채워집니다. 이렇게 하면 하늘 픽셀을 낭비 없이 딱 필요한 곳에만 그릴 수 있습니다.
+  </div>
+
+  <h3><code>device-&gt;CreateDepthStencilState(&amp;dsDesc, &amp;dsState);</code></h3>
+  <p>
+    서술자를 넘겨 상태 객체를 만듭니다. 상태 객체는 <strong>불변(immutable)</strong>이라, 한 번 만들면 내용을
+    바꿀 수 없습니다. 그래서 실전에서는 초기화 때 필요한 상태들(불투명용 <code>LESS+WRITE_ALL</code>, 반투명용
+    <code>LESS+WRITE_ZERO</code> 등)을 <strong>미리 몇 개 만들어 두고</strong> 렌더 루프에서
+    <code>OMSetDepthStencilState</code>로 갈아 끼우기만 합니다. 이것이 상태를 매번 새로 만드는 것보다 훨씬 빠릅니다.
+  </p>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:40px;">④ 렌더 루프 — 바인딩과 초기화</h2>
+  <p>
+    지금까지 만든 세 재료(DSV, 상태 객체)를 매 프레임 파이프라인에 연결하고, 버퍼를 깨끗이 지운 뒤 그립니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">context-&gt;OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());  // 색+깊이 함께 바인딩
+context-&gt;OMSetDepthStencilState(dsState.Get(), 0);
+
+const float clearColor[4] = { 0.06f, 0.07f, 0.10f, 1.0f };
+context-&gt;ClearRenderTargetView(rtv.Get(), clearColor);
+context-&gt;ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+// ... 그리기 ...
+swapChain-&gt;Present(1, 0);</code></pre>
+  </div>
+
+  <h3><code>OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());</code></h3>
+  <p>
+    출력 병합기(OM)에 "이번 그리기의 결과를 어디에 쓸지"를 알려줍니다. 인자를 하나씩 봅시다.
+  </p>
+  <ul>
+    <li><strong><code>1</code></strong> — 색 렌더 타깃(RTV)의 개수입니다. 여기서는 백버퍼 하나뿐이라 1입니다.
+      (지연 렌더링처럼 G-버퍼를 쓰면 여러 개가 됩니다.)</li>
+    <li><strong><code>rtv.GetAddressOf()</code></strong> — RTV 포인터 <em>배열의 주소</em>입니다. API는 "RTV 포인터의
+      배열"을 기대하는데, <code>GetAddressOf()</code>는 <code>ComPtr</code> 내부 포인터 변수의 주소(<code>ID3D11RenderTargetView**</code>)를
+      돌려주므로 길이 1짜리 배열처럼 쓸 수 있습니다. (<code>Get()</code>은 <code>*</code> 하나, <code>GetAddressOf()</code>는
+      <code>**</code>라는 차이를 기억하세요.)</li>
+    <li><strong><code>dsv.Get()</code></strong> — 깊이 스텐실 뷰입니다. <strong>바로 이 인자로 깊이 버퍼가
+      파이프라인에 연결됩니다.</strong> 여기에 <code>nullptr</code>을 주면 깊이 대상이 없어 깊이 테스트가 아예
+      동작하지 않습니다.</li>
+  </ul>
+
+  <h3><code>OMSetDepthStencilState(dsState.Get(), 0);</code></h3>
+  <p>
+    앞서 만든 비교 규칙(<code>LESS</code>, 쓰기 켬)을 OM 단계에 겁니다. 두 번째 인자 <code>0</code>은 스텐실
+    참조값(<code>StencilRef</code>)으로, 스텐실을 쓸 때만 의미가 있습니다. 스텐실 미사용이라 <code>0</code>이면
+    됩니다.
+  </p>
+
+  <h3><code>ClearRenderTargetView</code> / <code>ClearDepthStencilView</code> — 매 프레임 초기화</h3>
+  <p>
+    <code>ClearRenderTargetView(rtv.Get(), clearColor)</code>는 색 버퍼 전체를 배경색으로 칠합니다.
+    <code>clearColor</code>는 RGBA 4개 <code>float</code> 배열입니다. 여기서 진짜 중요한 것은 그다음 줄입니다.
+  </p>
+  <p>
+    <code>ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0)</code>의 인자를 봅시다:
+  </p>
+  <ul>
+    <li><strong><code>dsv.Get()</code></strong> — 지울 깊이 뷰.</li>
+    <li><strong><code>D3D11_CLEAR_DEPTH</code></strong> — "깊이만 지운다"는 플래그입니다. 스텐실도 지우려면
+      <code>| D3D11_CLEAR_STENCIL</code>을 OR로 붙입니다.</li>
+    <li><strong><code>1.0f</code></strong> — 깊이를 채울 값. <strong>1.0 = far = "무한히 멀다"</strong>입니다.
+      이래야 첫 프래그먼트(어떤 깊이든 1.0보다 작거나 같음)가 항상 통과해 화면에 나타납니다. 만약 여기를
+      <code>0.0</code>으로 지우면, 저장된 깊이가 이미 최솟값(가장 가까움)이라 그 무엇도
+      <code>LESS</code>를 통과하지 못해 <strong>화면이 통째로 비어</strong> 버립니다.</li>
+    <li><strong><code>0</code></strong> — 스텐실을 채울 값(미사용이라 0).</li>
+  </ul>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    깊이 스텐실 상태는 켰는데 매 프레임 <code>ClearDepthStencilView</code>를 <strong>안 부르면</strong>, 지난
+    프레임의 깊이 값이 그대로 남습니다. 카메라가 움직여 물체가 앞으로 와도 "지난 프레임의 더 가까운 깊이"에 막혀
+    <code>LESS</code>를 통과하지 못하고, 화면이 프리징된 것처럼 보이거나 물체가 아예 안 그려집니다.
+    <strong>색과 깊이는 매 프레임 항상 함께 지우세요.</strong> 또한 DSV를 <code>OMSetRenderTargets</code>에
+    바인딩하지 않으면 깊이 테스트 자체가 동작하지 않는다는 점도 다시 강조합니다.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:40px;">깊이 값은 왜 비선형인가 — 수식과 손계산</h2>
+  <p>
+    "깊이가 <code>[0,1]</code>이면 near에서 far까지 균등하게 퍼져 있겠지"라고 생각하기 쉽지만, <strong>전혀
+    아닙니다.</strong> 원근 투영을 거치면 깊이 값은 near 근처에 극단적으로 몰리고 far 쪽은 듬성듬성해집니다. 이
+    비선형성이 z-파이팅의 근본 원인이므로 원리를 정확히 짚고 갑니다.
+  </p>
+  <p>
+    원근 투영 행렬은 정점의 <strong>뷰 공간 깊이 <code>z</code></strong>를 클립 공간에서 <code>z_clip</code>과
+    <code>w_clip</code> 두 성분으로 내보내고, 래스터라이저가 원근 나눗셈 <code>z_ndc = z_clip / w_clip</code>을
+    합니다. D3D의 왼손·<code>[0,1]</code> 규약에서 이 결과는 다음과 같습니다(<code>n</code>=near, <code>f</code>=far):
+  </p>
+  <div class="code">
+    <div class="code-head"><span>저장되는 깊이 (NDC z, [0,1])</span><span class="lang">math</span></div>
+    <pre><code class="language-cpp">z_ndc = f/(f-n) * (1 - n/z)
+      = (f/(f-n)) - (f*n) / ((f-n) * z)</code></pre>
+  </div>
+  <p>
+    핵심은 분모에 <strong>뷰 깊이 <code>z</code>가 역수(1/z) 형태</strong>로 들어간다는 것입니다. 함수가
+    <code>1/z</code>꼴이라 <code>z</code>가 작을 때(가까울 때) 값이 급격히 변하고, <code>z</code>가 클 때(멀 때)는
+    거의 변하지 않습니다. 실제 숫자로 확인해 봅시다. <code>n = 0.1</code>, <code>f = 100</code>으로 두면
+    <code>f/(f-n) = 100/99.9 ≈ 1.001</code>, <code>f*n/(f-n) = 10/99.9 ≈ 0.1001</code>입니다.
+  </p>
+  <table class="impl">
+    <thead><tr><th>뷰 깊이 z (미터)</th><th>저장 깊이 z_ndc</th><th>구간 설명</th></tr></thead>
+    <tbody>
+      <tr><td>0.1 (near)</td><td>0.000</td><td>시작점</td></tr>
+      <tr><td>0.2</td><td>0.500</td><td>겨우 10cm 왔는데 벌써 절반!</td></tr>
+      <tr><td>0.5</td><td>0.800</td><td></td></tr>
+      <tr><td>1.0</td><td>0.900</td><td></td></tr>
+      <tr><td>10.0</td><td>0.990</td><td></td></tr>
+      <tr><td>100.0 (far)</td><td>1.000</td><td>끝점</td></tr>
+    </tbody>
+  </table>
+  <p>
+    보이시나요? <strong>near에서 far까지 절반 지점(z_ndc = 0.5)이 실제로는 겨우 0.2m</strong>입니다. 전체 거리의
+    99.8%(0.2m ~ 100m)가 깊이 값 <code>[0.5, 1.0]</code>이라는 좁은 절반 안에 우겨넣어집니다. 즉 <strong>먼
+    물체일수록 깊이 값이 촘촘히 붙어</strong> 24비트 정수로 저장할 때 반올림이 겹치기 쉽습니다. 이게 z-파이팅
+    (두 면이 번갈아 이겨 번쩍이는 현상)의 원인입니다.
+  </p>
+  <div class="callout">
+    <span class="tag">손계산</span>
+    확인용으로 <code>z = 0.2</code>를 공식에 직접 넣어봅시다. <code>1.001 - 0.1001/0.2 = 1.001 - 0.5005 =
+    0.5005 ≈ 0.5</code>. 표의 값과 일치합니다. <code>z = 1.0</code>이면 <code>1.001 - 0.1001/1.0 = 0.9009 ≈
+    0.9</code>. 이렇게 <code>1/z</code> 항이 지배해 가까운 곳에 정밀도가 쏠린다는 걸 숫자로 확인할 수 있습니다.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:40px;">z-파이팅과 그 해법 — 리버스드-Z까지</h2>
+  <div class="callout perf">
+    <span class="tag">TIP · Z-파이팅</span>
+    깊이 버퍼는 위에서 본 대로 비선형이라 <strong>near 평면 근처의 정밀도가 압도적으로 높고 far 쪽은 낮습니다.</strong>
+    <code>near</code>를 <code>0.001</code>처럼 너무 작게 잡으면 먼 물체 두 면이 번쩍이는 <em>z-파이팅</em>이 생깁니다.
+    해법은 세 가지입니다.
+    (1) <code>near</code>를 감당 가능한 한 <strong>크게</strong>(예 <code>0.1</code>~<code>1.0</code>),
+    <code>far</code>는 필요 최소로 잡아 near/far 비율을 줄인다. 정밀도는 near에 가장 민감하므로 near를 키우는 게
+    가장 효과가 큽니다.
+    (2) 의도적으로 겹치는 표면(데칼, 지면 위 글자)은 래스터라이저 상태의 <code>DepthBias</code> /
+    <code>SlopeScaledDepthBias</code>로 깊이를 살짝 앞뒤로 밀어 충돌을 피한다.
+    (3) 정밀도가 더 필요하면 <strong>리버스드-Z</strong> 기법을 쓴다. D3D의 클립 z는 <code>[0,1]</code>이라
+    리버스드-Z와 특히 잘 맞습니다.
+  </div>
+
+  <h3>리버스드-Z가 왜 효과적인가</h3>
+  <p>
+    앞의 표에서 문제는 "far 쪽 정밀도 부족"과 "부동소수점의 정밀도 낭비"가 겹치는 것이었습니다. 부동소수점(float)은
+    <code>0</code> 근처에서 표현 가능한 값이 촘촘하고 <code>1</code> 근처에서 듬성듬성합니다. 그런데 위 원근 깊이는
+    거꾸로 <em>near에서 값이 0에 몰리고 far에서 1에 몰립니다.</em> 즉 "정밀도가 촘촘한 float 영역(0 근처)"과
+    "깊이 값이 몰리는 영역(near)"이 겹쳐, far 쪽은 float 정밀도도 낮고 깊이 분포도 성긴 <strong>이중고</strong>를
+    겪습니다.
+  </p>
+  <p>
+    <strong>리버스드-Z</strong>는 near를 <code>1.0</code>, far를 <code>0.0</code>으로 <em>뒤집습니다.</em> 그러면
+    <code>1/z</code>의 비선형 몰림과 float의 <code>0</code> 근처 촘촘함이 <strong>서로 상쇄</strong>되어, near부터
+    far까지 정밀도가 거의 균일해집니다. 실제로 <code>D32_FLOAT</code> + 리버스드-Z 조합은 깊이 정밀도 문제를
+    사실상 없애버립니다. D3D는 클립 z가 원래 <code>[0,1]</code>이라 near/far만 뒤집으면 되지만, OpenGL은
+    <code>[-1,1]</code>이라 별도 확장(<code>glClipControl</code>)이 필요합니다 — 이 지점이 D3D가 유리한 부분입니다.
+  </p>
+  <p>
+    리버스드-Z를 쓰려면 세 가지를 함께 바꿔야 합니다:
+  </p>
+  <ol class="steps">
+    <li>투영 행렬의 near/far를 뒤바꿔 near=1, far=0이 되도록 만든다(전용 리버스드-Z 투영 함수 사용).</li>
+    <li><code>ClearDepthStencilView</code>의 클리어 값을 <code>1.0f</code>가 아니라 <strong><code>0.0f</code></strong>로 바꾼다(이제 far가 0).</li>
+    <li><code>DepthFunc</code>를 <code>LESS</code>가 아니라 <strong><code>GREATER</code></strong>(또는 <code>GREATER_EQUAL</code>)로 바꾼다("값이 클수록 가깝다"로 뒤집혔으므로).</li>
+  </ol>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    리버스드-Z는 세 가지(투영·클리어·비교자)를 <strong>모두 동시에</strong> 뒤집어야 합니다. 하나라도 빠뜨리면
+    깊이 테스트가 완전히 어긋나 화면이 비거나 앞뒤가 뒤집힙니다. 또한 <code>D24_UNORM</code>(정수 깊이)에는
+    리버스드-Z의 이점이 거의 없습니다 — 부동소수점(<code>D32_FLOAT</code>)의 비균등 분포와 짝을 이뤄야 효과가
+    나오기 때문입니다.
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:40px;">DirectXMath / D3D API 대응 정리</h2>
+  <p>
+    이 페이지의 깊이 관련 요소들이 실무 코드/라이브러리와 어떻게 대응하는지 1:1로 정리합니다. 실전에서는 near/far
+    수치와 투영 행렬은 <strong>DirectXMath의 검증된 함수</strong>를 쓰고, 깊이 상태·뷰는 위처럼 초기화 때 한 번
+    만들어 재사용하는 것이 표준입니다(직접 손으로 행렬을 짜는 건 학습용으로만).
+  </p>
+  <table class="impl">
+    <thead><tr><th>이 페이지 / 개념</th><th>DirectXMath · D3D API</th><th>대응 설명</th></tr></thead>
+    <tbody>
+      <tr><td>원근 투영(왼손, z∈[0,1])</td><td><code>XMMatrixPerspectiveFovLH(fov, aspect, n, f)</code></td><td>위의 z_ndc 공식과 정확히 같은 [0,1] 깊이 매핑을 생성. n, f 인자가 깊이 정밀도를 좌우.</td></tr>
+      <tr><td>리버스드-Z 투영</td><td><code>XMMatrixPerspectiveFovLH(fov, aspect, f, n)</code> (n·f 스왑)</td><td>near/far 인자를 뒤바꿔 near=1, far=0 매핑. 클리어 0.0 + <code>GREATER</code>와 함께 써야 함.</td></tr>
+      <tr><td>깊이 테스트 켜기</td><td><code>OMSetDepthStencilState(state, ref)</code></td><td>OpenGL <code>glEnable(GL_DEPTH_TEST)</code> 대응(상태 객체 방식).</td></tr>
+      <tr><td>비교 규칙 <code>LESS</code></td><td><code>D3D11_COMPARISON_LESS</code></td><td>OpenGL <code>glDepthFunc(GL_LESS)</code> 대응.</td></tr>
+      <tr><td>깊이 쓰기 on/off</td><td><code>DepthWriteMask</code> = <code>_ALL</code>/<code>_ZERO</code></td><td>OpenGL <code>glDepthMask(GL_TRUE/GL_FALSE)</code> 대응. 반투명 패스에서 <code>_ZERO</code>.</td></tr>
+      <tr><td>깊이 초기화</td><td><code>ClearDepthStencilView(dsv, DEPTH, 1.0f, 0)</code></td><td>OpenGL <code>glClear(GL_DEPTH_BUFFER_BIT)</code> + <code>glClearDepth(1.0)</code> 대응.</td></tr>
+      <tr><td>깊이 바이어스</td><td>래스터라이저 상태 <code>DepthBias</code> / <code>SlopeScaledDepthBias</code></td><td>OpenGL <code>glPolygonOffset</code> 대응. 데칼·섀도우에서 z-파이팅/피터패닝 완화.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="tag warn">규약 복습</span>
+    DirectXMath는 <strong>행벡터</strong> 규약이라, cbuffer로 업로드할 때 행렬을 <code>XMMatrixTranspose</code>로
+    전치(transpose)해야 HLSL의 <code>mul(v, M)</code>과 맞습니다. 투영 행렬도 예외가 아니니, 깊이 값이 이상하게
+    나온다면 전치를 빠뜨렸는지부터 확인하세요.
+  </div>
+
+  <div class="callout">
+    <span class="tag">다음</span>
+    이제 은면 제거가 되어 3D 물체가 앞뒤 관계에 맞게 겹칩니다. 다음 페이지에서는 이 위에 <strong>빛</strong>을
+    얹어 입체감을 만듭니다 — 퐁/블린-퐁 셰이딩과 법선 행렬을 다룹니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./03-mesh.html">← 삼각형과 메시</a>
+    <a href="./03-lighting.html">조명과 그림자 (퐁 셰이딩) →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

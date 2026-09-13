@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 밉맵 · 텍스처 필터링 — C++/DirectX 11</title>
+<meta name="description" content="축소 앨리어싱을 없애는 밉맵 피라미드와 트라이리니어/이방성 필터링을, D3D11 텍스처 desc·GenerateMips·SamplerState 인자 하나까지 그리고 HLSL 샘플링 셰이더 한 줄까지 입문자 눈높이로 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./07-techniques.html">7장. 실전 렌더링 기법</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">밉맵 · 텍스처 필터링</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 7</span>
+  <h1>밉맵 · 텍스처 필터링 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    멀리 있는 벽돌 벽이나 비스듬한 바닥 타일을 보면, 필터링이 없는 렌더러에서는 표면이
+    <strong>지글지글 끓듯이 반짝이거나</strong> 무늬가 <strong>모아레(moiré)</strong>로 어지럽게 일렁입니다.
+    카메라가 조금만 움직여도 무늬가 춤을 추죠. 이건 그래픽이 “고급”이 아니라 <strong>버그처럼</strong> 보입니다.
+    원인은 하나입니다 — 화면의 한 픽셀이 텍스처의 <strong>여러 텍셀</strong>을 덮는데, 그중 딱 <strong>하나</strong>만
+    골라 찍기 때문입니다. 이 페이지에서는 이 <strong>축소 앨리어싱(minification aliasing)</strong>을
+    <strong>밉맵(mipmap)</strong>과 <strong>텍스처 필터링</strong>으로 어떻게 없애는지, D3D11의 텍스처 서술자
+    한 필드, <code>GenerateMips</code> 한 호출, <code>SamplerState</code>의 <code>Filter</code> 열거값 하나,
+    그리고 HLSL 픽셀 셰이더의 샘플링 한 줄까지 <strong>성분 단위로</strong> 해부합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 시리즈는 <strong>Direct3D 11 · 왼손 좌표계 · 클립 z [0,1] · 행벡터(<code>v' = v*M</code>, HLSL <code>mul(v, M)</code>)</strong>로
+    통일합니다. 텍스처 좌표는 <strong>V축이 위→아래</strong>(좌상단이 <code>(u,v)=(0,0)</code>)인 D3D 관례를 따릅니다.
+    실무에서는 밉 생성·필터링 모두 GPU/드라이버가 최적화된 경로로 처리하니 직접 구현하지 말고
+    <strong>검증된 API 경로(<code>GenerateMips</code>, 하드웨어 샘플러)</strong>를 쓰는 것이 정석입니다.
+    여기서 “직접” 해부하는 이유는 <em>내부에서 무슨 일이 벌어지는지</em>를 손에 잡히게 이해하기 위해서입니다.
+  </div>
+
+  <div class="callout">
+    <span class="tag">전제</span>
+    이 페이지는 3장의 <strong>텍스처 매핑</strong>(<a href="./03-texmap.html" style="color:var(--accent)">03-texmap</a>)이
+    이미 돌아간다는 가정 위에서, 거기에 <strong>밉맵과 고급 필터링을 더하는</strong> 부분만 다룹니다.
+    즉 이미지 → <code>ID3D11Texture2D</code> → SRV → 샘플러 → 픽셀 셰이더 UV 샘플링의 큰 줄기는 이미 안다고 보고,
+    <strong>“어떻게 하면 흔들리지 않고 선명하게 샘플링하느냐”</strong>에 집중합니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">먼저: 왜 “한 픽셀 = 여러 텍셀”이 문제인가</h2>
+  <p>
+    코드에 들어가기 전에, 이 페이지 전체를 관통하는 <strong>샘플링 이론의 직관</strong>을 확실히 잡고 갑니다.
+    이걸 모르면 아래의 <code>MipLevels</code>, <code>Filter</code> 같은 값들이 왜 존재하는지 절대 이해되지 않습니다.
+  </p>
+
+  <h3>텍셀(texel)과 픽셀(pixel)은 다른 격자입니다</h3>
+  <p>
+    <strong>텍셀</strong>은 텍스처 이미지 안의 한 칸(예: <code>512×512</code> 이미지라면 텍셀이 262,144개)입니다.
+    <strong>픽셀</strong>(정확히는 프래그먼트)은 화면에 실제로 칠해지는 한 점입니다. 텍스처 매핑이란 결국
+    <em>“이 화면 픽셀은 텍스처의 어느 위치(uv)를 가리키나?”</em>를 계산해 그 위치의 색을 가져오는 일입니다.
+    문제는 두 격자의 <strong>밀도(해상도)가 다르다</strong>는 데서 시작합니다.
+  </p>
+
+  <h3>확대(Magnification): 텍셀이 픽셀보다 클 때</h3>
+  <p>
+    카메라가 텍스처에 아주 가까이 붙으면, 텍스처 한 텍셀이 화면에서 여러 픽셀을 차지합니다.
+    <code>16×16</code> 아이콘을 화면 가득 확대한 경우를 떠올리면 됩니다. 이때는 정보가 <strong>모자라서</strong>
+    “계단”처럼 각지거나(<strong>포인트 필터</strong>) 부드럽게 번지게(<strong>선형 필터</strong>) 됩니다.
+    이건 정보 부족 문제라 밉맵으로는 못 고치고 <strong>MAG 필터</strong>가 담당합니다.
+  </p>
+
+  <h3>축소(Minification): 텍셀이 픽셀보다 작을 때 — 진짜 골칫거리</h3>
+  <p>
+    반대로 <code>1024×1024</code> 벽돌 텍스처가 화면에서 겨우 <code>40×40</code> 픽셀로 작게 그려진다고 합시다.
+    그러면 화면 <strong>한 픽셀이 텍스처의 대략 <code>(1024/40)²  ≈ 655개</strong>의 텍셀을 덮습니다.
+    올바른 색은 그 655개 텍셀의 <strong>평균</strong>이어야 합니다. 그런데 GPU가 아무 대책 없이 uv 좌표에서
+    <strong>딱 한 텍셀만</strong> 뽑으면 어떻게 될까요?
+  </p>
+  <p>
+    카메라가 아주 조금만 움직여도 “뽑히는 그 한 텍셀”이 바뀝니다. 프레임 1에서는 밝은 벽돌 줄눈,
+    프레임 2에서는 어두운 벽돌 몸통… 이런 식으로 값이 <strong>제멋대로 튀면서</strong> 화면이 지글거립니다.
+    이게 바로 <strong>축소 앨리어싱</strong>입니다. 신호처리로 말하면 “너무 촘촘한 신호(텍스처)를 너무 성기게
+    표본(픽셀)했다”는 <strong>나이퀴스트(Nyquist) 위반</strong>이고, 그 부작용이 화면에 무늬로 접혀(alias)
+    돌아오는 겁니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">직관</span>
+    비유하면, 655명의 키를 알아야 하는데 아무나 <strong>한 명</strong>에게만 물어보는 것과 같습니다.
+    누구에게 묻느냐에 따라 답이 확확 달라지죠. <strong>밉맵</strong>은 “미리 655명의 평균을 여러 축척으로
+    계산해 표로 만들어 두는” 전략입니다. 그러면 런타임에는 그 표에서 <strong>화면 크기에 맞는 평균값</strong>을
+    한 번에 꺼내 쓰면 됩니다.
+  </div>
+
+  <h3>밉맵 = 반씩 줄인 이미지 피라미드</h3>
+  <p>
+    밉맵은 원본(레벨 0)을 <strong>가로·세로 절반</strong>으로 줄인 이미지(레벨 1), 그것을 또 절반(레벨 2)…
+    이렇게 <code>1×1</code>이 될 때까지 미리 만들어 둔 이미지 <strong>피라미드</strong>입니다. “mip”은 라틴어
+    <em>multum in parvo</em>(작은 것 안에 많은 것)에서 왔습니다. 레벨을 하나 올릴 때마다 텍셀 수가 1/4로
+    줄어드는데, 그 한 텍셀은 원본 <strong>4개 텍셀의 평균(박스 필터)</strong>이라, 축소해서 볼 때 필요한
+    “평균”을 <strong>미리 계산해 둔 셈</strong>입니다.
+  </p>
+  <table class="impl">
+    <thead><tr><th>레벨</th><th>해상도(예: 512 원본)</th><th>텍셀 수</th><th>한 텍셀이 대표하는 원본 영역</th></tr></thead>
+    <tbody>
+      <tr><td>0 (base)</td><td>512 × 512</td><td>262,144</td><td>1 텍셀</td></tr>
+      <tr><td>1</td><td>256 × 256</td><td>65,536</td><td>2×2 = 4 텍셀 평균</td></tr>
+      <tr><td>2</td><td>128 × 128</td><td>16,384</td><td>4×4 = 16 텍셀 평균</td></tr>
+      <tr><td>…</td><td>…</td><td>…</td><td>…</td></tr>
+      <tr><td>9</td><td>1 × 1</td><td>1</td><td>이미지 전체 평균색</td></tr>
+    </tbody>
+  </table>
+  <p>
+    전체 밉 체인은 원본 대비 메모리를 <strong>딱 1/3만 더</strong> 씁니다
+    (<code>1 + 1/4 + 1/16 + … = 4/3</code>인 등비급수). 화질을 위해 지불하는 비용치고는 아주 쌉니다.
+    피라미드가 준비되면, 런타임에는 화면에서의 축소 정도(LOD)를 계산해 <strong>알맞은 레벨을 골라</strong>
+    거기서 한 번만 뽑으면 이미 “평균”이 들어 있으니 지글거림이 사라집니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    밉맵은 화질뿐 아니라 <strong>속도</strong>에도 이득입니다. 멀리 있는 물체는 작은 레벨(작은 이미지)에서
+    샘플링하므로 <strong>텍스처 캐시 적중률</strong>이 크게 올라갑니다. 서로 가까운 화면 픽셀들이 같은
+    작은 이미지의 인접 텍셀을 읽으니 메모리 지역성이 좋아지는 것이죠. 즉 밉맵은 “화질 향상”과
+    “대역폭 절약”을 <strong>동시에</strong> 주는 드문 공짜 점심에 가깝습니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">1. 밉맵 텍스처 만들기 — desc·GenerateMips·Sampler 한 줄씩</h2>
+  <p>
+    <strong>무엇을 만드나</strong> — GPU가 밉 피라미드를 자동으로 채워 줄 수 있는 텍스처를 생성하고,
+    베이스 레벨에 픽셀을 올린 뒤, <code>GenerateMips</code> 한 번으로 나머지 레벨을 다 채우고, 그것을
+    <strong>트라이리니어</strong>로 읽는 샘플러를 만듭니다. <strong>왜 필요한가</strong> — 밉을 만들 “권한”이
+    있는 텍스처로 선언(desc)해야 GPU가 축소 이미지를 그려 넣을 수 있고, 샘플러의 <code>Filter</code>가
+    “어느 레벨을 어떻게 섞어 읽을지”를 결정하기 때문입니다.
+  </p>
+  <ol class="steps">
+    <li><strong>텍스처 서술자(desc)</strong>를 밉 체인 자동 할당 + 렌더타깃 + GENERATE_MIPS로 채운다.</li>
+    <li><code>CreateTexture2D</code>로 빈 텍스처를 만들고, 베이스(0번) 레벨에 픽셀을 <strong>업로드</strong>한다.</li>
+    <li>SRV를 만들고 <code>GenerateMips(srv)</code>로 <strong>1번 이하 레벨을 GPU가 자동 생성</strong>한다.</li>
+    <li><code>SamplerState</code>의 <code>Filter</code>를 트라이리니어로 두고 픽셀 셰이더 슬롯에 <strong>바인딩</strong>한다.</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>mipmap.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">using Microsoft::WRL::ComPtr;
+
+// ── 밉맵을 GPU로 생성하려면 텍스처를 RENDER_TARGET + GENERATE_MIPS로 만든다 ──
+D3D11_TEXTURE2D_DESC td = {};
+td.Width = w; td.Height = h;
+td.MipLevels = 0;              // 0 = 전체 밉 체인 자동 할당
+td.ArraySize = 1;
+td.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;   // 컬러는 sRGB
+td.SampleDesc.Count = 1;
+td.Usage = D3D11_USAGE_DEFAULT;
+td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;   // ← GenerateMips 허용
+ComPtr&lt;ID3D11Texture2D&gt; tex;
+device->CreateTexture2D(&amp;td, nullptr, &amp;tex);        // 초기 데이터는 아래서 채움
+
+// 0번(base) 레벨에 픽셀 업로드 후, 나머지 축소 피라미드는 GPU가 생성
+context->UpdateSubresource(tex.Get(), 0, nullptr, pixels, w * 4, 0);
+ComPtr&lt;ID3D11ShaderResourceView&gt; srv;
+device->CreateShaderResourceView(tex.Get(), nullptr, &amp;srv);
+context->GenerateMips(srv.Get());   // ── 밉맵 자동 생성 ──
+
+// ── 샘플러: 축소·확대 필터는 SamplerState의 Filter가 결정 ──
+D3D11_SAMPLER_DESC sd = {};
+sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;  // 트라이리니어(표준)
+//   대안 비교:
+//   D3D11_FILTER_MIN_MAG_MIP_POINT       → 가장 싸지만 레벨 전환선이 보임
+//   D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT→ 바이리니어 + 레벨 하드컷 (구형 게임 룩)
+//   D3D11_FILTER_MIN_MAG_MIP_LINEAR      → 트라이리니어, 표준 선택
+//   (MAG만 POINT로 바꾸면 픽셀아트 느낌의 또렷한 확대)
+sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+sd.MaxLOD = D3D11_FLOAT32_MAX;
+ComPtr&lt;ID3D11SamplerState&gt; samp;
+device->CreateSamplerState(&amp;sd, &amp;samp);
+context->PSSetSamplers(0, 1, samp.GetAddressOf());</code></pre>
+  </div>
+
+  <h3>1-1. <code>using Microsoft::WRL::ComPtr;</code> — 왜 스마트 포인터인가</h3>
+  <p>
+    <code>ComPtr</code>은 <strong>COM 객체용 스마트 포인터</strong>입니다. Direct3D의 모든 리소스
+    (<code>ID3D11Texture2D</code>, <code>ID3D11SamplerState</code> 등)는 내부에 <strong>참조 카운트</strong>를
+    가진 COM 객체라, 다 쓰면 <code>Release()</code>로 카운트를 낮춰 줘야 메모리가 회수됩니다.
+    <code>ComPtr</code>은 이 <code>AddRef()</code>/<code>Release()</code>를 <strong>스코프에 따라 자동</strong>으로
+    해 줍니다. <code>using</code> 선언은 매번 <code>Microsoft::WRL::ComPtr</code>이라고 길게 안 쓰려는
+    이름 줄이기일 뿐, 기능은 없습니다. 입문자는 <em>“이건 delete를 대신 해 주는 포인터”</em>로 이해하면 됩니다.
+  </p>
+
+  <h3>1-2. <code>D3D11_TEXTURE2D_DESC td = {};</code> — 서술자를 0으로 초기화</h3>
+  <p>
+    D3D11에서 리소스를 만들 때는 <strong>“이런 모양의 텍스처를 원해요”</strong>라는 설계도를 구조체로 채워
+    넘깁니다. 그 설계도가 <code>D3D11_TEXTURE2D_DESC</code>입니다. 뒤의 <code>= {}</code>는 C++의
+    <strong>집합 초기화(aggregate initialization)</strong>로, 구조체의 <strong>모든 멤버를 0으로</strong> 밀어 둡니다.
+  </p>
+  <p>
+    이게 왜 중요하냐면, <code>D3D11_TEXTURE2D_DESC</code>에는 우리가 명시하지 않는 필드
+    (예: <code>CPUAccessFlags</code>)가 여럿 있는데, <code>= {}</code>가 없으면 이들이 <strong>쓰레기값</strong>으로
+    남아 <code>CreateTexture2D</code>가 알 수 없는 이유로 실패합니다. <strong>desc는 항상 <code>= {}</code>로
+    시작</strong>하는 습관을 들이세요. 아래 <code>D3D11_SAMPLER_DESC sd = {};</code>도 같은 이유입니다.
+  </p>
+
+  <h3>1-3. <code>Width</code> / <code>Height</code> — 베이스 레벨의 픽셀 크기</h3>
+  <p>
+    <code>w</code>, <code>h</code>는 원본 이미지의 가로·세로 픽셀 수입니다. 이건 <strong>레벨 0</strong>의 크기이며,
+    밉 체인의 나머지 레벨 크기는 여기서 자동으로 유도됩니다. 정확히는
+    <code>레벨 k의 크기 = max(1, floor(원본 / 2^k))</code>입니다. 예를 들어 <code>512</code>는
+    <code>256 → 128 → 64 → 32 → 16 → 8 → 4 → 2 → 1</code>로 총 <strong>10개</strong> 레벨이 나옵니다
+    (<code>log2(512) + 1 = 10</code>).
+  </p>
+
+  <h3>1-4. <code>td.MipLevels = 0;</code> — “밉을 몇 층 만들까?”의 마법값 0</h3>
+  <p>
+    <code>MipLevels</code>는 밉 체인의 <strong>레벨 개수</strong>입니다. 여기에 <strong>0을 넣으면</strong>
+    D3D11이 <em>“가능한 만큼 전부(1×1까지) 할당하라”</em>는 뜻으로 해석합니다. <code>512×512</code>라면
+    앞서 계산한 10개 레벨의 <strong>공간을 미리 확보</strong>해 둡니다. (공간만 잡을 뿐, 1번 이하 레벨의
+    실제 픽셀은 아직 비어 있습니다 — 채우는 건 <code>GenerateMips</code>의 몫입니다.)
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>MipLevels = 1</code>로 두면 <strong>밉이 없는(레벨 0만 있는) 텍스처</strong>가 됩니다. 이러면
+    <code>GenerateMips</code>를 불러도 채울 레벨 자체가 없어 <strong>아무 일도 안 일어나고</strong>, 샘플러를
+    트라이리니어로 해 놔도 여전히 지글거립니다. “밉을 켰는데 안 된다”면 십중팔구 여기입니다 —
+    <code>0</code>(자동 전체) 또는 정확한 레벨 수를 주세요.
+  </div>
+
+  <h3>1-5. <code>td.ArraySize = 1;</code> — 텍스처 배열이 아니라 단일 텍스처</h3>
+  <p>
+    D3D11의 <code>Texture2D</code>는 사실 <strong>텍스처 배열</strong>도 될 수 있습니다(큐브맵 6면, 그림자맵
+    캐스케이드 등). 여기서는 평범한 한 장이라 <code>1</code>입니다. 밉 레벨과 배열 슬라이스는 서로 다른 축이라,
+    “서브리소스 인덱스”는 <code>배열슬라이스 * 밉레벨수 + 밉레벨</code>로 계산됩니다. 아래
+    <code>UpdateSubresource</code>의 두 번째 인자가 바로 이 인덱스입니다.
+  </p>
+
+  <h3>1-6. <code>td.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;</code> — 왜 _SRGB인가</h3>
+  <p>
+    포맷은 텍셀 한 개의 <strong>비트 배치</strong>를 정합니다. <code>R8G8B8A8</code>는 R·G·B·A 각각
+    8비트(0~255)로 한 텍셀이 <strong>4바이트</strong>라는 뜻이고(아래 <code>w * 4</code>가 여기서 나옵니다),
+    <code>_UNORM</code>은 그 0~255를 셰이더에서 <strong>0.0~1.0 실수로 정규화</strong>해 읽는다는 뜻입니다.
+  </p>
+  <p>
+    핵심은 뒤의 <code>_SRGB</code>입니다. 카메라·이미지 파일의 컬러는 <strong>감마 인코딩된 sRGB</strong>
+    공간에 저장돼 있습니다. <code>_SRGB</code> 포맷을 쓰면 GPU가 텍셀을 읽는 순간
+    <strong>선형 공간으로 자동 디코딩</strong>해 주고, 렌더타깃이 <code>_SRGB</code>이면 출력 때
+    다시 감마 인코딩해 줍니다. 조명·블렌딩·<strong>밉 다운샘플(평균)</strong>은 반드시
+    <strong>선형 공간</strong>에서 해야 물리적으로 옳습니다. 감마 공간에서 평균을 내면 색이 어두워집니다.
+    자세한 배경은 <a href="./07-gamma.html" style="color:var(--accent)">감마 · 선형 색공간</a> 페이지를 보세요.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>노멀맵·러프니스맵·마스크</strong> 같은 <em>데이터</em> 텍스처는 색이 아니라 숫자이므로
+    <code>_SRGB</code>가 아니라 <strong>순수 <code>_UNORM</code></strong>으로 만들어야 합니다. 노멀맵을
+    <code>_SRGB</code>로 읽으면 법선 방향이 감마 곡선으로 왜곡돼 라이팅이 미묘하게 틀어집니다.
+    “색이면 _SRGB, 데이터면 _UNORM”을 기억하세요.
+  </div>
+
+  <h3>1-7. <code>td.SampleDesc.Count = 1;</code> — MSAA 아님</h3>
+  <p>
+    <code>SampleDesc.Count</code>는 픽셀당 <strong>멀티샘플(MSAA)</strong> 개수입니다. 일반 텍스처는
+    멀티샘플이 아니므로 <strong>반드시 1</strong>입니다(0을 넣으면 실패). MSAA는 렌더타깃(백버퍼)에 쓰는
+    개념이지, 읽어 오는 소스 텍스처에는 쓰지 않습니다.
+  </p>
+
+  <h3>1-8. <code>td.Usage = D3D11_USAGE_DEFAULT;</code> — GPU 전용, 빠른 접근</h3>
+  <p>
+    <code>Usage</code>는 이 리소스를 CPU/GPU가 각각 <strong>얼마나 자주, 어떻게</strong> 만질지를 GPU 메모리
+    배치에 힌트로 줍니다. <code>DEFAULT</code>는 <strong>GPU가 읽고 쓰는 데 최적</strong>이고 CPU는 직접
+    못 만지는 배치입니다. 밉을 GPU가 그려 넣어야 하니(=GPU 쓰기) <code>DEFAULT</code>가 맞고, 이 경우
+    베이스 픽셀은 CPU 매핑 대신 <code>UpdateSubresource</code>로 올립니다(아래).
+  </p>
+
+  <h3>1-9. <code>td.BindFlags = SHADER_RESOURCE | RENDER_TARGET;</code> — 왜 렌더타깃까지?</h3>
+  <p>
+    <code>BindFlags</code>는 <strong>“이 텍스처를 파이프라인의 어느 자리에 꽂을 수 있게 할까”</strong>를
+    비트 OR로 지정합니다. <code>|</code>는 비트 OR 연산자로, 두 권한을 <strong>동시에</strong> 부여한다는 뜻입니다.
+  </p>
+  <ul>
+    <li><code>D3D11_BIND_SHADER_RESOURCE</code> — 픽셀 셰이더에서 <strong>읽을 수 있게</strong>(SRV 생성 가능). 텍스처의 본래 목적이죠.</li>
+    <li><code>D3D11_BIND_RENDER_TARGET</code> — 이 텍스처에 GPU가 <strong>그림을 그릴 수 있게</strong>. 의외죠? 하지만 <code>GenerateMips</code>는 내부적으로 <strong>각 밉 레벨에 축소 이미지를 “렌더링”</strong>하는 방식이라, 렌더타깃 권한이 없으면 밉을 못 만듭니다.</li>
+  </ul>
+
+  <h3>1-10. <code>td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;</code> — 밉 생성 허가증</h3>
+  <p>
+    이 플래그가 있어야 <code>GenerateMips</code>를 이 텍스처의 SRV에 호출할 수 있습니다. 위의
+    <code>RENDER_TARGET</code> 바인드 플래그와 <strong>짝</strong>입니다 — 하나라도 빠지면
+    <code>GenerateMips</code>가 조용히 실패합니다(디버그 레이어를 켜면 경고를 볼 수 있습니다).
+    <em>“밉을 GPU로 만들려면 (1) 공간을 잡고(MipLevels=0) (2) 그릴 권한(RENDER_TARGET)과
+    (3) 허가증(GENERATE_MIPS)이 셋 다 필요하다”</em>가 이 코드의 핵심 계약입니다.
+  </p>
+
+  <h3>1-11. <code>device->CreateTexture2D(&amp;td, nullptr, &amp;tex);</code> — 껍데기 생성</h3>
+  <p>
+    이제 설계도(desc)를 넘겨 실제 GPU 텍스처를 만듭니다. 인자를 하나씩 보면:
+  </p>
+  <ul>
+    <li><code>&amp;td</code> — 방금 채운 설계도의 <strong>주소</strong>. D3D는 값 복사 대신 포인터로 받습니다(<code>&amp;</code>는 “주소 연산자”).</li>
+    <li><code>nullptr</code> — <strong>초기 픽셀 데이터</strong> 자리인데, 지금은 비워 둡니다(<code>= NULL</code>). 베이스 픽셀은 바로 다음 줄 <code>UpdateSubresource</code>로 따로 올립니다. 밉 레벨 1 이하는 어차피 <code>GenerateMips</code>가 채우니, 여기서 모든 레벨의 데이터를 넘기는 건 불필요하고 번거롭습니다.</li>
+    <li><code>&amp;tex</code> — 만들어진 텍스처 포인터를 <strong>받아 올</strong> 출력 인자. <code>ComPtr</code>의 주소를 넘기면 소유권이 <code>tex</code>에 담깁니다.</li>
+  </ul>
+  <p>
+    반환값(<code>HRESULT</code>)은 생략했지만, 실무에서는 <code>if (FAILED(hr)) …</code>로 <strong>반드시 확인</strong>해야
+    합니다(학습용이라 생략). desc가 조금이라도 모순되면 여기서 실패하니 첫 디버깅 포인트입니다.
+  </p>
+
+  <h3>1-12. <code>context->UpdateSubresource(tex.Get(), 0, nullptr, pixels, w * 4, 0);</code> — 베이스 픽셀 업로드</h3>
+  <p>
+    CPU 메모리의 픽셀 배열(<code>pixels</code>)을 GPU 텍스처의 <strong>0번 서브리소스(=레벨 0)</strong>에
+    복사합니다. 인자를 성분별로 해부합니다:
+  </p>
+  <table class="impl">
+    <thead><tr><th>인자</th><th>값</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td>1 <code>pDstResource</code></td><td><code>tex.Get()</code></td><td>복사 대상 리소스. <code>.Get()</code>은 ComPtr에서 <strong>원시 포인터</strong>를 꺼내는 함수(소유권은 안 넘김).</td></tr>
+      <tr><td>2 <code>DstSubresource</code></td><td><code>0</code></td><td>서브리소스 인덱스. 레벨 0(베이스). 앞서 말한 <code>슬라이스*밉수+밉</code>에서 여기선 0.</td></tr>
+      <tr><td>3 <code>pDstBox</code></td><td><code>nullptr</code></td><td>부분 영역 지정 박스. <code>nullptr</code>이면 <strong>전체</strong>를 갱신.</td></tr>
+      <tr><td>4 <code>pSrcData</code></td><td><code>pixels</code></td><td>CPU 쪽 원본 픽셀 배열의 첫 주소.</td></tr>
+      <tr><td>5 <code>SrcRowPitch</code></td><td><code>w * 4</code></td><td><strong>한 줄(가로 한 행)의 바이트 수</strong>. 텍셀 4바이트 × 가로 <code>w</code>개.</td></tr>
+      <tr><td>6 <code>SrcDepthPitch</code></td><td><code>0</code></td><td>3D 텍스처의 한 슬라이스 바이트 수. 2D라 의미 없어 0.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <strong>다섯 번째 <code>w * 4</code>가 왜 중요</strong>하냐면, GPU가 “다음 줄로 넘어갈 때 몇 바이트를 건너뛸지”를
+    이 값으로 판단하기 때문입니다. 포맷이 <code>R8G8B8A8</code>라 텍셀당 4바이트, 가로가 <code>w</code>개니
+    한 줄은 정확히 <code>w * 4</code> 바이트입니다. 만약 <code>w * 3</code>(RGB로 착각) 같은 잘못된 피치를 주면
+    이미지가 <strong>사선으로 밀려</strong>(shear) 찢어집니다. 이건 초보자가 자주 겪는 대표적 버그입니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>stb_image</code>로 이미지를 로드할 때 <strong>4채널(RGBA)로 강제 로드</strong>(<code>stbi_load(..., 4)</code>)해야
+    피치 <code>w * 4</code>와 포맷 <code>R8G8B8A8</code>가 맞아떨어집니다. 3채널로 읽어 놓고 <code>w * 4</code>를
+    주면 데이터가 어긋납니다. “로드 채널 = 포맷 채널 = 피치 계산”을 항상 일치시키세요.
+  </div>
+
+  <h3>1-13. <code>CreateShaderResourceView(tex.Get(), nullptr, &amp;srv);</code> — 읽기용 창구(SRV)</h3>
+  <p>
+    텍스처 자체는 “GPU 메모리 덩어리”일 뿐, 셰이더가 직접 만지지 못합니다. 셰이더가 <strong>읽으려면</strong>
+    <strong>SRV(Shader Resource View)</strong>라는 “창구”가 필요합니다. 두 번째 인자 <code>nullptr</code>은
+    <em>“텍스처가 선언된 그대로, 모든 밉 레벨(0 ~ 최상위)을 다 보이게”</em>라는 <strong>기본 뷰</strong>를 뜻합니다.
+    여기서 <code>nullptr</code>을 쓰는 게 중요한 이유가 다음 줄에 있습니다.
+  </p>
+
+  <h3>1-14. <code>context->GenerateMips(srv.Get());</code> — 이 한 줄이 피라미드를 채운다</h3>
+  <p>
+    드디어 밉맵 자동 생성입니다. 이 호출은 <strong>레벨 0을 원본 삼아 1, 2, 3 …번 레벨을 GPU가 그려 넣게</strong>
+    합니다. GPU는 각 레벨을 그 위 레벨의 <strong>2×2 평균(박스 다운샘플)</strong>로 만듭니다(하드웨어/드라이버에
+    따라 더 좋은 필터를 쓰기도 합니다). 그래서 <strong>SRV가 모든 레벨을 볼 수 있어야</strong> 하고
+    (그래서 위에서 <code>nullptr</code> 기본 뷰), 텍스처에 <strong>RENDER_TARGET + GENERATE_MIPS</strong>
+    권한이 있어야 합니다(그래서 위 desc). 이 세 조건이 맞물려야 이 한 줄이 실제로 동작합니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    베이스 픽셀을 <strong><code>UpdateSubresource</code>로 올린 <em>다음</em></strong> <code>GenerateMips</code>를
+    불러야 합니다. 순서가 바뀌면 GPU가 <strong>빈 레벨 0</strong>을 평균 내 온 피라미드가 새까맣게 됩니다.
+    또, <code>_SRGB</code> 포맷이라 GPU가 선형 공간에서 평균을 내 주므로 색이 어두워지지 않습니다 —
+    <em>이래서 데이터 텍스처가 아닌 컬러는 <code>_SRGB</code>가 맞다</em>는 1-6의 이야기가 여기서 열매를 맺습니다.
+  </div>
+
+  <h3>1-15. 샘플러의 <code>Filter</code> — 세 글자(MIN·MAG·MIP)의 조합</h3>
+  <p>
+    이제 “만든 밉을 어떻게 읽을지”를 정하는 <strong>샘플러</strong>입니다. <code>D3D11_SAMPLER_DESC sd = {};</code>로
+    0 초기화 후 <code>sd.Filter</code>에 열거값을 넣는데, 이 열거값 이름을 <strong>세 부분으로 쪼개</strong> 읽으면
+    구조가 한눈에 보입니다:
+  </p>
+  <table class="impl">
+    <thead><tr><th>부분</th><th>담당</th><th>POINT</th><th>LINEAR</th></tr></thead>
+    <tbody>
+      <tr><td><code>MIN</code></td><td>축소 시 <strong>한 레벨 안</strong>에서 텍셀 뽑기</td><td>가장 가까운 1개</td><td>주변 2×2 가중평균(바이리니어)</td></tr>
+      <tr><td><code>MAG</code></td><td>확대 시 텍셀 뽑기</td><td>계단 픽셀아트</td><td>부드럽게 번짐</td></tr>
+      <tr><td><code>MIP</code></td><td><strong>레벨 사이</strong> 섞기</td><td>가까운 1레벨만(전환선 보임)</td><td>두 레벨을 섞음(부드러움)</td></tr>
+    </tbody>
+  </table>
+  <p>
+    따라서 <code>D3D11_FILTER_MIN_MAG_MIP_LINEAR</code>는 <strong>셋 다 LINEAR</strong> —
+    한 레벨 안 2×2 바이리니어(4텍셀) + 위아래 두 레벨(각 4텍셀) 사이 선형 보간 = 도합 <strong>8텍셀</strong>을
+    섞어 읽는 <strong>트라이리니어(trilinear)</strong>입니다. 레벨 경계가 매끈해져 “전환선”이 사라집니다.
+    이게 <strong>표준 기본값</strong>입니다.
+  </p>
+  <p>
+    주석의 대안들도 같은 규칙으로 읽힙니다:
+  </p>
+  <ul>
+    <li><code>MIN_MAG_MIP_POINT</code> — 셋 다 POINT. 제일 싸지만 레벨이 뚝뚝 바뀌는 <strong>전환선(mip banding)</strong>과 텍셀 계단이 다 보입니다.</li>
+    <li><code>MIN_MAG_LINEAR_MIP_POINT</code> — 레벨 안은 부드럽게(LINEAR) 읽되 레벨 사이는 안 섞음(POINT). 바이리니어 + <strong>레벨 하드컷</strong>이라 예전 게임 특유의 “선명한 경계선” 룩이 납니다.</li>
+    <li>주석 마지막 줄대로 <strong>MAG만 POINT</strong>로 바꾸면(<code>MIN_MIP_LINEAR_MAG_POINT</code> 계열), 축소는 부드럽되 <strong>확대는 또렷</strong>해 <strong>픽셀아트</strong>를 크게 키울 때 딱 좋습니다.</li>
+  </ul>
+
+  <h3>1-16. <code>AddressU/V/W = WRAP;</code> — uv가 [0,1]을 벗어나면?</h3>
+  <p>
+    <code>Address*</code>는 uv 좌표가 <strong>0~1 범위를 넘어갈 때</strong>의 처리 방식입니다. <code>U</code>는 가로,
+    <code>V</code>는 세로, <code>W</code>는 3D 텍스처의 깊이 축입니다. <code>WRAP</code>은
+    <strong>정수부를 버리고 소수부만 사용</strong>해 텍스처를 <strong>타일처럼 반복</strong>합니다
+    (<code>uv=1.3 → 0.3</code>, <code>uv=2.7 → 0.7</code>). 바닥·벽 타일링에 딱 맞습니다.
+    다른 값으로 <code>CLAMP</code>(가장자리 텍셀로 고정), <code>MIRROR</code>(거울 반사 반복),
+    <code>BORDER</code>(지정한 테두리색) 등이 있습니다.
+  </p>
+
+  <h3>1-17. <code>sd.MaxLOD = D3D11_FLOAT32_MAX;</code> — 가장 작은 레벨까지 허용</h3>
+  <p>
+    <code>MaxLOD</code>는 <strong>샘플링에 사용할 가장 높은(=가장 작은 이미지) 밉 레벨 번호의 상한</strong>입니다.
+    <code>D3D11_FLOAT32_MAX</code>(사실상 무한대)를 주면 <strong>1×1 레벨까지 전부</strong> 쓸 수 있습니다 —
+    즉 아주 멀리 있는 물체도 제대로 흐려집니다. 반대로 <code>MinLOD</code>(여기선 0 초기화)는 하한이라,
+    0이면 원본(가장 선명)까지 다 쓴다는 뜻입니다. 이 상·하한으로 <strong>일부러 항상 흐리게</strong>
+    (예: 노이즈 줄이려 <code>MinLOD</code>를 올림) 같은 트릭도 가능합니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>MaxLOD</code>를 <strong>0</strong>으로 두면(초기화 잊음 등) 항상 <strong>레벨 0만</strong> 샘플링해
+    밉을 애써 만들고도 <strong>지글거림이 그대로</strong>입니다. “밉을 켰는데 여전히 흔들린다”의 또 다른
+    단골 원인입니다. 반드시 큰 값(<code>D3D11_FLOAT32_MAX</code>)을 주세요.
+  </div>
+
+  <h3>1-18. <code>CreateSamplerState</code> &amp; <code>PSSetSamplers(0, 1, samp.GetAddressOf());</code></h3>
+  <p>
+    <code>CreateSamplerState</code>로 샘플러 객체를 만들고, <code>PSSetSamplers</code>로
+    <strong>픽셀 셰이더의 샘플러 슬롯 0번</strong>에 1개 바인딩합니다. 인자는 순서대로
+    <em>(시작 슬롯 <code>0</code>, 개수 <code>1</code>, 샘플러 포인터 배열)</em>입니다.
+    <code>GetAddressOf()</code>는 ComPtr <strong>내부 포인터의 주소</strong>(즉 <code>ID3D11SamplerState**</code>)를
+    돌려줍니다 — <code>PSSetSamplers</code>가 “포인터 배열”을 받기 때문입니다. 헷갈리기 쉬운
+    <code>.Get()</code>(포인터 자체)과 <code>.GetAddressOf()</code>(포인터의 주소)의 차이를 여기서 확실히
+    구분하세요. 이 슬롯 번호 <code>0</code>은 곧 HLSL의 <code>register(s0)</code>와 짝이 됩니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">2. HLSL 픽셀 셰이더에서 읽기 — 샘플링 한 줄의 내부</h2>
+  <p>
+    C++ 쪽에서 밉과 샘플러를 준비했으니, 실제로 “읽는” 쪽은 픽셀 셰이더입니다. 원본 예제에는 셰이더가
+    생략돼 있었지만, 위 <code>PSSetSamplers(0, ...)</code>와 SRV 바인딩이 <strong>HLSL의 어떤 선언과 짝이 되는지</strong>
+    한 줄씩 보여 드립니다(로직은 표준 텍스처 샘플링 그대로입니다).
+  </p>
+  <div class="code">
+    <div class="code-head"><span>texture_sample.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">// C++의 SRV(슬롯 0) ↔ t0,  샘플러(슬롯 0) ↔ s0
+Texture2D    gTex  : register(t0);
+SamplerState gSamp : register(s0);
+
+struct PSIn {
+    float4 pos : SV_Position;   // 래스터라이저가 채우는 화면 좌표
+    float2 uv  : TEXCOORD0;     // 정점에서 보간돼 온 uv
+};
+
+float4 PSMain(PSIn input) : SV_Target
+{
+    // 밉 레벨은 하드웨어가 uv의 화면 미분(ddx/ddy)으로 자동 선택한다
+    float4 color = gTex.Sample(gSamp, input.uv);
+    return color;
+}</code></pre>
+  </div>
+
+  <h3>2-1. <code>Texture2D gTex : register(t0);</code> — SRV와 t 레지스터의 짝</h3>
+  <p>
+    HLSL에서 텍스처는 <code>Texture2D</code> 타입으로 선언하고, <code>: register(t0)</code>로
+    <strong>텍스처 슬롯 0번(t0)</strong>에 묶습니다. C++에서 <code>PSSetShaderResources(0, 1, srv…)</code>로
+    바인딩한 SRV가 바로 이 <code>t0</code>로 들어옵니다. 접두사 <code>t</code>는 texture(SRV),
+    <code>s</code>는 sampler, <code>b</code>는 constant buffer, <code>u</code>는 UAV를 뜻하는 관례입니다.
+  </p>
+
+  <h3>2-2. <code>SamplerState gSamp : register(s0);</code> — 1-18의 PSSetSamplers(0,…)와 짝</h3>
+  <p>
+    바로 앞 C++에서 <code>PSSetSamplers(0, 1, samp…)</code>로 <strong>샘플러 슬롯 0</strong>에 꽂았으니,
+    셰이더에서는 <code>register(s0)</code>로 받습니다. <strong>이 <code>gSamp</code> 안에 우리가 정한
+    트라이리니어·WRAP·MaxLOD 설정이 통째로 담겨</strong> 있습니다. 즉 “필터를 어떻게 할지”는 셰이더 코드가
+    아니라 <strong>이 샘플러 객체</strong>가 들고 오는 것입니다.
+  </p>
+
+  <h3>2-3. <code>gTex.Sample(gSamp, input.uv)</code> — 세 재료가 만나는 지점</h3>
+  <p>
+    이 한 줄이 페이지 전체의 클라이맥스입니다. 세 재료가 여기서 만납니다:
+  </p>
+  <ol class="steps">
+    <li><code>gTex</code> — <strong>무엇을</strong> 읽나(밉 피라미드가 든 텍스처).</li>
+    <li><code>gSamp</code> — <strong>어떻게</strong> 읽나(트라이리니어, 레벨 섞기, 반복 규칙).</li>
+    <li><code>input.uv</code> — <strong>어디를</strong> 읽나(이 픽셀이 가리키는 텍스처 좌표).</li>
+  </ol>
+  <p>
+    반환값은 <code>float4</code> RGBA. 포맷이 <code>_SRGB</code>였으므로 이 색은 이미
+    <strong>선형 공간으로 디코딩된 값</strong>이라, 이대로 조명 계산에 넣어도 물리적으로 옳습니다.
+  </p>
+
+  <h3>2-4. 마법의 핵심: 밉 레벨은 <code>ddx/ddy</code>로 자동 선택된다</h3>
+  <p>
+    “어느 밉 레벨을 읽을까?”를 우리가 지정하지 않았는데도 알아서 골라 주는 이유가 여기 있습니다. GPU는
+    픽셀을 <strong>2×2 쿼드(quad)</strong> 단위로 처리하면서, 옆·아래 픽셀과 uv 값의 차이
+    — 즉 <strong>화면상 uv의 변화율(편미분)</strong> <code>ddx(uv)</code>, <code>ddy(uv)</code> —
+    를 자동으로 계산합니다. 이 미분의 크기가 <strong>“화면 한 픽셀이 텍스처를 얼마나 넓게 덮나”</strong>를
+    말해 줍니다.
+  </p>
+  <p>
+    구체적으로, 텍셀 단위 변화율의 최대 길이를 <code>ρ</code>라 하면 LOD는
+    <strong><code>λ = log₂(ρ)</code></strong>로 계산됩니다. 화면 픽셀 하나가 텍스처를 4배 넓게 덮으면
+    (<code>ρ = 4</code>) <code>log₂(4) = 2</code>, 즉 <strong>레벨 2</strong> 근처를 읽습니다.
+    소수부(예: 2.3)는 <code>MIP=LINEAR</code>일 때 레벨 2와 3을 <strong>0.3 비율로 섞는</strong> 데 쓰입니다 —
+    이게 바로 트라이리니어의 “레벨 사이 보간”입니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>ddx/ddy</code>는 2×2 쿼드의 이웃 값이 필요하므로, <strong>동적 분기(if) 안에서
+    <code>Sample</code>을 호출하면</strong> 미분이 정의되지 않아 경고가 나거나 잘못된 레벨이 나올 수 있습니다.
+    분기 안에서 샘플링해야 한다면 <strong>미분을 미리 밖에서 계산</strong>해
+    <code>gTex.SampleGrad(gSamp, uv, ddx(uv), ddy(uv))</code>로 넘기거나, <code>SampleLevel</code>로
+    <strong>레벨을 직접 지정</strong>하세요.
+  </div>
+  <p>
+    수치 예제로 정리하면: <code>1024×1024</code> 텍스처가 화면 <code>40×40</code>에 그려질 때
+    한 픽셀이 덮는 텍셀 폭 <code>ρ ≈ 1024/40 ≈ 25.6</code>, LOD <code>= log₂(25.6) ≈ 4.68</code>.
+    트라이리니어는 <strong>레벨 4와 5를 0.68 비율로 섞어</strong> 읽으니, 655개 텍셀의 “미리 계산된 평균”이
+    자연스럽게 나와 <strong>지글거림이 사라집니다</strong>. 첫 절에서 든 “655명 평균” 비유가 정확히 이 계산입니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">3. 이방성 필터링 (Anisotropic Filtering)</h2>
+  <p>
+    <strong>무엇을 만드나</strong> — 비스듬한 바닥처럼 <em>기울어진</em> 표면에서 원거리 선명함을 살리는
+    <strong>이방성 샘플러</strong>를 만듭니다. <strong>왜 필요한가</strong> — 트라이리니어까지 왔는데도 왜
+    또 다른 필터가 필요한지, 그 이유가 “정사각 vs 직사각”에 있습니다.
+  </p>
+  <p>
+    바닥처럼 카메라에 대해 <em>비스듬한</em> 표면은 한 픽셀이 한 방향으로 <strong>길게 늘어난</strong> 텍셀
+    영역을 덮습니다. 트라이리니어는 밉 레벨을 <strong>등방(정사각) 축소</strong>로만 고르기 때문에, 이런
+    경사면에서는 <strong>가장 짧은 축</strong>에 맞춰 레벨을 고르면 긴 축이 앨리어싱되고,
+    <strong>가장 긴 축</strong>에 맞추면 짧은 축이 과도하게 흐려집니다. 어느 쪽이든 원거리 바닥이
+    <strong>뿌옇게</strong> 뭉개지죠. <strong>이방성 필터링</strong>은 늘어난 방향(장축)으로 여러 번 샘플링해
+    직사각 발자국(footprint)을 제대로 평균 냅니다. 그래서 원거리 도로·타일이 <strong>또렷하게</strong> 살아납니다.
+    Direct3D 11은 이방성을 <strong>코어 기능</strong>으로 지원하므로 샘플러 하나만 바꾸면 됩니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>anisotropic.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">using Microsoft::WRL::ComPtr;
+
+// D3D11은 이방성 필터링이 표준 기능. 샘플러의 Filter를 ANISOTROPIC로,
+// MaxAnisotropy(1~16)를 지정하면 된다. 별도의 확장/버전 체크가 필요 없다.
+ComPtr&lt;ID3D11SamplerState&gt; createAnisoSampler(ID3D11Device* device, UINT aniso) {
+    if (aniso &lt; 1u)  aniso = 1u;
+    if (aniso &gt; 16u) aniso = 16u;           // 하드웨어 최대치는 16
+
+    D3D11_SAMPLER_DESC sd = {};
+    sd.Filter = D3D11_FILTER_ANISOTROPIC;   // ← 이방성 필터링
+    sd.MaxAnisotropy = aniso;               // 예: 8x
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sd.MaxLOD = D3D11_FLOAT32_MAX;          // 전체 밉 체인 사용
+    ComPtr&lt;ID3D11SamplerState&gt; samp;
+    device->CreateSamplerState(&amp;sd, &amp;samp);
+    return samp;
+}
+
+// 사용: 8x 이방성 샘플러를 슬롯 0에 바인딩
+ComPtr&lt;ID3D11SamplerState&gt; aniso = createAnisoSampler(device, 8);
+context->PSSetSamplers(0, 1, aniso.GetAddressOf());</code></pre>
+  </div>
+
+  <h3>3-1. 시그니처 <code>ComPtr&lt;ID3D11SamplerState&gt; createAnisoSampler(ID3D11Device* device, UINT aniso)</code></h3>
+  <p>
+    반환 타입이 <strong><code>ComPtr&lt;ID3D11SamplerState&gt;</code></strong>인 이유: 함수 안에서 만든 샘플러의
+    <strong>소유권을 호출한 쪽에 넘겨야</strong> 하기 때문입니다. 원시 포인터를 반환하면 “누가 Release할지”가
+    애매해지지만, <code>ComPtr</code>을 반환하면 참조 카운트가 자동으로 관리돼 <strong>누수·이중 해제</strong>가
+    없습니다. 인자 <code>ID3D11Device* device</code>는 리소스 생성 주체인 디바이스를 <strong>포인터</strong>로 받고
+    (D3D 객체는 항상 포인터로 전달), <code>UINT aniso</code>는 이방성 배수(부호 없는 정수)입니다.
+    <code>UINT</code>는 음수가 없는 정수라 “배수”처럼 자연수 의미의 값에 적합합니다.
+  </p>
+
+  <h3>3-2. <code>if (aniso &lt; 1u) aniso = 1u; if (aniso &gt; 16u) aniso = 16u;</code> — 값 clamp</h3>
+  <p>
+    <code>MaxAnisotropy</code>의 유효 범위는 <strong>1~16</strong>입니다(D3D11 하드웨어 최대치가 16).
+    호출자가 실수로 0이나 100을 넘겨도 안전하도록 <strong>범위 안으로 가둡니다</strong>. 접미사
+    <code>1u</code>/<code>16u</code>의 <code>u</code>는 “이 리터럴은 <code>unsigned</code>”라는 표시로,
+    <code>UINT aniso</code>와 타입을 맞춰 <strong>signed/unsigned 비교 경고</strong>를 피합니다. 작은 디테일이지만
+    컴파일러 경고를 깨끗이 유지하는 습관입니다. (<code>aniso=1</code>이면 사실상 이방성 꺼진 트라이리니어와 동급.)
+  </p>
+
+  <h3>3-3. <code>sd.Filter = D3D11_FILTER_ANISOTROPIC;</code> — 필터 종류 자체가 바뀜</h3>
+  <p>
+    1절의 트라이리니어(<code>MIN_MAG_MIP_LINEAR</code>)와 달리, 이건 MIN·MAG·MIP를 쪼개는 열거값이 아니라
+    <strong>독립적인 한 종류</strong>입니다. 이 값을 주는 순간 GPU는 밉 레벨을 하나 고르는 대신,
+    <strong>화면 픽셀의 직사각 발자국을 장축 방향으로 여러 번(최대 <code>MaxAnisotropy</code>번) 샘플링</strong>해
+    평균 냅니다. 즉 “같은 물체를 몇 번 더 읽어 정확한 평균을 얻느냐”의 상한이 다음 줄입니다.
+  </p>
+
+  <h3>3-4. <code>sd.MaxAnisotropy = aniso;</code> — 장축 샘플 수의 상한</h3>
+  <p>
+    이 값이 <strong>8이면</strong>, 가장 기울어진 곳에서 장축으로 <strong>최대 8배 더 촘촘히</strong> 샘플링합니다.
+    표면이 거의 정면(등방)일 때는 GPU가 알아서 적게 샘플링하니, <strong>필요한 곳에만</strong> 비용을 씁니다.
+    나머지 필드(<code>AddressU/V/W = WRAP</code>, <code>MaxLOD = 무한대</code>)는 1절과 의미가 같습니다 —
+    <strong>이방성도 밉 체인 위에서 동작</strong>하므로 <code>MaxLOD</code>가 밉 전체를 열어 둬야 합니다.
+  </p>
+
+  <h3>3-5. 사용부 — 1절 샘플러를 이 8x 샘플러로 교체</h3>
+  <p>
+    <code>createAnisoSampler(device, 8)</code>로 8x 샘플러를 만들고, <code>PSSetSamplers(0, 1, …)</code>로
+    <strong>같은 슬롯 0번</strong>에 바인딩합니다. 즉 HLSL 셰이더(<code>gTex.Sample(gSamp, uv)</code>)는
+    <strong>한 글자도 안 바꿔도</strong> 됩니다 — <code>s0</code>에 꽂힌 샘플러 객체만 트라이리니어에서 이방성으로
+    바뀌었을 뿐이니까요. 이것이 “필터 정책은 셰이더가 아니라 샘플러가 들고 온다”(2-2)는 원칙의 실전 증거입니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    이방성은 샘플 수를 늘리므로 텍스처 대역폭을 먹습니다. 16x가 늘 8x보다 눈에 띄게 좋은 건 아니니
+    <strong>8x 정도가 화질/비용 균형점</strong>인 경우가 많습니다. 밉맵이 없으면 이방성도 의미가 없으니
+    반드시 <code>GenerateMips</code> + 밉을 사용하는 샘플러(예: <code>D3D11_FILTER_ANISOTROPIC</code>)와 함께 쓰세요.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">4. 세 필터 비교 — 한눈에</h2>
+  <table class="impl">
+    <thead><tr><th>필터</th><th>레벨 안 샘플</th><th>레벨 간</th><th>경사면</th><th>비용</th><th>추천 용도</th></tr></thead>
+    <tbody>
+      <tr><td>포인트</td><td>1텍셀</td><td>하드컷</td><td>나쁨(지글)</td><td>최저</td><td>픽셀아트 확대(MAG만)</td></tr>
+      <tr><td>바이리니어 + MIP POINT</td><td>4텍셀</td><td>하드컷(전환선)</td><td>보통</td><td>낮음</td><td>구형/저사양</td></tr>
+      <tr><td>트라이리니어</td><td>4텍셀</td><td>선형 보간(8텍셀)</td><td>과도한 흐림</td><td>보통</td><td>표준 기본값</td></tr>
+      <tr><td>이방성 8x/16x</td><td>장축 다중</td><td>선형 보간</td><td><strong>선명</strong></td><td>높음</td><td>바닥·도로·원경 지형</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="tag warn">정리</span>
+    한 문장으로: <strong>밉맵</strong>은 “미리 평균을 여러 축척으로 구워 두는 것”, <strong>트라이리니어</strong>는
+    “그 축척 사이를 매끄럽게 잇는 것”, <strong>이방성</strong>은 “기울어진 발자국을 장축으로 제대로 평균 내는 것”입니다.
+    셋은 대체재가 아니라 <strong>층층이 쌓이는 개선</strong>이며, 실무 표준은
+    <em>밉맵 + 이방성 8x</em>입니다.
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 페이지의 밉 다운샘플·조명이 물리적으로 옳으려면 <strong>선형 색공간</strong>에서 계산돼야 합니다
+    (컬러 텍스처는 <code>_SRGB</code> 포맷, 렌더타깃도 <code>_SRGB</code> 또는 셰이더 말미 감마 인코딩).
+    행벡터 규약(<code>v' = v*M</code>, HLSL <code>mul(v, M)</code>)·왼손 좌표계·클립 z [0,1]·V축 위→아래는
+    시리즈 전체와 동일하게 유지됩니다. 실무에서는 밉/필터링을 직접 만들지 말고
+    <strong><code>GenerateMips</code>와 하드웨어 샘플러</strong>를 그대로 쓰는 것이 정석입니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./07-gamma.html">← 감마 · 선형 색공간</a>
+    <a href="./07-transparency.html">투명과 렌더링 순서 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

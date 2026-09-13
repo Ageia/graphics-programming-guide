@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 카메라 — C++/DirectX 11</title>
+<meta name="description" content="위치·전방·yaw/pitch를 들고 WASD 이동과 마우스 시점 회전을 처리하는 원본 Camera 클래스를 한 줄 한 줄 직접 구현합니다. 뷰 행렬의 정체, 구면 좌표 방향 벡터, 재직교화까지 전부 해부." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./03-opengl3d.html">3장. 3D 그래픽스</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">카메라</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 3</span>
+  <h1>카메라 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    3D 씬을 "돌아다니려면" 카메라가 필요합니다. 그런데 GPU에는 카메라라는 물건이 없습니다.
+    대신 우리는 <strong>세계 전체를 반대로 움직여서</strong> 마치 카메라가 움직이는 것처럼 보이게 만듭니다.
+    이 페이지에서는 위치·전방(front)·yaw/pitch를 멤버로 들고, WASD 이동과 마우스 시점 회전을 처리하는
+    원본 <code>Camera</code> 클래스를 만듭니다. 뷰 행렬이 왜 "카메라의 역행렬"인지, 삼각함수로 전방 벡터를
+    어떻게 재계산하는지, 외적 순서가 왜 이렇게 정해지는지 — 코드의 모든 줄과 성분을 하나씩 뜯어봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 시리즈 전체는 <strong>왼손 좌표계(LH)</strong>, 행벡터 규약 <code>v' = v * M</code>(HLSL에서 <code>mul(v, M)</code>),
+    행 우선 저장, 클립 공간 z 범위 <code>[0, 1]</code>, 텍스처 V축 위→아래를 따릅니다.
+    카메라는 시점 이동을 담당할 뿐 좌표계 규약 자체는 뷰·투영 행렬에서 굳어지므로,
+    여기서는 <strong>왼손 좌표계에서의 외적 순서</strong>가 특히 중요합니다.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>0. 큰 그림 — 카메라는 "역방향으로 움직이는 세계"입니다</h2>
+  <p>
+    실제 세상에서는 우리가 사진을 찍을 때 카메라를 오른쪽으로 옮깁니다. 하지만 렌더링 파이프라인에는
+    "카메라"라는 실체가 없습니다. 정점들이 GPU를 통과하면서 여러 행렬에 곱해질 뿐이죠. 그래서 우리는
+    발상을 뒤집습니다: <strong>카메라를 오른쪽으로 1만큼 옮기는 것</strong>은,
+    <strong>세계에 있는 모든 물체를 왼쪽으로 1만큼 옮기는 것</strong>과 화면상 완전히 똑같습니다.
+    카메라를 위로 올려다보게 회전시키는 것은, 세계 전체를 반대로 아래로 기울이는 것과 같습니다.
+  </p>
+  <p>
+    이 "카메라를 배치하는 변환"의 <strong>역(inverse)</strong>이 바로 <em>뷰 행렬(view matrix)</em>입니다.
+    카메라가 위치 <code>eye</code>에서 <code>target</code>을 바라보고 <code>up</code>이 위쪽이라고 할 때,
+    이 배치의 역행렬을 손으로 짜는 것은 번거롭고 실수가 많습니다. 다행히 DirectXMath의
+    <code>XMMatrixLookAtLH(eye, target, up)</code>이 그 역행렬을 통째로 계산해 줍니다(LH = Left-Handed).
+    우리 <code>Camera</code> 클래스는 "지금 카메라가 어디서 어디를 보는가"라는 상태만 잘 관리하고,
+    실제 역행렬 계산은 이 함수에 맡깁니다.
+  </p>
+  <ol class="steps">
+    <li>위치(<code>position</code>)·전방(<code>front</code>)·업(<code>up</code>) 벡터와 yaw/pitch 각도를 멤버로 둔다.</li>
+    <li>yaw/pitch로부터 전방 벡터를 삼각함수(구면 좌표)로 재계산한다.</li>
+    <li><code>viewMatrix()</code>는 <code>XMMatrixLookAtLH(pos, pos + front, up)</code>을 반환한다.</li>
+    <li>키 입력은 <strong>델타 타임(dt)</strong>을 곱해 프레임률과 무관하게 이동시킨다.</li>
+    <li>마우스 콜백에서 커서 이동량으로 yaw/pitch를 갱신하고 pitch를 ±89°로 클램프한다.</li>
+  </ol>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>1. Camera 클래스 전체 코드</h2>
+  <p>
+    먼저 완성된 클래스 전체를 봅니다. 이후 절에서 <strong>멤버 → 생성자 → <code>viewMatrix()</code> →
+    <code>processKey()</code> → <code>processMouse()</code> → <code>updateVectors()</code></strong> 순서로,
+    각 함수의 시그니처·인자·수식·성분을 하나도 빠짐없이 해부하겠습니다. 지금은 "이런 게 있구나" 정도로만
+    훑어보세요.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>src/Camera.h — 원본 카메라 클래스</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#pragma once
+#include &lt;DirectXMath.h&gt;
+
+using namespace DirectX;
+
+enum class Move { Forward, Back, Left, Right };
+
+class Camera {
+public:
+    XMFLOAT3 position{0.0f, 0.0f, -3.0f};  // 왼손 좌표계: +Z를 바라보도록 뒤(-Z)에 배치
+    XMFLOAT3 front{0.0f, 0.0f, 1.0f};
+    XMFLOAT3 up{0.0f, 1.0f, 0.0f};
+    XMFLOAT3 worldUp{0.0f, 1.0f, 0.0f};
+    float yaw   = 90.0f;    // +Z를 바라보도록 초기화
+    float pitch =  0.0f;
+    float speed = 3.0f;     // 초당 유닛
+    float sens  = 0.1f;     // 마우스 감도
+
+    Camera() { updateVectors(); }
+
+    // 뷰 행렬 = 카메라 변환의 역행렬 (LookAtLH가 대신 계산)
+    XMMATRIX viewMatrix() const {
+        XMVECTOR p = XMLoadFloat3(&amp;position);
+        XMVECTOR f = XMLoadFloat3(&amp;front);
+        XMVECTOR u = XMLoadFloat3(&amp;up);
+        return XMMatrixLookAtLH(p, XMVectorAdd(p, f), u);
+    }
+
+    // 델타 타임 기반 이동 → 프레임률과 무관
+    void processKey(Move dir, float dt) {
+        float v = speed * dt;
+        XMVECTOR p = XMLoadFloat3(&amp;position);
+        XMVECTOR f = XMLoadFloat3(&amp;front);
+        XMVECTOR u = XMLoadFloat3(&amp;up);
+        if (dir == Move::Forward) p = XMVectorAdd(p, XMVectorScale(f, v));
+        if (dir == Move::Back)    p = XMVectorSubtract(p, XMVectorScale(f, v));
+        // 오른쪽 벡터 = up × front (왼손 좌표계, 정규화)
+        XMVECTOR right = XMVector3Normalize(XMVector3Cross(u, f));
+        if (dir == Move::Left)    p = XMVectorSubtract(p, XMVectorScale(right, v));
+        if (dir == Move::Right)   p = XMVectorAdd(p, XMVectorScale(right, v));
+        XMStoreFloat3(&amp;position, p);
+    }
+
+    // 마우스 이동량(픽셀) → yaw/pitch
+    void processMouse(float dx, float dy) {
+        yaw   += dx * sens;
+        pitch += dy * sens;
+        if (pitch &gt;  89.0f) pitch =  89.0f;   // 짐벌 뒤집힘 방지
+        if (pitch &lt; -89.0f) pitch = -89.0f;
+        updateVectors();
+    }
+
+private:
+    void updateVectors() {
+        // 구면 좌표 → 방향 벡터
+        XMFLOAT3 f;
+        f.x = cosf(XMConvertToRadians(yaw)) * cosf(XMConvertToRadians(pitch));
+        f.y = sinf(XMConvertToRadians(pitch));
+        f.z = sinf(XMConvertToRadians(yaw)) * cosf(XMConvertToRadians(pitch));
+        XMVECTOR fv = XMVector3Normalize(XMLoadFloat3(&amp;f));
+        XMStoreFloat3(&amp;front, fv);
+        // up을 매번 재직교화하면 롤이 안 생긴다 (왼손: right = worldUp × front)
+        XMVECTOR wu    = XMLoadFloat3(&amp;worldUp);
+        XMVECTOR right = XMVector3Normalize(XMVector3Cross(wu, fv));
+        XMStoreFloat3(&amp;up, XMVector3Normalize(XMVector3Cross(fv, right)));
+    }
+};</code></pre>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>2. 헤더·타입·enum 해부</h2>
+
+  <h3>2.1 <code>#pragma once</code>와 <code>#include &lt;DirectXMath.h&gt;</code></h3>
+  <p>
+    <code>#pragma once</code>는 "이 헤더 파일을 컴파일 단위 하나당 딱 한 번만 포함하라"는 지시입니다.
+    C++에서는 <code>#include</code>가 사실상 "파일 내용을 그 자리에 복사·붙여넣기" 하는 동작이라서,
+    같은 헤더가 여러 경로로 두 번 포함되면 <code>class Camera</code>가 두 번 정의되어 컴파일 에러가 납니다.
+    <code>#pragma once</code>는 이런 <em>중복 포함</em>을 막아주는 관용구입니다(전통적인 <code>#ifndef</code> 가드의
+    현대적 대체품이라고 보면 됩니다).
+  </p>
+  <p>
+    <code>&lt;DirectXMath.h&gt;</code>는 마이크로소프트가 제공하는 SIMD 최적화 수학 라이브러리입니다.
+    여기서 쓰는 <code>XMFLOAT3</code>(3개 float 묶음), <code>XMVECTOR</code>(SIMD 레지스터용 4성분 벡터),
+    <code>XMMATRIX</code>(4×4 행렬), 그리고 <code>XMMatrixLookAtLH</code> 같은 함수가 전부 이 헤더에서 옵니다.
+    코드 블록 안의 <code>&amp;lt;</code>, <code>&amp;gt;</code>는 HTML 이스케이프일 뿐 실제 소스에서는
+    <code>&lt;DirectXMath.h&gt;</code>처럼 꺾쇠 그대로 씁니다.
+  </p>
+
+  <h3>2.2 <code>using namespace DirectX;</code></h3>
+  <p>
+    DirectXMath의 모든 이름은 <code>DirectX</code>라는 네임스페이스 안에 들어 있습니다. 이 줄이 없으면
+    매번 <code>DirectX::XMFLOAT3</code>, <code>DirectX::XMMatrixLookAtLH</code>처럼 길게 써야 합니다.
+    <code>using namespace</code>는 그 접두어를 생략하게 해줍니다. 다만 헤더 파일 최상단에서 남발하면
+    이 헤더를 포함하는 모든 파일에 네임스페이스가 열려 이름 충돌을 부를 수 있으니, 실무 규모에서는
+    <code>.cpp</code> 안에서만 쓰거나 필요한 이름만 <code>using DirectX::XMMATRIX;</code>처럼 골라 여는 편이
+    안전합니다. 학습 코드에서는 간결함을 위해 헤더에 두었습니다.
+  </p>
+
+  <h3>2.3 <code>enum class Move { Forward, Back, Left, Right };</code></h3>
+  <p>
+    <strong>무엇을 만드나:</strong> "어느 방향으로 움직일지"를 나타내는 4가지 값을 가진 열거형입니다.
+    <code>processKey(Move::Forward, dt)</code>처럼 호출하면 "앞으로 이동"을 뜻합니다.
+  </p>
+  <p>
+    <code>enum class</code>는 옛날 C 스타일 <code>enum</code>과 다릅니다. 첫째, 값을 쓸 때 반드시
+    <code>Move::Forward</code>처럼 <strong>범위 한정(scoped)</strong>을 붙여야 하므로, 다른 곳의
+    <code>Forward</code>라는 이름과 충돌하지 않습니다. 둘째, 정수로 <em>암묵적으로</em> 변환되지 않아서
+    <code>if (dir == 0)</code> 같은 실수를 컴파일러가 막아줍니다. 방향처럼 "정해진 몇 가지 중 하나"를
+    표현할 때 딱 맞는 도구입니다.
+  </p>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>3. 멤버 변수 — 카메라의 "상태"</h2>
+  <p>
+    카메라 클래스가 매 프레임 들고 다니는 상태입니다. 이 값들만 있으면 언제든 뷰 행렬을 다시 계산할 수 있죠.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>멤버 변수 발췌</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">XMFLOAT3 position{0.0f, 0.0f, -3.0f};  // 왼손 좌표계: +Z를 바라보도록 뒤(-Z)에 배치
+XMFLOAT3 front{0.0f, 0.0f, 1.0f};
+XMFLOAT3 up{0.0f, 1.0f, 0.0f};
+XMFLOAT3 worldUp{0.0f, 1.0f, 0.0f};
+float yaw   = 90.0f;    // +Z를 바라보도록 초기화
+float pitch =  0.0f;
+float speed = 3.0f;     // 초당 유닛
+float sens  = 0.1f;     // 마우스 감도</code></pre>
+  </div>
+
+  <h3>3.1 <code>XMFLOAT3 position{0.0f, 0.0f, -3.0f};</code> — 집합 초기화</h3>
+  <p>
+    <code>XMFLOAT3</code>는 <code>float x, y, z;</code> 세 개를 묶은 단순 구조체입니다. 뒤의
+    <code>{0.0f, 0.0f, -3.0f}</code>는 <strong>중괄호 집합 초기화(aggregate initialization)</strong>로,
+    순서대로 <code>x=0, y=0, z=-3</code>을 넣는다는 뜻입니다. 멤버 선언과 동시에 이렇게 기본값을 주면
+    (이를 "멤버 내 초기화"라 합니다) 생성자에서 따로 대입하지 않아도 안전한 초기값이 보장됩니다.
+  </p>
+  <p>
+    <strong>왜 z가 -3인가?</strong> 우리 규약은 왼손 좌표계라서 <strong>+Z가 화면 안쪽(멀어지는 방향)</strong>입니다.
+    카메라가 원점의 물체를 정면으로 보게 하려면, 카메라를 원점보다 <em>뒤쪽</em>, 즉 -Z 방향으로 물러나 있어야
+    합니다. 그래서 <code>z = -3</code>에 두고 <code>front = (0, 0, 1)</code>로 +Z를 바라보게 한 것입니다.
+    (오른손 좌표계 OpenGL 예제였다면 반대로 <code>z = +3</code>에 두고 -Z를 봤을 겁니다. 좌표계가 바뀌면
+    이 부호가 통째로 뒤집힌다는 점을 꼭 기억하세요.)
+  </p>
+
+  <h3>3.2 <code>front</code>, <code>up</code>, <code>worldUp</code> — 세 개의 방향 벡터</h3>
+  <p>
+    <strong>기하 직관:</strong> 카메라는 하나의 점(위치)만으로는 부족합니다. "어디를 보는가"(front),
+    "어느 쪽이 위인가"(up)까지 있어야 화면이 어떻게 기울지 정해집니다. 이 두 방향과 위치를 합치면
+    카메라의 자세가 완전히 결정됩니다.
+  </p>
+  <ul>
+    <li><code>front{0,0,1}</code>: 카메라가 바라보는 방향. 초기값은 +Z(화면 안쪽).</li>
+    <li><code>up{0,1,0}</code>: 카메라의 "위쪽". 매 프레임 재직교화되어 정확히 front에 수직이 됩니다(3.6절).</li>
+    <li><code>worldUp{0,1,0}</code>: <strong>세계 고정</strong>의 위쪽 기준. 카메라가 아무리 회전해도 이건
+      바뀌지 않습니다. up을 다시 계산할 때 흔들리지 않는 기준점으로 씁니다.</li>
+  </ul>
+  <p>
+    <code>front</code>는 카메라와 함께 회전하지만, <code>worldUp</code>은 세계에 못 박혀 있다는 차이가 핵심입니다.
+    이 차이 덕분에 카메라를 좌우로 아무리 돌려도 화면이 옆으로 기울지(롤, roll) 않습니다 — 자세한 이유는
+    3.6절에서 외적으로 풀어냅니다.
+  </p>
+
+  <h3>3.3 <code>yaw = 90.0f</code>와 <code>pitch = 0.0f</code></h3>
+  <p>
+    <strong>yaw(요)</strong>는 좌우 회전(고개를 좌우로 도리도리), <strong>pitch(피치)</strong>는 상하 회전
+    (고개를 위아래로 끄덕끄덕)입니다. 이 두 각도만으로 전방 벡터를 완전히 정의할 수 있습니다(3.6절 공식).
+  </p>
+  <p>
+    <strong>왜 yaw의 초기값이 45나 0이 아니라 90도인가?</strong> 3.6절의 공식에서
+    <code>front.z = sin(yaw)·cos(pitch)</code>입니다. pitch=0이면 cos(0)=1이고, yaw=90°이면 sin(90°)=1이므로
+    <code>front.z = 1</code>이 됩니다. 동시에 <code>front.x = cos(90°)·1 = 0</code>. 즉 yaw=90°는 정확히
+    "+Z를 바라봄"에 대응합니다. 만약 yaw를 0으로 두면 <code>front.x = cos(0) = 1</code>이 되어 카메라가
+    +X(오른쪽)를 보게 되어 물체가 화면 밖에 있게 됩니다. 그래서 90도로 맞춰 둔 것입니다.
+  </p>
+
+  <h3>3.4 <code>speed = 3.0f</code>, <code>sens = 0.1f</code></h3>
+  <p>
+    <code>speed</code>는 <strong>초당 3유닛</strong> 이동 속도입니다. 델타 타임과 곱해져 실제 이동량이 됩니다
+    (4절). <code>sens</code>는 마우스 감도로, 마우스가 1픽셀 움직일 때 각도를 몇 도 바꿀지 정합니다
+    (5절). 두 값 다 취향껏 조절하는 튜닝 파라미터입니다.
+  </p>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>4. 생성자와 viewMatrix() — 뷰 행렬의 정체</h2>
+
+  <h3>4.1 <code>Camera() { updateVectors(); }</code></h3>
+  <p>
+    기본 생성자입니다. 객체가 만들어지는 순간 <code>updateVectors()</code>를 한 번 호출해서, 초기 yaw/pitch
+    (90°, 0°)에 맞는 <code>front</code>와 <code>up</code>을 <strong>계산해 채워 넣습니다</strong>.
+    멤버에 적어 둔 <code>front{0,0,1}</code>은 어차피 이 호출로 재계산되어 덮어써지지만, 안전한 초기값으로
+    적어 두는 습관입니다. 생성자에서 미리 계산해 두지 않으면, 마우스를 한 번도 안 움직인 첫 프레임에
+    쓰레기 방향으로 렌더될 수 있습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>viewMatrix()</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 뷰 행렬 = 카메라 변환의 역행렬 (LookAtLH가 대신 계산)
+XMMATRIX viewMatrix() const {
+    XMVECTOR p = XMLoadFloat3(&amp;position);
+    XMVECTOR f = XMLoadFloat3(&amp;front);
+    XMVECTOR u = XMLoadFloat3(&amp;up);
+    return XMMatrixLookAtLH(p, XMVectorAdd(p, f), u);
+}</code></pre>
+  </div>
+
+  <h3>4.2 시그니처 해부: <code>XMMATRIX viewMatrix() const</code></h3>
+  <p>
+    반환 타입 <code>XMMATRIX</code>는 4×4 행렬입니다. 이 함수가 만들어 내는 결과물이 바로 정점을
+    <em>월드 공간 → 뷰(카메라) 공간</em>으로 옮기는 뷰 행렬입니다. 뒤의 <code>const</code>는
+    "이 함수는 카메라의 멤버를 하나도 바꾸지 않는다"는 약속입니다. 실제로 위치·각도를 읽기만 하고
+    수정하지 않으므로 <code>const</code>를 붙이는 게 맞습니다. 이렇게 해두면 <code>const Camera&amp;</code>로
+    받은 카메라에서도 이 함수를 호출할 수 있어 코드가 더 유연해집니다.
+  </p>
+
+  <h3>4.3 <code>XMLoadFloat3(&amp;position)</code> — 저장용 타입에서 연산용 타입으로</h3>
+  <p>
+    여기서 DirectXMath의 중요한 이원 구조가 나옵니다. <code>XMFLOAT3</code>는 <strong>메모리에 저장</strong>하기
+    좋은 타입(12바이트, 정직하게 x·y·z)이고, <code>XMVECTOR</code>는 <strong>SIMD 연산</strong>에 최적화된
+    타입(CPU의 128비트 벡터 레지스터에 대응, 4성분)입니다. <code>XMLoadFloat3</code>는 저장용
+    <code>XMFLOAT3</code>를 연산용 <code>XMVECTOR</code>로 <em>로드</em>합니다. 인자로 <code>&amp;position</code>
+    처럼 <strong>주소</strong>를 넘기는 이유는, 함수가 그 메모리에서 3개 float을 읽어 레지스터로 채워야 하기
+    때문입니다. 계산이 끝난 뒤 다시 저장할 때는 짝이 되는 <code>XMStoreFloat3</code>를 씁니다(4절의
+    <code>processKey</code>에서 등장).
+  </p>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    "왜 이렇게 번거롭게 Load/Store를 나눴나?" — SIMD 레지스터는 4개 float을 한 번의 명령으로 동시에
+    연산합니다(덧셈·곱셈이 4배 빨라짐). 하지만 레지스터는 개수가 적어 오래 들고 있을 수 없어서, 저장은
+    작은 <code>XMFLOAT3</code>로 하고 <strong>계산 직전에만</strong> <code>XMVECTOR</code>로 올렸다가
+    끝나면 내리는 패턴을 씁니다. 이 Load/Store 왕복이 잦으면 오히려 손해이니, 여러 연산은 한 번 로드한
+    <code>XMVECTOR</code>로 몰아서 처리하는 게 좋습니다(위 코드가 p, f, u를 한 번씩만 로드하는 이유).
+  </div>
+
+  <h3>4.4 핵심 한 줄: <code>XMMatrixLookAtLH(p, XMVectorAdd(p, f), u)</code></h3>
+  <p>
+    <strong>수학적 의미:</strong> <code>XMMatrixLookAtLH(eye, target, up)</code>는 카메라가
+    <code>eye</code>에 있고 <code>target</code>을 바라보며 <code>up</code>이 위쪽일 때의 뷰 행렬(=카메라
+    배치의 역행렬)을 만듭니다. 세 인자는:
+  </p>
+  <ul>
+    <li><code>eye = p</code> — 카메라 위치.</li>
+    <li><code>target = XMVectorAdd(p, f)</code> — 카메라가 바라보는 <strong>지점</strong>.
+      LookAt은 "방향"이 아니라 "바라보는 점"을 받으므로, 위치에서 전방으로 한 걸음 나간 점
+      <code>position + front</code>를 목표로 줍니다. front는 방향(길이 1)이므로 어떤 양수 거리를 더해도
+      같은 방향이 됩니다. 여기선 1만큼 더한 셈이죠.</li>
+    <li><code>up = u</code> — 재직교화된 위쪽 벡터.</li>
+  </ul>
+  <p>
+    <strong>기하 직관(그림글):</strong> LookAt은 카메라 자세로부터 세 개의 축을 뽑아냅니다 — 전방
+    <code>zaxis = normalize(target - eye)</code>, 오른쪽 <code>xaxis = normalize(cross(up, zaxis))</code>,
+    보정된 위쪽 <code>yaxis = cross(zaxis, xaxis)</code>. 이 세 축을 행으로 얹고 마지막에 위치를 각 축에
+    투영한 값(음의 내적)을 넣으면, "세계를 카메라 기준으로 다시 표현"하는 행렬이 완성됩니다. 즉 카메라를
+    원점·기본 자세로 옮기는 <em>역변환</em>입니다. LH 버전은 이 <code>zaxis</code> 방향을 +Z(안쪽)로 잡는다는
+    점만 RH와 다릅니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>XMVectorAdd(p, f)</code> 대신 실수로 방향 벡터 <code>f</code>를 그대로 target 자리에 넣으면,
+    카메라가 항상 <strong>원점 근처의 고정된 점</strong>을 보게 되어 이동해도 시점이 이상하게 따라 돕니다.
+    LookAt의 두 번째 인자는 반드시 "바라보는 <strong>점</strong>"(위치 + 방향)이어야 합니다.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>5. processKey() — 델타 타임 이동과 오른쪽 벡터</h2>
+  <p>
+    <strong>무엇을 하나:</strong> 눌린 키(Forward/Back/Left/Right)에 따라 카메라 위치를 옮깁니다.
+    <strong>왜 필요한가:</strong> WASD로 씬을 돌아다니는 1인칭 이동을 구현하기 위해서입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>processKey()</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 델타 타임 기반 이동 → 프레임률과 무관
+void processKey(Move dir, float dt) {
+    float v = speed * dt;
+    XMVECTOR p = XMLoadFloat3(&amp;position);
+    XMVECTOR f = XMLoadFloat3(&amp;front);
+    XMVECTOR u = XMLoadFloat3(&amp;up);
+    if (dir == Move::Forward) p = XMVectorAdd(p, XMVectorScale(f, v));
+    if (dir == Move::Back)    p = XMVectorSubtract(p, XMVectorScale(f, v));
+    // 오른쪽 벡터 = up × front (왼손 좌표계, 정규화)
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(u, f));
+    if (dir == Move::Left)    p = XMVectorSubtract(p, XMVectorScale(right, v));
+    if (dir == Move::Right)   p = XMVectorAdd(p, XMVectorScale(right, v));
+    XMStoreFloat3(&amp;position, p);
+}</code></pre>
+  </div>
+
+  <h3>5.1 <code>float v = speed * dt;</code> — 델타 타임이 왜 중요한가</h3>
+  <p>
+    <code>dt</code>(델타 타임)는 <strong>지난 프레임 이후 흐른 시간(초)</strong>입니다. <code>speed</code>가
+    초당 3유닛이고 dt가 0.016초(≈60 FPS)라면, 이번 프레임에 실제로 움직일 거리는
+    <code>v = 3 × 0.016 = 0.048유닛</code>입니다.
+  </p>
+  <p>
+    <strong>왜 dt를 곱하나?</strong> 만약 dt를 곱하지 않고 매 프레임 고정 거리(예: 0.05유닛)를 더하면,
+    120 FPS 컴퓨터에서는 60 FPS 컴퓨터의 <strong>두 배 빠르게</strong> 움직입니다. 초당 프레임 수가 다르니까요.
+    dt를 곱하면 느린 컴퓨터는 한 프레임에 dt가 크므로 한 번에 더 많이, 빠른 컴퓨터는 dt가 작으므로 조금씩
+    움직여서 <strong>결국 초당 이동 거리가 speed로 같아집니다</strong>. 이것이 "프레임률 독립"의 핵심입니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">손계산</span>
+    60 FPS에서 1초 = 60프레임, 프레임당 0.048유닛 → 1초에 0.048×60 = 2.88유닛 ≈ 3유닛.<br>
+    120 FPS에서 1초 = 120프레임, dt=0.008초 → 프레임당 0.024유닛 → 1초에 0.024×120 = 2.88 ≈ 3유닛.<br>
+    프레임률이 두 배 달라도 초당 이동 거리는 speed(3)로 수렴합니다.
+  </div>
+
+  <h3>5.2 전후 이동: <code>XMVectorScale(f, v)</code>와 Add/Subtract</h3>
+  <p>
+    <code>XMVectorScale(f, v)</code>는 방향 벡터 <code>f</code>(길이 1)에 스칼라 <code>v</code>를 곱해
+    "전방으로 v만큼"이라는 이동 벡터를 만듭니다. 앞으로 갈 땐 이걸 위치에 더하고
+    (<code>XMVectorAdd</code>), 뒤로 갈 땐 뺍니다(<code>XMVectorSubtract</code>). front가 <em>정규화된
+    단위 벡터</em>라는 점이 중요합니다 — 그래야 곱한 스칼라 v가 곧 이동 <em>거리</em>가 됩니다. 만약 front
+    길이가 2였다면 실제 이동은 2v가 되어 위 델타 타임 계산이 틀어집니다.
+  </p>
+
+  <h3>5.3 오른쪽 벡터: <code>right = normalize(cross(up, front))</code> — 외적 성분 해부</h3>
+  <p>
+    <strong>수학적 의미:</strong> 외적(cross product) <code>a × b</code>는 <code>a</code>와 <code>b</code>
+    <strong>둘 다에 수직인</strong> 새 벡터를 만듭니다. up과 front가 이루는 평면에 수직이면서,
+    카메라 기준으로 "오른쪽"을 가리키는 벡터가 바로 <code>right</code>입니다. 좌우 이동(A/D)은 이 벡터
+    방향으로 위치를 빼거나(왼쪽) 더합니다(오른쪽).
+  </p>
+  <p>
+    <strong>성분별로 손계산:</strong> 외적 공식은
+    <code>(a × b).x = a.y·b.z − a.z·b.y</code>,
+    <code>(a × b).y = a.z·b.x − a.x·b.z</code>,
+    <code>(a × b).z = a.x·b.y − a.y·b.x</code> 입니다.
+    초기 상태 <code>up=(0,1,0)</code>, <code>front=(0,0,1)</code>을 대입하면:
+  </p>
+  <ul>
+    <li>x = (1·1) − (0·0) = <strong>1</strong></li>
+    <li>y = (0·0) − (0·1) = <strong>0</strong></li>
+    <li>z = (0·0) − (1·0) = <strong>0</strong></li>
+  </ul>
+  <p>
+    결과 <code>right = (1, 0, 0)</code> = +X. 화면 안쪽(+Z)을 보고 위가 +Y일 때, 오른쪽은 +X가 맞죠.
+    <strong>순서가 왜 <code>cross(up, front)</code>인가?</strong> 이것이 왼손 좌표계의 규약입니다.
+    오른손 좌표계(예전 OpenGL)였다면 <code>cross(front, up)</code>이 오른쪽을 가리켰을 겁니다.
+    외적은 순서를 바꾸면 부호가 뒤집히므로(<code>a×b = −(b×a)</code>), 좌표계에 맞는 순서를 지켜야
+    A/D가 반대로 동작하지 않습니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    좌우 이동이 뒤바뀌어 보인다면 십중팔구 이 외적 순서가 좌표계와 안 맞는 것입니다. LH에서는
+    <code>right = cross(up, front)</code>, RH에서는 <code>right = cross(front, up)</code>임을 기억하세요.
+    <code>XMVector3Normalize</code>로 길이를 1로 맞추는 이유는, 위 손계산처럼 딱 떨어지지 않고 pitch가
+    섞이면 결과 길이가 1이 아닐 수 있어서, 이동 거리 v를 정확히 유지하기 위함입니다.
+  </div>
+
+  <h3>5.4 <code>XMStoreFloat3(&amp;position, p)</code> — 결과를 다시 저장</h3>
+  <p>
+    모든 이동 계산이 끝난 최종 위치 <code>p</code>(<code>XMVECTOR</code>)를 다시 저장용
+    <code>XMFLOAT3 position</code>으로 내려 씁니다. 4.3절의 <code>XMLoadFloat3</code>와 정확히 대칭인
+    동작입니다. 이 한 줄을 빠뜨리면 아무리 계산해도 카메라가 안 움직입니다(로컬 변수 p만 바뀌고
+    멤버는 그대로이므로).
+  </p>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>6. processMouse() — 마우스로 시점 회전</h2>
+
+  <div class="code">
+    <div class="code-head"><span>processMouse()</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 마우스 이동량(픽셀) → yaw/pitch
+void processMouse(float dx, float dy) {
+    yaw   += dx * sens;
+    pitch += dy * sens;
+    if (pitch &gt;  89.0f) pitch =  89.0f;   // 짐벌 뒤집힘 방지
+    if (pitch &lt; -89.0f) pitch = -89.0f;
+    updateVectors();
+}</code></pre>
+  </div>
+  <p>
+    인자 <code>dx</code>, <code>dy</code>는 <strong>이번 프레임에 마우스가 움직인 픽셀 수</strong>입니다
+    (7절에서 이전 위치와의 차로 계산). 여기에 감도 <code>sens</code>(0.1)를 곱해 각도 변화로 바꿉니다.
+    예를 들어 마우스가 오른쪽으로 100픽셀 움직이면 <code>yaw += 100 × 0.1 = 10°</code> 회전합니다.
+  </p>
+  <p>
+    <strong>pitch 클램프:</strong> pitch를 ±89°로 제한합니다. <em>왜 90이 아니라 89인가?</em>
+    pitch가 정확히 ±90°가 되면 3.6절 공식에서 <code>front = (0, ±1, 0)</code>이 되어 <strong>front가
+    worldUp과 평행</strong>해집니다. 그러면 <code>cross(worldUp, front)</code>가 <strong>0 벡터</strong>가
+    되어 오른쪽 벡터를 뽑을 수 없고, 정규화 시 0으로 나누게 되어 시점이 뒤집히거나 폭발합니다. 이를
+    <em>짐벌 락(gimbal lock) 유사 현상</em>이라 부릅니다. 89°로 살짝 못 미치게 막아 이 특이점을 피합니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    <code>updateVectors()</code>를 이 함수 끝에서 호출하는 것을 잊으면, yaw/pitch 숫자만 바뀌고
+    실제 방향 벡터(front, up)는 갱신되지 않아 마우스를 움직여도 화면이 안 돕니다. 각도를 바꾼 직후엔
+    반드시 벡터를 재계산해야 합니다.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>7. updateVectors() — 구면 좌표에서 방향 벡터 만들기</h2>
+  <p>
+    이 함수가 카메라의 심장입니다. yaw/pitch 두 각도로부터 <code>front</code>와 <code>up</code>을
+    수학적으로 재계산합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>updateVectors()</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void updateVectors() {
+    // 구면 좌표 → 방향 벡터
+    XMFLOAT3 f;
+    f.x = cosf(XMConvertToRadians(yaw)) * cosf(XMConvertToRadians(pitch));
+    f.y = sinf(XMConvertToRadians(pitch));
+    f.z = sinf(XMConvertToRadians(yaw)) * cosf(XMConvertToRadians(pitch));
+    XMVECTOR fv = XMVector3Normalize(XMLoadFloat3(&amp;f));
+    XMStoreFloat3(&amp;front, fv);
+    // up을 매번 재직교화하면 롤이 안 생긴다 (왼손: right = worldUp × front)
+    XMVECTOR wu    = XMLoadFloat3(&amp;worldUp);
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(wu, fv));
+    XMStoreFloat3(&amp;up, XMVector3Normalize(XMVector3Cross(fv, right)));
+}</code></pre>
+  </div>
+
+  <h3>7.1 <code>XMConvertToRadians(yaw)</code> — 도(°)를 라디안으로</h3>
+  <p>
+    C++ 표준 삼각함수 <code>cosf</code>, <code>sinf</code>는 <strong>라디안</strong>을 받습니다(1바퀴 =
+    2π ≈ 6.283). 하지만 우리는 사람이 이해하기 쉬운 <strong>도(degree)</strong>로 yaw/pitch를 관리하죠
+    (0~360). <code>XMConvertToRadians</code>가 <code>도 × π/180</code>로 변환해 줍니다. 예: 90° →
+    90 × π/180 = π/2 ≈ 1.5708. 이 변환을 빼먹고 도 값을 그대로 <code>sinf</code>에 넣으면 완전히 엉뚱한
+    방향이 나옵니다(가장 흔한 카메라 버그 중 하나).
+  </p>
+
+  <h3>7.2 구면 좌표 공식 — 수학·직관·코드 3단</h3>
+  <p>
+    <strong>수학적 의미:</strong> 단위 구 위의 한 점(방향)은 두 각도로 완전히 지정됩니다. pitch는 xz 평면
+    (수평면)에서 위로 얼마나 들렸는지, yaw는 수평면 안에서 어느 방위를 향하는지를 나타냅니다. 공식은:
+  </p>
+  <ul>
+    <li><code>f.y = sin(pitch)</code> — 위로 든 정도. pitch=0이면 0(수평), pitch=90°면 1(수직 위).</li>
+    <li><code>f.x = cos(yaw)·cos(pitch)</code> — 수평 방위의 x 성분. <code>cos(pitch)</code>가 곱해지는 건
+      pitch로 위를 볼수록 수평 성분이 줄기 때문입니다.</li>
+    <li><code>f.z = sin(yaw)·cos(pitch)</code> — 수평 방위의 z 성분.</li>
+  </ul>
+  <p>
+    <strong>기하 직관(그림글):</strong> 수평면에 그림자를 드리운다고 상상하세요. 그림자의 길이는
+    <code>cos(pitch)</code>(위를 볼수록 짧아짐), 그림자가 향하는 방위는 yaw가 정하며 그 x·z 성분이
+    <code>cos(yaw)</code>·<code>sin(yaw)</code>입니다. 그림자에 없는 "높이"만 <code>sin(pitch)</code>로
+    따로 올려 줍니다. 이 셋을 합치면 3D 방향이 완성됩니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">손계산</span>
+    yaw=90°, pitch=0°(초기값) 대입:
+    <code>f.x = cos90·cos0 = 0·1 = 0</code>,
+    <code>f.y = sin0 = 0</code>,
+    <code>f.z = sin90·cos0 = 1·1 = 1</code> → <code>front = (0,0,1)</code> = +Z.
+    3.3절에서 yaw를 90°로 둔 이유가 여기서 딱 맞아떨어집니다.
+  </div>
+  <p>
+    마지막으로 <code>XMVector3Normalize(XMLoadFloat3(&amp;f))</code>로 정규화합니다. 위 공식은 이론상 이미
+    길이 1이지만(sin²+cos²=1 항등식), 부동소수점 반올림 오차로 아주 미세하게 어긋날 수 있어 안전하게
+    길이를 1로 맞춰 <code>front</code>에 저장합니다.
+  </p>
+
+  <h3>7.3 up 재직교화 — 롤(기울어짐)을 없애는 이중 외적</h3>
+  <p>
+    <strong>왜 up을 매번 다시 계산하나?</strong> yaw/pitch로 front만 바꾸면 up이 여전히 옛날 값이라
+    front와 정확히 수직이 아닙니다. 뷰 행렬이 요구하는 것은 서로 <strong>직교하는 세 축</strong>이므로,
+    front가 바뀔 때마다 up을 다시 직교화해야 합니다. 두 번의 외적으로 이를 해결합니다:
+  </p>
+  <ol class="steps">
+    <li><code>right = normalize(cross(worldUp, front))</code> — <strong>세계의</strong> 위쪽 기준으로 오른쪽을
+      뽑습니다. worldUp은 절대 흔들리지 않으므로, 여기서 나온 right는 항상 수평면 안에 놓입니다(카메라를
+      좌우로 돌려도 옆으로 기울지 않음).</li>
+    <li><code>up = normalize(cross(front, right))</code> — front와 right 둘 다에 수직인 진짜 위쪽입니다.
+      이제 front·right·up 셋이 완벽히 직교합니다.</li>
+  </ol>
+  <p>
+    <strong>왜 롤이 안 생기나(그림글):</strong> 만약 여기서 worldUp 대신 카메라의 현재 up을 재귀적으로 썼다면
+    오차가 조금씩 누적되어 화면이 점점 옆으로 기울(롤) 수 있습니다. worldUp이라는 <em>세계에 고정된 기준</em>을
+    매번 참조하므로, right는 늘 수평을 유지하고 따라서 up도 화면을 똑바로 세운 상태로 유지됩니다. 1인칭
+    카메라에서 원하는 "지평선이 항상 수평"인 느낌이 이 이중 외적에서 나옵니다.
+  </p>
+  <p>
+    두 외적의 <strong>순서</strong>도 규약과 일치합니다. 왼손 좌표계에서
+    <code>right = cross(worldUp, front)</code>이고(5.3절과 동일한 규약), 이어서
+    <code>up = cross(front, right)</code>입니다. 이 순서를 바꾸면 up이 아래를 향해 화면이 위아래로 뒤집힙니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    pitch를 클램프하지 않아 front가 worldUp과 평행해지면(±90°) 첫 외적
+    <code>cross(worldUp, front)</code>이 0 벡터가 되고, <code>XMVector3Normalize</code>가 0으로 나눠
+    NaN을 뱉습니다. 6절의 ±89° 클램프가 바로 이 특이점을 막는 안전장치입니다.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>8. Win32 입력 연결과 메인 루프</h2>
+  <p>
+    카메라 클래스는 순수하게 수학만 담당합니다. 실제로 <em>키가 눌렸는지</em>, <em>마우스가 얼마나
+    움직였는지</em>는 운영체제(Win32)가 알려줘야 하죠. 이 둘을 이어 붙이는 발췌 코드입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>src/main.cpp — Win32 입력 연결 + 루프 (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">Camera gCam;
+float  gLastX = 640, gLastY = 360;
+bool   gFirst = true;
+
+// WM_MOUSEMOVE 처리 (WndProc 안에서 호출)
+void onMouse(float x, float y) {
+    if (gFirst) { gLastX = x; gLastY = y; gFirst = false; }
+    float dx = x - gLastX;
+    float dy = gLastY - y;   // 화면 y는 아래로 증가 → 부호 반전
+    gLastX = x; gLastY = y;
+    gCam.processMouse(dx, dy);
+}
+
+void processInput(float dt) {
+    // GetAsyncKeyState로 눌린 키를 폴링
+    if (GetAsyncKeyState('W') &amp; 0x8000) gCam.processKey(Move::Forward, dt);
+    if (GetAsyncKeyState('S') &amp; 0x8000) gCam.processKey(Move::Back,    dt);
+    if (GetAsyncKeyState('A') &amp; 0x8000) gCam.processKey(Move::Left,    dt);
+    if (GetAsyncKeyState('D') &amp; 0x8000) gCam.processKey(Move::Right,   dt);
+}
+
+// WndProc 안에서:
+//   case WM_MOUSEMOVE:
+//       onMouse((float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam));
+//       return 0;
+//   (커서 잠금은 ShowCursor(FALSE) + ClipCursor + 중앙 재설정으로 구현)
+//
+//   double last = getTimeSeconds();
+//   while (...) {
+//       double now = getTimeSeconds();
+//       float  dt  = (float)(now - last);  last = now;  // 이번 프레임 소요 시간
+//       processInput(dt);
+//       XMMATRIX view = gCam.viewMatrix();
+//       // view를 model*view*proj에 넣고 transpose 후 상수 버퍼로 업로드
+//       ...
+//   }</code></pre>
+  </div>
+
+  <h3>8.1 전역 상태와 <code>onMouse()</code></h3>
+  <p>
+    <code>gLastX/gLastY</code>는 이전 프레임의 마우스 위치를 기억합니다. 이번 위치에서 이걸 빼면
+    "얼마나 움직였는가"(<code>dx</code>, <code>dy</code>)가 나옵니다. 초기값 640, 360은 1280×720 창의
+    중앙 좌표입니다.
+  </p>
+  <p>
+    <strong>부호 반전 <code>dy = gLastY - y</code>:</strong> 화면 좌표는 위가 0이고 <em>아래로 갈수록 y가
+    증가</em>합니다. 하지만 우리 pitch는 <em>위를 볼 때 증가</em>해야 자연스럽죠. 그래서 그냥 <code>y -
+    gLastY</code>가 아니라 순서를 뒤집어 <code>gLastY - y</code>로 부호를 반전합니다. 이렇게 해야
+    마우스를 위로 올릴 때 카메라도 위를 봅니다(마인크래프트식). 이 부호를 안 뒤집으면 상하가 거꾸로 되는,
+    소위 "인버트 마우스"가 됩니다.
+  </p>
+
+  <h3>8.2 첫 프레임 처리 <code>gFirst</code></h3>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    프로그램이 막 켜졌을 때 첫 <code>WM_MOUSEMOVE</code>의 좌표는 커서가 있던 아무 위치라서,
+    <code>gLastX/gLastY</code>(중앙)와의 차가 수백 픽셀로 튈 수 있습니다. 그러면 시작하자마자 시점이
+    홱 돌아갑니다. <code>gFirst</code> 플래그로 <strong>첫 이동량을 통째로 버리고</strong> 현재 위치를
+    기준으로 삼아 이 점프를 막습니다.
+  </div>
+
+  <h3>8.3 <code>GetAsyncKeyState('W') &amp; 0x8000</code> — 키 폴링</h3>
+  <p>
+    <code>GetAsyncKeyState</code>는 특정 키의 현재 상태를 반환합니다. 반환값의 <strong>최상위 비트</strong>
+    (<code>0x8000</code>)가 1이면 "지금 눌려 있음"을 뜻합니다. <code>&amp;</code>는 비트 AND 연산으로
+    그 비트만 골라냅니다. 이렇게 매 프레임 <em>폴링</em>하면, WM_KEYDOWN 이벤트처럼 "눌린 순간 한 번"이
+    아니라 <strong>누르고 있는 동안 매 프레임 계속</strong> 이동시킬 수 있어 부드러운 연속 이동에 적합합니다.
+    또한 여러 키를 동시에(예: W+D로 대각선) 체크할 수 있는 것도 장점입니다.
+  </p>
+
+  <h3>8.4 메인 루프의 델타 타임과 transpose</h3>
+  <p>
+    루프 첫 줄에서 현재 시각(<code>now</code>)과 지난 프레임 시각(<code>last</code>)의 차로 <code>dt</code>를
+    구해 <code>processInput(dt)</code>에 넘깁니다(5.1절의 dt가 여기서 옵니다). 그다음 <code>viewMatrix()</code>로
+    뷰 행렬을 얻어 <code>model × view × proj</code>에 끼워 넣습니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    DirectXMath는 <strong>행벡터</strong> 규약(<code>v' = v * M</code>)으로 곱을 정의하지만, HLSL cbuffer로
+    올릴 때는 <code>XMMatrixTranspose</code>로 <strong>전치(transpose)</strong>해서 업로드하고 셰이더에서
+    <code>mul(v, M)</code>로 곱하는 게 표준 패턴입니다. 카메라의 view 행렬도 예외가 아니어서, 상수 버퍼로
+    넘기기 직전 최종 MVP를 transpose합니다(이 시리즈의 MVP 페이지에서 자세히 다룹니다).
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2>9. DirectXMath / D3D API 대응 정리</h2>
+  <p>
+    이 페이지에서 쓴 DirectXMath 함수들이 각각 무엇을 하는지 1:1로 정리합니다. 직접 구현 대신 이 함수들을
+    쓰는 이유는, 검증된 SIMD 구현이라 빠르고 버그가 없기 때문입니다(실무 권장).
+  </p>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead>
+      <tr><th>코드에서의 호출</th><th>하는 일</th><th>수학적 대응</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>XMLoadFloat3(&amp;a)</code></td><td>저장용 <code>XMFLOAT3</code>를 연산용 <code>XMVECTOR</code>로 로드</td><td>메모리 → SIMD 레지스터</td></tr>
+      <tr><td><code>XMStoreFloat3(&amp;a, v)</code></td><td><code>XMVECTOR</code>를 <code>XMFLOAT3</code>로 저장</td><td>SIMD 레지스터 → 메모리</td></tr>
+      <tr><td><code>XMVectorAdd(a, b)</code></td><td>성분별 덧셈</td><td><code>a + b</code></td></tr>
+      <tr><td><code>XMVectorSubtract(a, b)</code></td><td>성분별 뺄셈</td><td><code>a − b</code></td></tr>
+      <tr><td><code>XMVectorScale(a, s)</code></td><td>스칼라 곱</td><td><code>s · a</code></td></tr>
+      <tr><td><code>XMVector3Cross(a, b)</code></td><td>3D 외적(둘에 수직인 벡터)</td><td><code>a × b</code></td></tr>
+      <tr><td><code>XMVector3Normalize(a)</code></td><td>길이를 1로 정규화</td><td><code>a / |a|</code></td></tr>
+      <tr><td><code>XMConvertToRadians(d)</code></td><td>도 → 라디안</td><td><code>d · π/180</code></td></tr>
+      <tr><td><code>XMMatrixLookAtLH(e, t, u)</code></td><td>왼손 좌표계 뷰 행렬 생성</td><td>카메라 배치의 역행렬</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    카메라 이동/회전은 프레임당 몇 번의 벡터 연산에 불과해 성능 병목이 되는 일이 거의 없습니다. 그러니
+    가독성을 위해 위 함수들을 마음껏 쓰세요. 다만 <code>viewMatrix()</code>를 한 프레임에 여러 번
+    호출하지 말고 <strong>한 번 계산해 캐싱</strong>하는 정도만 신경 쓰면 충분합니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./03-mvp.html">← Model → World → View → Projection</a>
+    <a href="./03-mesh.html">삼각형과 메시 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

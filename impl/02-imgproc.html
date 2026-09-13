@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 이미지 처리 — 컨볼루션 필터 — C++/DirectX 11</title>
+<meta name="description" content="stb_image로 이미지를 읽어 프레임버퍼로 옮기고, 휘도 그레이스케일·박스 블러·소벨 에지 검출을 하나의 3×3 컨볼루션으로 처리한다. 각 코드 줄과 커널 성분을 손계산까지 해부하고 DirectX 11/Compute Shader 대응을 1:1로 짚는다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./02-raster2d.html">2장. 2D 그래픽스</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">이미지 처리 — 컨볼루션 필터</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 2</span>
+  <h1>이미지 처리 — 컨볼루션 필터 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    지금까지는 <em>빈 프레임버퍼에 그림을 그렸다면</em>, 이번에는 반대로 <em>이미 있는 이미지를 읽어서</em>
+    픽셀 단위로 변환합니다. 파일 로딩은 헤더 온리 라이브러리 <code>stb_image</code> 한 방으로 끝내고,
+    <strong>흑백 변환 · 박스 블러 · 소벨 에지 검출</strong>을 전부 <strong>하나의 일반화된 3×3 컨볼루션</strong>
+    관점으로 이해합니다. 컨볼루션은 GPU 셰이더에서도, 딥러닝 CNN에서도 똑같이 나오는 <em>가장 기본이 되는
+    이미지 연산</em>입니다. 여기서 CPU로 성분 하나하나 손으로 계산해 보면, 나중에 Compute Shader로 옮길 때
+    "무엇이 무엇에 대응하는지"가 훤히 보입니다.
+  </p>
+
+  <ol class="steps">
+    <li><code>stb_image</code>로 이미지를 로드해 우리 프레임버퍼로 옮긴다.</li>
+    <li>사람 눈에 맞는 <strong>휘도 가중치</strong>로 그레이스케일 변환한다.</li>
+    <li><strong>일반 3×3 커널 컨볼루션</strong> 함수를 하나 만들어 블러·소벨에 재사용한다.</li>
+    <li><strong>경계 처리</strong>와, 블러의 <strong>분리 가능(separable)</strong> 최적화를 이해한다.</li>
+  </ol>
+
+  <!-- ============================================================ -->
+  <h2>1. 이미지 로딩 — 디스크에서 프레임버퍼로</h2>
+  <p>
+    화면에 무언가를 필터링하려면 우선 <strong>메모리 위에 픽셀 배열</strong>이 있어야 합니다. PNG·JPG 같은
+    압축 파일을 직접 디코딩하는 것은 그 자체로 큰 프로젝트라, 실무에서도 검증된 라이브러리를 씁니다. 우리는
+    Sean Barrett의 <code>stb_image</code>를 쓰는데, 이건 <strong>헤더 파일 하나</strong>만 넣으면 되는
+    "헤더 온리(header-only)" 라이브러리입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>image_load.cpp (발췌)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#define STB_IMAGE_IMPLEMENTATION   // 딱 한 번, .cpp 하나에서만 정의
+#include "stb_image.h"
+#include "framebuffer.h"
+
+// 디스크 이미지 -&gt; Framebuffer (실패 시 0x0 버퍼)
+Framebuffer loadImage(const char* path) {
+    int w, h, ch;
+    // 마지막 인자 4 = 항상 RGBA로 강제 변환
+    unsigned char* data = stbi_load(path, &amp;w, &amp;h, &amp;ch, 4);
+    if (!data) { std::fprintf(stderr, "load 실패: %s\n", path); return Framebuffer(0, 0); }
+
+    Framebuffer fb(w, h);
+    for (int y = 0; y &lt; h; ++y)
+        for (int x = 0; x &lt; w; ++x) {
+            const unsigned char* p = data + (static_cast&lt;size_t&gt;(y) * w + x) * 4;
+            fb.setPixel(x, y, rgb(p[0], p[1], p[2], p[3]));
+        }
+    stbi_image_free(data);   // stb가 malloc한 메모리는 반드시 해제
+    return fb;
+}</code></pre>
+  </div>
+
+  <h3>1-1. <code>#define STB_IMAGE_IMPLEMENTATION</code> — 왜 이 한 줄이 특별한가</h3>
+  <p>
+    보통 <code>#include</code>는 함수의 <em>선언(이름과 시그니처)</em>만 가져오고, 실제 <em>본문(구현)</em>은
+    별도의 <code>.cpp</code>나 미리 컴파일된 라이브러리에 있습니다. 그런데 헤더 온리 라이브러리는 헤더 안에
+    구현까지 다 들어 있습니다. 만약 여러 <code>.cpp</code>가 그걸 그대로 <code>#include</code>하면, 같은 함수
+    본문이 여러 번 컴파일되어 링커가 "중복 정의(multiple definition)" 에러를 냅니다.
+  </p>
+  <p>
+    <code>stb_image.h</code>는 이 문제를 매크로로 해결합니다. 평소에는 선언만 노출하다가,
+    <code>STB_IMAGE_IMPLEMENTATION</code>이 <em>정의된 상태</em>에서 include되는 <strong>딱 한 개의 파일</strong>
+    에서만 함수 본문을 펼칩니다. 그래서 이 <code>#define</code>은 프로젝트 전체에서 <strong>정확히 한 번</strong>,
+    그것도 헤더가 아니라 <code>.cpp</code> 파일 안에서만 써야 합니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>#define STB_IMAGE_IMPLEMENTATION</code>을 <strong>헤더에</strong> 쓰거나, <strong>두 개 이상의
+    .cpp에</strong> 쓰면 링크 단계에서 "이미 정의됨(LNK2005 / duplicate symbol)" 오류가 납니다. 반대로
+    어디에도 안 쓰면 "정의를 못 찾음(unresolved external symbol)"이 납니다. <em>정확히 한 곳</em>이 규칙입니다.
+  </div>
+
+  <h3>1-2. 함수 시그니처 해부 — <code>Framebuffer loadImage(const char* path)</code></h3>
+  <p>
+    반환 타입은 <code>Framebuffer</code>(값 반환)입니다. "값으로" 돌려주지만 C++17에서는 <strong>복사 생략(RVO,
+    이동)</strong> 덕분에 실제로 큰 픽셀 배열이 통째로 복사되지는 않으니 걱정하지 않아도 됩니다.
+  </p>
+  <p>
+    인자 <code>const char* path</code>는 <strong>C 문자열</strong>(널 종료 문자 배열)로 파일 경로를 받습니다.
+    <code>const</code>가 붙은 이유는 이 함수가 경로 문자열을 <em>읽기만 하고 바꾸지 않겠다</em>는 약속이며,
+    <code>"images/cat.png"</code> 같은 문자열 리터럴을 그대로 넘길 수 있게 해 줍니다. (리터럴은 읽기 전용이라
+    <code>const</code>가 아니면 넘기기가 까다롭습니다.)
+  </p>
+
+  <h3>1-3. <code>stbi_load</code> 호출 — 출력 인자(out-parameter) 패턴</h3>
+  <p>
+    <code>int w, h, ch;</code>는 아직 값이 없는 빈 변수 셋입니다. 다음 줄이 이것들을 채웁니다.
+  </p>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">unsigned char* data = stbi_load(path, &amp;w, &amp;h, &amp;ch, 4);</code></pre>
+  <p>
+    <code>stbi_load</code>의 인자를 하나씩 보면:
+  </p>
+  <ul>
+    <li><code>path</code> — 열 파일 경로.</li>
+    <li><code>&amp;w</code>, <code>&amp;h</code> — 변수의 <strong>주소</strong>를 넘깁니다. <code>&amp;</code>는
+      "주소를 취하라(address-of)"는 연산자입니다. C에는 여러 값을 한 번에 반환하는 문법이 없어서, 이렇게
+      변수의 주소를 넘겨 <em>함수가 그 안에 결과를 써넣게</em> 합니다. 이걸 <strong>출력 인자</strong>라고
+      부릅니다. 호출이 끝나면 <code>w</code>에 폭, <code>h</code>에 높이가 채워져 있습니다.</li>
+    <li><code>&amp;ch</code> — 원본 파일의 <em>실제</em> 채널 수(예: RGB면 3, RGBA면 4, 회색조면 1)가 여기에
+      들어옵니다. 다만 우리는 다음 인자로 강제 변환을 요구하기 때문에, 반환된 <code>data</code>는 항상 4채널
+      레이아웃입니다. <code>ch</code>는 "원본이 원래 몇 채널이었나"의 정보로만 남습니다.</li>
+    <li><code>4</code> — <strong>요청 채널 수(desired_channels)</strong>. 4를 주면 원본이 무엇이든
+      stb가 <strong>항상 RGBA 4채널</strong>로 변환해 줍니다. 이렇게 고정해 두면 뒤의 반복문에서 "채널이 3개일
+      수도, 4개일 수도"를 매번 분기할 필요가 없어 코드가 단순해집니다.</li>
+  </ul>
+  <p>
+    반환값 <code>data</code>는 <code>unsigned char*</code>, 즉 <strong>0~255 바이트들이 쭉 늘어선 배열</strong>의
+    시작 주소입니다. 메모리 배치는 <code>[R,G,B,A, R,G,B,A, ...]</code> 순서로, 왼쪽 위 픽셀부터 한 줄씩 아래로
+    (행 우선) 이어집니다.
+  </p>
+
+  <h3>1-4. 실패 처리 — 널 포인터 가드</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">if (!data) { std::fprintf(stderr, "load 실패: %s\n", path); return Framebuffer(0, 0); }</code></pre>
+  <p>
+    <code>stbi_load</code>는 실패하면 <strong>널 포인터(<code>nullptr</code>)</strong>를 돌려줍니다.
+    <code>!data</code>는 "data가 널이면 참"이라는 뜻입니다(포인터는 널일 때 <code>false</code>로 평가되므로
+    <code>!</code>를 붙이면 참이 됩니다). 실패했다면 <code>stderr</code>(표준 에러 스트림)로 메시지를 찍고,
+    <strong>크기 0×0짜리 빈 프레임버퍼</strong>를 돌려줍니다. 여기서 곧바로 <code>data</code>를 읽으면
+    <em>널 포인터 역참조</em>로 프로그램이 뻗기 때문에, 이 가드가 반드시 먼저 와야 합니다.
+  </p>
+
+  <h3>1-5. 픽셀 복사 루프 — 1차원 바이트 배열을 2차원 좌표로 읽기</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">const unsigned char* p = data + (static_cast&lt;size_t&gt;(y) * w + x) * 4;
+fb.setPixel(x, y, rgb(p[0], p[1], p[2], p[3]));</code></pre>
+  <p>
+    <strong>수학적 의미:</strong> 픽셀 <code>(x, y)</code>가 1차원 배열에서 몇 번째 <em>바이트</em>부터
+    시작하는지를 계산합니다. 한 줄에 <code>w</code>개 픽셀이 있으니 <code>y</code>번째 줄 앞에는
+    <code>y * w</code>개의 픽셀이 있고, 그 줄 안에서 <code>x</code>만큼 더 갑니다. 즉 픽셀 인덱스는
+    <code>y * w + x</code>입니다. 한 픽셀은 4바이트(RGBA)이므로, 여기에 <code>* 4</code>를 곱해야 <em>바이트</em>
+    오프셋이 됩니다.
+  </p>
+  <p>
+    <strong>기하 직관(그림글):</strong> 배열을 종이 위에 한 줄로 쭉 늘어놓았다고 상상하세요. 이미지는 원래
+    사각형이지만, 메모리에서는 "1행 전체 → 2행 전체 → …"로 붙어 있는 긴 띠입니다. <code>(x, y)</code>를 찾으려면
+    "아래로 y칸 내려가서(=y줄 건너뛰고) 오른쪽으로 x칸" 가면 됩니다. 그게 <code>y*w + x</code>입니다.
+  </p>
+  <p>
+    <strong>코드 매핑:</strong> <code>data + (…) * 4</code>는 포인터를 그 바이트 위치로 이동시킵니다(포인터
+    산술). 그러면 <code>p[0]=R</code>, <code>p[1]=G</code>, <code>p[2]=B</code>, <code>p[3]=A</code>가 됩니다.
+    이걸 우리 헬퍼 <code>rgb(...)</code>로 하나의 <code>Color</code>로 묶어 <code>fb.setPixel</code>로 씁니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>static_cast&lt;size_t&gt;(y)</code>가 왜 필요할까요? <code>y</code>와 <code>w</code>가 모두 <code>int</code>
+    라면 <code>y * w</code>는 <strong>int 곱셈</strong>으로 계산됩니다. 4K·8K 대형 이미지에서는
+    <code>y * w</code>가 21억(<code>int</code> 최대치)을 넘겨 <strong>오버플로</strong>가 나고, 엉뚱한 음수
+    주소를 읽어 크래시합니다. 곱셈 <em>전에</em> 한쪽을 <code>size_t</code>(64비트 부호 없는 정수)로 올려두면
+    전체 계산이 넓은 타입으로 이뤄져 안전합니다.
+  </div>
+
+  <h3>1-6. 메모리 해제 — <code>stbi_image_free</code></h3>
+  <p>
+    <code>stbi_load</code>는 내부에서 <code>malloc</code>으로 메모리를 잡습니다. C++의 <code>new</code>가
+    아니므로 <code>delete</code>로 지우면 안 되고, 반드시 짝이 되는 <code>stbi_image_free(data)</code>로
+    돌려줘야 합니다. 이걸 빼먹으면 <strong>메모리 누수</strong>가 됩니다. 우리는 이미 픽셀을 <code>fb</code>로
+    전부 복사했으니, 원본 <code>data</code>는 더 이상 필요 없어 여기서 해제합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">주의 · DirectX 11 대응</span>
+    실무의 DirectX 11에서는 이 CPU 바이트 배열을 <code>ID3D11Texture2D</code>로 만들어 GPU에 올립니다.
+    <code>D3D11_TEXTURE2D_DESC</code>에서 <code>Format = DXGI_FORMAT_R8G8B8A8_UNORM</code>(RGBA8), <code>Width/Height</code>를
+    <code>w</code>/<code>h</code>로 채우고, <code>D3D11_SUBRESOURCE_DATA.pSysMem = data</code>,
+    <code>SysMemPitch = w * 4</code>(한 줄의 바이트 수 = "행 피치")로 넘겨 <code>CreateTexture2D</code>를
+    호출하면 됩니다. 우리가 손으로 계산한 <code>y * w * 4 + x * 4</code> 오프셋이 곧 GPU가 말하는 <em>row
+    pitch</em> 개념과 정확히 같습니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. 그레이스케일 — 휘도 가중치</h2>
+  <p>
+    가장 단순한 흑백 변환은 세 채널 평균 <code>(r+g+b)/3</code>입니다. 그런데 이건 <strong>사람 눈과 안
+    맞습니다</strong>. 사람 눈의 원추세포는 <em>초록빛에 압도적으로 민감</em>하고 파랑엔 둔합니다. 그래서 순수한
+    초록과 순수한 파랑이 물리적으로 같은 세기여도, 초록이 훨씬 밝게 느껴집니다. 이 <em>지각적 밝기</em>를
+    반영한 표준 가중치가 <strong>Rec.601 휘도(luminance)</strong>입니다.
+  </p>
+  <p style="text-align:center; color:var(--text-dim);">
+    <code>Y = 0.299·R + 0.587·G + 0.114·B</code>
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grayscale.h</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#pragma once
+#include "framebuffer.h"
+
+// 휘도 Y = 0.299R + 0.587G + 0.114B  (Rec.601)
+inline void toGrayscale(Framebuffer&amp; fb) {
+    for (int y = 0; y &lt; fb.height(); ++y)
+        for (int x = 0; x &lt; fb.width(); ++x) {
+            Color c = fb.getPixel(x, y);
+            uint8_t Y = toByte((0.299f * c.r + 0.587f * c.g + 0.114f * c.b) / 255.0f);
+            fb.setPixel(x, y, rgb(Y, Y, Y, c.a));
+        }
+}</code></pre>
+  </div>
+
+  <h3>2-1. 시그니처 — <code>inline void toGrayscale(Framebuffer&amp; fb)</code></h3>
+  <p>
+    <code>Framebuffer&amp; fb</code>는 <strong>참조(reference)</strong> 인자입니다. <code>&amp;</code>가 붙었으니
+    <em>복사본이 아니라 원본 그 자체</em>를 받습니다. 그래서 함수 안에서 <code>fb.setPixel</code>로 바꾼 결과가
+    호출한 쪽의 프레임버퍼에 그대로 반영됩니다(이 함수는 <strong>제자리(in-place) 수정</strong>입니다).
+    만약 <code>&amp;</code> 없이 <code>Framebuffer fb</code>였다면 수백만 픽셀이 통째로 복사되고, 수정도 그
+    복사본에만 남아 아무 효과가 없었을 겁니다.
+  </p>
+  <p>
+    <code>const</code>가 <em>안</em> 붙은 이유도 여기 있습니다. 이 함수는 <code>fb</code>를 <strong>바꿀
+    것이므로</strong> <code>const Framebuffer&amp;</code>가 아니라 그냥 <code>Framebuffer&amp;</code>입니다.
+    (앞으로 나올 컨볼루션의 <code>src</code>는 읽기만 하므로 <code>const</code>가 붙는 것과 대조됩니다.)
+    <code>inline</code>은 헤더에 함수 본문을 정의할 때 중복 정의를 피하려고 붙입니다.
+  </p>
+
+  <h3>2-2. 이중 for 루프 — 모든 픽셀 순회</h3>
+  <p>
+    바깥 <code>y</code> 루프가 행(세로), 안쪽 <code>x</code> 루프가 열(가로)입니다. <code>y</code>를 바깥에
+    두는 이유는 메모리 배치가 행 우선이라, 같은 행의 픽셀들이 메모리에서 서로 붙어 있기 때문입니다. 이렇게
+    <em>안쪽에서 x를 빠르게 증가</em>시키면 <strong>캐시 지역성(cache locality)</strong>이 좋아져 속도가
+    붙습니다. (x를 바깥, y를 안쪽에 두면 매 반복마다 멀리 떨어진 메모리로 점프해 캐시 미스가 잦아집니다.)
+  </p>
+
+  <h3>2-3. 핵심 한 줄 — 휘도 계산</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">uint8_t Y = toByte((0.299f * c.r + 0.587f * c.g + 0.114f * c.b) / 255.0f);</code></pre>
+  <p>
+    <strong>수학적 의미:</strong> 세 채널에 서로 다른 가중치를 곱해 더한 <em>가중 평균</em>입니다. 가중치
+    합이 <code>0.299 + 0.587 + 0.114 = 1.000</code>으로 정확히 1이라, 흰색(255,255,255)을 넣으면 결과도
+    255가 됩니다(밝기 보존). 초록 계수 0.587이 가장 크다는 게 "눈이 초록에 민감하다"를 수치로 옮긴 것입니다.
+  </p>
+  <p>
+    <strong>기하/지각 직관:</strong> RGB 3차원 색공간에서 한 점을, <code>(0.299, 0.587, 0.114)</code>
+    방향으로 <em>사영(projection)</em>해 <strong>1차원 밝기 축</strong> 하나로 눌러 내리는 것과 같습니다.
+    색은 사라지고 "얼마나 밝은가"만 남습니다.
+  </p>
+  <p>
+    <strong>코드 매핑 · 손계산 예제:</strong> 순수 초록 <code>(0,255,0)</code>을 넣어 보면
+    <code>0.299·0 + 0.587·255 + 0.114·0 = 149.7</code> → 반올림 150. 순수 파랑 <code>(0,0,255)</code>은
+    <code>0.114·255 = 29.1</code> → 29. 같은 세기의 색인데도 초록이 밝기 150, 파랑은 29로 <strong>5배 이상</strong>
+    차이 납니다. 단순 평균이었다면 둘 다 <code>255/3 = 85</code>로 똑같아, 눈에 맞지 않았을 겁니다.
+  </p>
+  <p>
+    <code>f</code> 접미사(<code>0.299f</code>)는 <strong>float 리터럴</strong>이라는 표시입니다. 안 붙이면
+    <code>double</code>로 계산되어 불필요하게 느려질 수 있어, 그래픽스에서는 관례적으로 <code>f</code>를
+    붙입니다. <code>/ 255.0f</code>로 나누는 이유는, <code>toByte</code>가 <strong>0.0~1.0 정규화 값</strong>을
+    받아 다시 0~255 바이트로 바꾸고 <em>범위를 clamp</em>해 주기 때문입니다(뒤 컨볼루션에서 이 clamp가 중요해집니다).
+  </p>
+
+  <h3>2-4. 결과 쓰기 — 알파는 보존</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">fb.setPixel(x, y, rgb(Y, Y, Y, c.a));</code></pre>
+  <p>
+    회색은 <strong>R=G=B</strong>인 색이므로 세 채널에 같은 <code>Y</code>를 넣습니다. 알파는 밝기와
+    무관한 <em>불투명도</em>이므로 <strong>원본 <code>c.a</code>를 그대로 유지</strong>합니다. 여기서 알파까지
+    <code>Y</code>로 덮어쓰면 투명 영역이 이상해집니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">주의 · HLSL 대응</span>
+    같은 연산을 픽셀 셰이더로 옮기면 내적 하나로 끝납니다:
+    <code>float y = dot(color.rgb, float3(0.299, 0.587, 0.114));</code>. <code>dot</code>이 정확히
+    "각 성분끼리 곱해서 더한다"이므로, 우리 C++의 <code>0.299f*r + 0.587f*g + 0.114f*b</code>와 <strong>같은
+    식</strong>입니다. GPU에서는 색이 이미 0~1 범위라 <code>/255</code>가 필요 없다는 점만 다릅니다.
+    (더 정확한 결과가 필요하면 sRGB 감마를 선형으로 편 뒤 휘도를 구해야 하지만, 학습용으로는 위 식으로 충분합니다.)
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. 일반 3×3 컨볼루션 — 하나로 블러·에지 다 하기</h2>
+  <p>
+    <strong>컨볼루션(convolution)</strong>은 이미지 처리의 심장입니다. 아이디어는 이렇습니다: 출력의 한
+    픽셀은, <em>자기 자신과 주변 8개 이웃</em>(합 9개)에 <strong>커널(kernel)</strong>이라 부르는 3×3 가중치를
+    각각 곱해서 전부 더한 값입니다. 커널의 숫자만 바꾸면 <strong>같은 함수 하나로 블러·샤픈·에지 검출</strong>이
+    전부 나옵니다.
+  </p>
+  <p>
+    수식으로 쓰면, 커널 <code>k</code>와 이미지 <code>I</code>에 대해 출력 픽셀은
+  </p>
+  <p style="text-align:center; color:var(--text-dim);">
+    <code>out(x,y) = Σ<sub>ky=-1..1</sub> Σ<sub>kx=-1..1</sub> k(kx,ky) · I(x+kx, y+ky)</code>
+  </p>
+  <p>
+    두 개의 합(Σ)이 곧 아래 코드의 이중 <code>for (ky) for (kx)</code> 루프입니다. 원본을 읽으면서 <em>제자리</em>
+    수정하면 방금 고친 픽셀을 이웃으로 다시 읽어 결과가 오염되므로, <strong>입력 <code>src</code>에서 읽고
+    출력 <code>dst</code>에 씁니다</strong>(둘은 서로 다른 버퍼여야 합니다).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>convolve.h</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#pragma once
+#include &lt;array&gt;
+#include &lt;algorithm&gt;
+#include "framebuffer.h"
+
+// 경계에서 좌표를 이미지 안으로 고정(clamp-to-edge). 가장 무난한 처리.
+inline int clampCoord(int v, int lo, int hi) {
+    return std::max(lo, std::min(v, hi));
+}
+
+// 3x3 커널을 채널별로 적용. divisor로 정규화, offset으로 바이어스.
+// 결과를 dst에 쓴다(src와 달라야 안전).
+inline void convolve3x3(const Framebuffer&amp; src, Framebuffer&amp; dst,
+                        const std::array&lt;float, 9&gt;&amp; k,
+                        float divisor = 1.0f, float offset = 0.0f) {
+    const int W = src.width(), H = src.height();
+    for (int y = 0; y &lt; H; ++y)
+        for (int x = 0; x &lt; W; ++x) {
+            float sr = 0, sg = 0, sb = 0;
+            for (int ky = -1; ky &lt;= 1; ++ky)
+                for (int kx = -1; kx &lt;= 1; ++kx) {
+                    int sx = clampCoord(x + kx, 0, W - 1);
+                    int sy = clampCoord(y + ky, 0, H - 1);
+                    Color c = src.getPixel(sx, sy);
+                    float w = k[(ky + 1) * 3 + (kx + 1)];
+                    sr += w * c.r; sg += w * c.g; sb += w * c.b;
+                }
+            Color out;
+            out.r = toByte((sr / divisor + offset) / 255.0f);
+            out.g = toByte((sg / divisor + offset) / 255.0f);
+            out.b = toByte((sb / divisor + offset) / 255.0f);
+            out.a = src.getPixel(x, y).a;
+            dst.setPixel(x, y, out);
+        }
+}
+
+// ── 박스 블러: 모든 가중치 1, 합 9로 나눔 ──
+inline void boxBlur(const Framebuffer&amp; src, Framebuffer&amp; dst) {
+    convolve3x3(src, dst,
+        { 1,1,1, 1,1,1, 1,1,1 }, /*divisor=*/9.0f);
+}
+
+// ── 소벨 에지: 수평/수직 그래디언트 크기 ──
+// 흑백으로 먼저 바꾼 이미지에 쓰는 게 일반적이다.
+inline void sobelEdges(const Framebuffer&amp; src, Framebuffer&amp; dst) {
+    const std::array&lt;float, 9&gt; gx = { -1,0,1, -2,0,2, -1,0,1 };
+    const std::array&lt;float, 9&gt; gy = { -1,-2,-1, 0,0,0, 1,2,1 };
+    const int W = src.width(), H = src.height();
+    for (int y = 0; y &lt; H; ++y)
+        for (int x = 0; x &lt; W; ++x) {
+            float dx = 0, dy = 0;
+            for (int ky = -1; ky &lt;= 1; ++ky)
+                for (int kx = -1; kx &lt;= 1; ++kx) {
+                    int sx = clampCoord(x + kx, 0, W - 1);
+                    int sy = clampCoord(y + ky, 0, H - 1);
+                    // 밝기(그레이 가정: r 사용) 하나만 미분
+                    float v = src.getPixel(sx, sy).r;
+                    int i = (ky + 1) * 3 + (kx + 1);
+                    dx += gx[i] * v;
+                    dy += gy[i] * v;
+                }
+            float mag = std::sqrt(dx * dx + dy * dy); // 그래디언트 크기
+            uint8_t m = toByte(mag / 255.0f);
+            dst.setPixel(x, y, rgb(m, m, m));
+        }
+}</code></pre>
+  </div>
+
+  <h3>3-1. <code>clampCoord</code> — 경계 좌표를 이미지 안으로 접기</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">inline int clampCoord(int v, int lo, int hi) {
+    return std::max(lo, std::min(v, hi));
+}</code></pre>
+  <p>
+    <strong>무엇을 하나:</strong> 값 <code>v</code>를 <code>[lo, hi]</code> 범위 안으로 <strong>가둡니다</strong>.
+    <code>std::min(v, hi)</code>가 먼저 "hi보다 크면 hi로" 눌러 위쪽을 막고, 그 결과에
+    <code>std::max(lo, …)</code>가 "lo보다 작으면 lo로" 올려 아래쪽을 막습니다. 두 번 감싸서 양쪽을 다 막는
+    이 관용구가 바로 <strong>clamp</strong>입니다.
+  </p>
+  <p>
+    <strong>왜 필요한가:</strong> 컨볼루션은 이웃을 읽는데, 이미지 <em>가장자리</em> 픽셀은 왼쪽/위쪽 이웃이
+    이미지 밖(음수 좌표)입니다. 예컨대 <code>x=0</code>에서 <code>kx=-1</code>이면 <code>x+kx = -1</code>.
+    이 좌표로 <code>getPixel(-1, …)</code>을 부르면 배열 범위 밖 접근으로 크래시합니다. <code>clampCoord</code>는
+    <code>-1</code>을 <code>0</code>으로 접어 <strong>가장자리 픽셀을 반복</strong>해서 읽게 합니다. 이 방식을
+    <strong>clamp-to-edge</strong>라 부릅니다.
+  </p>
+  <p>
+    <strong>손계산 예제:</strong> 폭 <code>W=100</code>인 이미지에서 오른쪽 끝 <code>x=99</code>일 때
+    <code>kx=+1</code>이면 <code>x+kx = 100</code>. <code>clampCoord(100, 0, 99)</code>는 먼저
+    <code>min(100,99)=99</code>, 그다음 <code>max(0,99)=99</code> → <strong>99</strong>로 접힙니다. 밖으로
+    한 칸 삐져나간 좌표가 마지막 유효 픽셀로 안전하게 되돌아옵니다.
+  </p>
+
+  <h3>3-2. <code>convolve3x3</code> 시그니처 — 인자 하나하나</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">inline void convolve3x3(const Framebuffer&amp; src, Framebuffer&amp; dst,
+                        const std::array&lt;float, 9&gt;&amp; k,
+                        float divisor = 1.0f, float offset = 0.0f)</code></pre>
+  <ul>
+    <li><code>const Framebuffer&amp; src</code> — <strong>읽기 전용 참조</strong>. <code>&amp;</code>로
+      복사를 피하고, <code>const</code>로 "원본은 절대 안 바꾼다"를 컴파일러에 약속합니다. 실수로 <code>src</code>에
+      쓰려 하면 컴파일 에러가 나서 안전합니다.</li>
+    <li><code>Framebuffer&amp; dst</code> — <strong>쓰기 대상</strong>. 여긴 <code>const</code>가 없습니다.
+      결과를 여기에 써야 하니까요.</li>
+    <li><code>const std::array&lt;float, 9&gt;&amp; k</code> — 커널. <code>std::array&lt;float,9&gt;</code>는
+      크기가 <strong>컴파일 시점에 고정된 9개짜리 float 배열</strong>입니다(그냥 C 배열보다 안전하고 복사·전달이
+      쉽습니다). 참조 <code>&amp;</code>로 넘겨 복사를 피하고, <code>const</code>로 읽기 전용을 보장합니다.
+      9개 값은 3×3 커널을 <strong>행 우선으로 펼친</strong> 것입니다(위 행 3개, 가운데 행 3개, 아래 행 3개).</li>
+    <li><code>float divisor = 1.0f</code> — <strong>정규화 나눗수</strong>. 커널 가중치 합으로 나눠 밝기를
+      원래 수준으로 되돌립니다. <code>= 1.0f</code>는 <strong>기본 인자(default argument)</strong>라, 호출할
+      때 생략하면 1이 쓰입니다(나눠도 그대로).</li>
+    <li><code>float offset = 0.0f</code> — <strong>바이어스</strong>. 결과에 상수를 더합니다. 음수가 나올 수
+      있는 커널(에지·엠보스)에서 결과를 밝은 쪽으로 밀어 <em>보이게</em> 만들 때 씁니다(예: +128).</li>
+  </ul>
+
+  <h3>3-3. 누적 변수와 이웃 순회</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">float sr = 0, sg = 0, sb = 0;
+for (int ky = -1; ky &lt;= 1; ++ky)
+    for (int kx = -1; kx &lt;= 1; ++kx) {</code></pre>
+  <p>
+    <code>sr, sg, sb</code>는 <strong>R/G/B 채널별 가중합 누적기</strong>입니다. 각 출력 픽셀마다 0으로
+    초기화하는 게 중요합니다(다음 픽셀로 넘어가기 전에 반드시 리셋). 여기서 정수가 아니라 <strong>float</strong>인
+    이유는, 가중치가 소수(예: 블러의 1/9)이거나 음수(에지)라서 중간 합이 정수 범위를 벗어나거나 소수가 되기
+    때문입니다.
+  </p>
+  <p>
+    <code>ky</code>, <code>kx</code>가 <code>-1, 0, +1</code>을 도는 것은 <strong>중심 픽셀을 (0,0)으로
+    두는 상대 좌표</strong>입니다. <code>(kx,ky)=(-1,-1)</code>은 왼쪽 위 이웃, <code>(0,0)</code>은 자기
+    자신, <code>(+1,+1)</code>은 오른쪽 아래 이웃. 3×3이므로 총 9번 돕니다.
+  </p>
+
+  <h3>3-4. 샘플 좌표 clamp와 커널 인덱싱</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">int sx = clampCoord(x + kx, 0, W - 1);
+int sy = clampCoord(y + ky, 0, H - 1);
+Color c = src.getPixel(sx, sy);
+float w = k[(ky + 1) * 3 + (kx + 1)];
+sr += w * c.r; sg += w * c.g; sb += w * c.b;</code></pre>
+  <p>
+    <code>x + kx</code>, <code>y + ky</code>가 실제로 읽을 이웃의 절대 좌표입니다. 앞서 만든
+    <code>clampCoord</code>로 <code>[0, W-1]</code>·<code>[0, H-1]</code> 범위에 가둔 뒤
+    <code>getPixel</code>로 그 이웃 색을 가져옵니다.
+  </p>
+  <p>
+    <strong>커널 인덱싱 <code>(ky+1)*3 + (kx+1)</code>이 핵심입니다.</strong> <code>ky, kx</code>는
+    <code>-1..+1</code> 범위인데, 배열 인덱스는 <code>0..8</code>이어야 합니다. 그래서 <code>+1</code>을 해서
+    <code>0..2</code>로 옮긴 뒤, "행 우선 펼치기" 공식 <code>행*폭 + 열 = (ky+1)*3 + (kx+1)</code>로 9개
+    배열의 위치를 계산합니다. 표로 보면:
+  </p>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead><tr><th></th><th>kx=-1</th><th>kx=0</th><th>kx=+1</th></tr></thead>
+    <tbody>
+      <tr><th>ky=-1</th><td>k[0]</td><td>k[1]</td><td>k[2]</td></tr>
+      <tr><th>ky=0</th><td>k[3]</td><td>k[4] (중심)</td><td>k[5]</td></tr>
+      <tr><th>ky=+1</th><td>k[6]</td><td>k[7]</td><td>k[8]</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    마지막 세 줄 <code>sr += w * c.r; …</code>이 곧 수식의 <code>Σ k·I</code>입니다. 각 이웃 색에 해당 커널
+    가중치를 곱해 채널별로 계속 더해 나갑니다.
+  </p>
+
+  <h3>3-5. 결과 정규화 — divisor와 offset</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">out.r = toByte((sr / divisor + offset) / 255.0f);
+// g, b 동일
+out.a = src.getPixel(x, y).a;</code></pre>
+  <p>
+    <strong>왜 divisor로 나누나:</strong> 박스 블러 커널은 모든 가중치가 1이라, 9개 이웃을 더하면 밝기가
+    약 9배로 부풀어 전부 흰색(255 clamp)이 됩니다. <code>divisor=9</code>로 나눠 <em>평균</em>으로 되돌려야
+    원래 밝기가 유지됩니다. 일반화하면 <strong>divisor = 커널 가중치의 합</strong>으로 두면 밝기가 보존됩니다.
+  </p>
+  <p>
+    <strong>왜 offset을 더하나:</strong> 에지·엠보스 커널은 가중치 합이 0이라, 평평한 영역에서는 결과가 0
+    근처가 되고 음수도 나옵니다. 음수는 바이트로 못 담으니(0으로 clamp) 정보가 날아갑니다. <code>offset=128</code>을
+    더하면 "변화 없음 = 회색 128"을 기준으로 삼아, 밝아지는 쪽/어두워지는 쪽을 모두 보이게 만들 수 있습니다.
+    (아래 소벨은 크기만 쓰므로 offset이 필요 없습니다.)
+  </p>
+  <p>
+    <code>out.a = src.getPixel(x, y).a;</code>는 알파를 컨볼루션하지 <strong>않고</strong> 원본의 알파를 그대로
+    가져옵니다. 알파까지 이웃과 섞으면 반투명 경계가 뭉개지므로, 색만 필터링하고 알파는 중심 픽셀 것을 유지하는
+    게 보통입니다.
+  </p>
+  <p>
+    마지막 <code>toByte(... / 255.0f)</code>는 앞의 그레이스케일과 같은 패턴입니다. <code>toByte</code>가
+    <strong>0~255 범위 밖 값을 clamp</strong>해 주기 때문에, 블러가 살짝 255를 넘거나 에지가 음수가 되어도
+    안전하게 유효한 바이트로 정리됩니다.
+  </p>
+
+  <h3>3-6. <code>boxBlur</code> — 커널 하나만 넣으면 끝</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">convolve3x3(src, dst, { 1,1,1, 1,1,1, 1,1,1 }, /*divisor=*/9.0f);</code></pre>
+  <p>
+    중괄호 <code>{ 1,1,1, 1,1,1, 1,1,1 }</code>은 <code>std::array&lt;float,9&gt;</code>의 <strong>집합
+    초기화(aggregate initialization)</strong>입니다. 9개 값을 나열하면 배열 원소로 순서대로 채워집니다.
+    모든 가중치가 1이니 "이웃 9개를 똑같이 섞는다", 즉 <strong>평균</strong>입니다. <code>divisor=9</code>로
+    나눠 밝기를 보존합니다. <code>/*divisor=*/</code>는 주석으로 인자 이름을 표시해 가독성을 높인 것뿐입니다.
+  </p>
+  <p>
+    <strong>왜 흐려지나(직관):</strong> 각 픽셀을 주변과 평균 내면, 튀는 값(고주파 성분·노이즈·날카로운
+    경계)이 이웃에 녹아들어 부드러워집니다. 커널이 클수록(5×5, 7×7…) 더 넓게 평균해 더 흐려집니다.
+  </p>
+
+  <h3>3-7. <code>sobelEdges</code> — 두 방향 미분으로 윤곽 찾기</h3>
+  <p>
+    소벨은 컨볼루션의 <em>특수 버전</em>이라 재사용 대신 별도 루프로 썼습니다. 커널이 <strong>둘</strong>
+    (<code>gx</code>, <code>gy</code>)이고, 결과를 합산이 아니라 <strong>벡터 크기</strong>로 합치기 때문입니다.
+  </p>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">const std::array&lt;float, 9&gt; gx = { -1,0,1, -2,0,2, -1,0,1 };
+const std::array&lt;float, 9&gt; gy = { -1,-2,-1, 0,0,0, 1,2,1 };</code></pre>
+  <p>
+    <strong><code>gx</code>(가로 미분):</strong> 왼쪽 열이 음수(-1,-2,-1), 오른쪽 열이 양수(+1,+2,+1),
+    가운데 열은 0입니다. 즉 "<em>오른쪽 밝기 − 왼쪽 밝기</em>"를 잽니다. 좌우 밝기가 같으면(평평한 면) 합이
+    0이 되고, 세로 경계처럼 좌우가 확 다르면 큰 값이 나옵니다. 가운데 행에 ±2를 준 건 <strong>중심 행에 더
+    큰 가중치</strong>를 줘서 노이즈에 덜 흔들리게 하는 소벨 특유의 설계입니다.
+  </p>
+  <p>
+    <strong><code>gy</code>(세로 미분):</strong> <code>gx</code>를 90도 돌린 것으로, "<em>아래 − 위</em>"를
+    재어 <strong>가로 경계</strong>에 반응합니다.
+  </p>
+  <p>
+    <strong>수학적 의미:</strong> <code>gx</code>는 밝기의 <em>x 방향 편미분</em> ∂I/∂x, <code>gy</code>는
+    ∂I/∂y의 근사입니다. 둘을 묶은 벡터 <code>(dx, dy)</code>가 밝기의 <strong>그래디언트(gradient)</strong>,
+    즉 "밝기가 가장 빠르게 변하는 방향과 세기"입니다.
+  </p>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-cpp">float v = src.getPixel(sx, sy).r;   // 그레이 가정: r만 사용
+dx += gx[i] * v;
+dy += gy[i] * v;
+...
+float mag = std::sqrt(dx * dx + dy * dy);</code></pre>
+  <p>
+    입력이 이미 그레이스케일(R=G=B)이라고 가정하므로 <code>.r</code> 하나만 미분하면 됩니다. 두 커널을 같은
+    루프에서 동시에 적용해 <code>dx</code>, <code>dy</code>를 각각 누적합니다.
+  </p>
+  <p>
+    <strong>왜 <code>sqrt(dx² + dy²)</code>인가(직관):</strong> <code>(dx, dy)</code>는 방향이 있는 벡터인데,
+    "여기 에지가 얼마나 강한가"만 알면 되므로 방향을 버리고 <strong>길이(크기)</strong>만 취합니다. 피타고라스
+    정리 그대로 두 직교 성분의 제곱합의 제곱근이 벡터 길이입니다. 밝기 변화가 클수록 이 크기가 커져, 윤곽선이
+    밝게(흰색에 가깝게) 나타납니다.
+  </p>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    실무에서 정확한 크기 대신 <code>|dx| + |dy|</code>(맨해튼 근사)를 쓰기도 합니다. <code>sqrt</code>가
+    비싸기 때문인데, 요즘 CPU/GPU에서는 <code>sqrt</code> 비용이 크지 않아 정확도를 위해 그냥 써도 대개
+    괜찮습니다. 대량 픽셀에서 병목이 확인될 때만 근사를 고려하세요("추측 말고 측정").
+  </div>
+
+  <!-- ============================================================ -->
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>제자리(in-place) 컨볼루션은 버그의 원천입니다.</strong> 왼쪽 픽셀을 이미 갱신한 뒤 그 값을
+    다음 픽셀의 이웃으로 다시 읽으면 <em>이미 필터링된 값</em>이 또 섞여 결과가 번지고 방향성 얼룩이 생깁니다.
+    반드시 <strong>원본 스냅샷(<code>src</code>)에서 읽고 결과는 별도 버퍼(<code>dst</code>)</strong>에 쓰세요.
+    한 버퍼만 쓰고 싶다면, 필터 전에 통째로 복사본을 하나 떠서 그걸 <code>src</code>로 쓰면 됩니다.
+  </div>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    <strong>경계 처리 방식은 결과를 바꿉니다.</strong> 위 코드는 <em>clamp-to-edge</em>(가장자리 픽셀 반복)입니다.
+    대안으로 <em>wrap</em>(반대편으로 감기), <em>mirror</em>(반사), 또는 아예 경계 픽셀을 건너뛰기가 있습니다.
+    소벨에서 clamp를 쓰면 가장자리에서 같은 픽셀이 반복되어 <strong>가짜 에지</strong>가 살짝 생길 수 있음을
+    감안하세요. DirectX의 텍스처 샘플러로 옮기면 이 선택이 그대로 <code>D3D11_TEXTURE_ADDRESS_MODE</code>의
+    <code>CLAMP</code>/<code>WRAP</code>/<code>MIRROR</code>에 대응합니다.
+  </div>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <strong>가우시안/박스 블러는 분리 가능(separable)합니다.</strong> 2D N×N 블러는 픽셀당 N² 샘플이지만,
+    <em>가로 1D 패스 + 세로 1D 패스</em>로 쪼개면 픽셀당 2N 샘플로 줄어듭니다. 3×3은 9→6이라 이득이 작지만,
+    반경이 커질수록 O(N²)→O(N)의 차이가 결정적입니다(예: 15×15면 225 → 30, 7.5배). 소벨의 <code>gx</code>·
+    <code>gy</code>도 사실 <code>[1,2,1]</code>(스무딩) × <code>[-1,0,1]</code>(미분)로 분리됩니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. GPU로 옮기면 — DirectX 11 대응</h2>
+  <p>
+    지금까지 CPU에서 성분 하나하나 손으로 계산했는데, 이걸 GPU로 옮기면 <strong>모든 픽셀이 동시에</strong>
+    계산됩니다. 두 가지 길이 있습니다.
+  </p>
+  <ol class="steps">
+    <li><strong>풀스크린 픽셀 셰이더</strong> — 화면을 덮는 사각형 하나를 그리고, 각 픽셀에서 텍스처를 이웃
+      샘플링해 컨볼루션. 후처리(post-processing)의 표준 방식입니다.</li>
+    <li><strong>컴퓨트 셰이더</strong> — 렌더 파이프라인 없이 <code>Dispatch</code>로 직접 이미지를 돌립니다.
+      공유 메모리로 이웃을 재사용해 더 빠릅니다.</li>
+  </ol>
+  <p>아래는 소벨 에지를 픽셀 셰이더로 옮긴 예입니다. 우리 C++ 루프의 <code>gx</code>·<code>gy</code>·<code>sqrt</code>가 그대로 보입니다.</p>
+
+  <div class="code">
+    <div class="code-head"><span>sobel.hlsl (픽셀 셰이더)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">Texture2D    gTex   : register(t0);   // 입력 이미지 (그레이스케일 가정)
+SamplerState gSamp  : register(s0);   // CLAMP 주소 모드로 설정
+
+cbuffer CB : register(b0)
+{
+    float2 texelSize;   // (1/width, 1/height): 이웃으로 한 픽셀 이동량
+}
+
+// 밝기 하나만 뽑는 헬퍼 (그레이 입력이면 .r만 써도 됨)
+float luma(float2 uv)
+{
+    float3 c = gTex.Sample(gSamp, uv).rgb;
+    return dot(c, float3(0.299, 0.587, 0.114));
+}
+
+float4 PSMain(float2 uv : TEXCOORD0) : SV_Target
+{
+    float dx = 0.0, dy = 0.0;
+    // 3x3 이웃을 상대 오프셋 (-1..1)로 순회
+    [unroll] for (int ky = -1; ky &lt;= 1; ++ky)
+    [unroll] for (int kx = -1; kx &lt;= 1; ++kx)
+    {
+        float2 off = float2(kx, ky) * texelSize;   // 이웃 UV
+        float  v   = luma(uv + off);
+        // gx: 왼쪽 -부호, 오른쪽 +부호 / 가운데 행 x2
+        float  wx  = (kx) * ((ky == 0) ? 2.0 : 1.0);
+        // gy: 위 -부호, 아래 +부호 / 가운데 열 x2
+        float  wy  = (ky) * ((kx == 0) ? 2.0 : 1.0);
+        dx += wx * v;
+        dy += wy * v;
+    }
+    float mag = sqrt(dx * dx + dy * dy);   // 그래디언트 크기
+    return float4(mag, mag, mag, 1.0);     // 흑백 에지
+}</code></pre>
+  </div>
+
+  <h3>4-1. 리소스 바인딩 — <code>Texture2D</code>와 <code>SamplerState</code></h3>
+  <p>
+    <code>Texture2D gTex : register(t0)</code>는 우리 C++의 <code>src</code> 프레임버퍼에 대응합니다. GPU에서는
+    이미지가 <strong>텍스처</strong>로 올라가고, <code>register(t0)</code>는 "0번 텍스처 슬롯"이라는 뜻입니다
+    (C++ 쪽에서 <code>PSSetShaderResources(0, 1, &amp;srv)</code>로 여기에 꽂습니다).
+  </p>
+  <p>
+    <code>SamplerState gSamp</code>는 "텍스처를 어떻게 읽을지"의 규칙입니다. 우리 <code>clampCoord</code>가
+    했던 경계 처리가 여기서는 샘플러의 <strong>주소 모드</strong>로 대체됩니다. C++ 쪽에서
+    <code>D3D11_SAMPLER_DESC.AddressU/V = D3D11_TEXTURE_ADDRESS_CLAMP</code>로 만들면, 우리의 clamp-to-edge와
+    <strong>완전히 같은 동작</strong>이 됩니다. 즉 GPU에서는 경계 처리를 코드로 안 짜고 샘플러 설정으로 끝냅니다.
+  </p>
+
+  <h3>4-2. <code>texelSize</code> — "한 픽셀 이동"을 UV로 환산</h3>
+  <p>
+    CPU에서는 이웃을 <code>x + kx</code>처럼 <strong>정수 픽셀 좌표</strong>로 옮겼습니다. 그런데 셰이더의
+    텍스처 좌표(UV)는 <strong>0~1로 정규화</strong>되어 있습니다(왼쪽 0, 오른쪽 1). 그래서 "1픽셀 옆"은 UV로
+    <code>1/width</code>만큼입니다. 이 값을 <code>texelSize = (1/width, 1/height)</code>로 cbuffer에 담아
+    넘깁니다. <code>float2(kx, ky) * texelSize</code>가 곧 CPU의 <code>(kx, ky)</code> 픽셀 오프셋과 같은
+    역할입니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>규약: 텍스처 V(세로 UV)는 위에서 아래로 증가</strong>합니다(위=0, 아래=1). 그래서 <code>+ky</code>가
+    "아래로"가 맞아, 소벨 <code>gy</code>의 "아래 − 위" 부호가 CPU 코드와 그대로 일치합니다. 만약 어떤 API에서
+    V가 뒤집혀 있으면(아래=0), 세로 에지 방향이 반대로 나오니 <code>ky</code> 부호를 뒤집거나 UV를
+    <code>1 - v</code>로 맞춰야 합니다.
+  </div>
+
+  <h3>4-3. 커널을 코드로 — 하드코딩 대신 부호 계산</h3>
+  <pre style="background:var(--code-bg,#111);padding:8px 12px;border-radius:6px;overflow-x:auto;"><code class="language-hlsl">float wx = (kx) * ((ky == 0) ? 2.0 : 1.0);
+float wy = (ky) * ((kx == 0) ? 2.0 : 1.0);</code></pre>
+  <p>
+    CPU에서는 9개 값을 배열로 나열했지만, 여기서는 규칙을 식으로 풀었습니다. <code>gx</code>의 가중치는
+    "열 부호(<code>kx</code>) × 가운데 행이면 2배"입니다. <code>kx=-1</code>이면 -1·(…), <code>kx=+1</code>이면
+    +1·(…), <code>kx=0</code>(가운데 열)이면 0이 되어 그 열이 무시됩니다. <code>ky==0</code>(가운데 행)일 때만
+    2를 곱해 소벨의 <code>-2,0,2</code> 행을 만듭니다. 결과는 배열 <code>{-1,0,1,-2,0,2,-1,0,1}</code>과
+    한 성분도 빠짐없이 일치합니다. <code>[unroll]</code>은 짧은 고정 루프를 펼쳐 분기 오버헤드를 없애라는
+    힌트입니다.
+  </p>
+
+  <h3>4-4. C++ ↔ HLSL 1:1 대응표</h3>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead><tr><th>C++ (CPU)</th><th>HLSL (GPU)</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td><code>const Framebuffer&amp; src</code></td><td><code>Texture2D gTex</code></td><td>입력 이미지</td></tr>
+      <tr><td><code>clampCoord(...)</code></td><td>Sampler의 <code>ADDRESS_CLAMP</code></td><td>경계 처리</td></tr>
+      <tr><td><code>src.getPixel(sx,sy)</code></td><td><code>gTex.Sample(gSamp, uv)</code></td><td>이웃 읽기</td></tr>
+      <tr><td><code>x+kx</code> (정수 픽셀)</td><td><code>uv + float2(kx,ky)*texelSize</code></td><td>이웃 오프셋</td></tr>
+      <tr><td><code>0.299f*r+...</code></td><td><code>dot(c, float3(0.299,0.587,0.114))</code></td><td>휘도</td></tr>
+      <tr><td><code>std::sqrt(dx*dx+dy*dy)</code></td><td><code>sqrt(dx*dx+dy*dy)</code></td><td>그래디언트 크기</td></tr>
+      <tr><td>이중 <code>for (y) for (x)</code></td><td>래스터라이저가 픽셀마다 <code>PSMain</code> 호출</td><td>전 픽셀 순회(GPU는 병렬)</td></tr>
+      <tr><td><code>dst.setPixel(...)</code></td><td><code>return ... : SV_Target</code></td><td>결과 출력</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    가장 큰 차이는 <strong>바깥의 <code>for (y) for (x)</code> 루프가 사라진다</strong>는 점입니다. CPU는
+    픽셀을 하나씩 순서대로 돌지만, GPU는 래스터라이저가 <strong>모든 픽셀에 대해 <code>PSMain</code>을 동시에
+    호출</strong>합니다. 우리가 짠 것은 "픽셀 한 개의 계산"뿐이고, 반복은 하드웨어가 병렬로 처리합니다. 이것이
+    이미지 필터가 GPU에서 극적으로 빨라지는 이유입니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">주의 · 규약</span>
+    이 페이지의 컨볼루션은 <strong>벡터 변환이 아니라 스칼라 가중합</strong>이라 행벡터/행렬 규약
+    (<code>v' = v*M</code>, <code>mul(v, M)</code>, 행 우선 저장, 왼손 좌표계, 클립 z [0,1])이 직접 등장하지는
+    않습니다. 다만 후처리 셰이더를 그릴 때 <em>풀스크린 사각형</em>의 정점을 변환한다면 그 단계에서는 프로젝트
+    전체와 동일한 규약을 따릅니다. 실무에서는 이런 필터를 직접 짜기보다 검증된 후처리 라이브러리나
+    DirectXTK의 포스트프로세스를 쓰는 편이 안전하며, 위 코드는 원리를 이해하기 위한 학습용입니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./02-raster.html">← 래스터라이제이션 — 선과 삼각형</a>
+    <a href="./02-blend.html">알파 블렌딩 — over 합성 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 내적 · 외적의 실전 활용 — C++/DirectX 11</title>
+<meta name="description" content="사잇각·투영·삼각형 법선·2D 감김 부호를 C++로 한 줄씩 구현하며 내적과 외적이 그래픽스에서 실제로 어디에 쓰이는지 성분 하나까지 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./01-math.html">1장. 기초 수학</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">내적 · 외적</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 1</span>
+  <h1>내적 · 외적의 실전 활용 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    <a href="./01-vector.html">벡터 페이지</a>에서 <code>dot</code>과 <code>cross</code>가 무엇인지 성분까지 뜯어봤습니다.
+    이제 그 두 연산이 <strong>실제 그래픽스 코드에서 어디에 쓰이는지</strong> 봅니다. 사잇각(빛과 표면의 각),
+    투영(그림자·미끄러짐), 삼각형 법선(면이 향하는 방향), 2D 감김 부호(앞뒤 판정). 네 개의 작은 함수가
+    전부지만, 그 안에 렌더링 파이프라인 절반의 직관이 들어 있습니다. 이 페이지는 그 <strong>기하학적 의미</strong>를
+    코드 한 줄, 부호 하나까지 그림글로 풀어냅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    D3D 규약으로 통일합니다: <strong>왼손 좌표계</strong>, 외적은 <strong>왼손 법칙</strong>으로 방향이 정해지고,
+    삼각형 앞면(front face)은 <strong>시계 방향(CW) 감김</strong>이 기본입니다. OpenGL(오른손·CCW 앞면)과 부호·방향이
+    반대이니 다른 자료의 정점 순서를 그대로 옮기지 마세요.
+  </div>
+
+  <div class="callout">
+    <span class="tag">전제</span>
+    아래 코드는 모두 <a href="./01-vector.html"><code>Vec3.h</code></a>에서 만든 <code>Vec3</code>와 그 연산
+    (<code>operator+ - *</code>, <code>dot</code>, <code>cross</code>, <code>length</code>, <code>normalize</code>)을
+    <code>#include</code>해서 씁니다. 이 페이지에서는 그 재료를 <em>조합</em>만 합니다.
+  </div>
+
+  <h2 style="margin-top:40px;">먼저: 내적과 외적, 한 문장씩 직관</h2>
+  <p>
+    본격적으로 함수를 만들기 전에, 이 페이지 전체를 관통하는 두 연산의 <strong>기하 직관</strong>부터
+    확실히 잡고 갑니다. 공식은 벡터 페이지에서 봤으니, 여기서는 "그래서 이게 뭘 뜻하는가"에 집중합니다.
+  </p>
+
+  <h3>내적(dot) — "두 벡터가 얼마나 같은 방향인가"</h3>
+  <p>
+    내적 <code>a·b = ax*bx + ay*by + az*bz</code>는 하나의 숫자(스칼라)를 냅니다. 이 숫자의 <strong>부호</strong>가
+    핵심입니다. 두 벡터를 화살표로 그렸을 때:
+  </p>
+  <ul>
+    <li><strong>a·b &gt; 0</strong> — 두 화살표가 대체로 <em>같은 쪽</em>을 봅니다(사잇각 90°보다 작음, 예각).</li>
+    <li><strong>a·b = 0</strong> — 두 화살표가 정확히 <em>직각</em>입니다(수직).</li>
+    <li><strong>a·b &lt; 0</strong> — 두 화살표가 대체로 <em>반대쪽</em>을 봅니다(사잇각 90°보다 큼, 둔각).</li>
+  </ul>
+  <p>
+    더 정확히는 <code>a·b = |a| |b| cosθ</code>입니다. 여기서 <code>θ</code>가 두 벡터 사이의 각이고,
+    <code>|a|</code>·<code>|b|</code>는 각 벡터의 길이입니다. <code>cos</code>는 각이 0°일 때 1(최대), 90°일 때 0,
+    180°일 때 −1(최소)이므로, 위의 부호 규칙이 그대로 나옵니다. "빛 벡터와 표면 법선의 내적"이
+    조명 계산의 심장인 이유가 바로 이것입니다 — 표면이 빛을 정면으로 받을수록(같은 방향에 가까울수록) 값이 커집니다.
+  </p>
+
+  <h3>외적(cross) — "두 벡터 모두에 수직인 새 벡터"</h3>
+  <p>
+    외적 <code>a×b</code>는 벡터를 냅니다(내적은 숫자, 외적은 벡터 — 헷갈리기 쉬우니 꼭 구분). 이 결과 벡터는
+    <strong>a와 b가 만드는 평면에 수직</strong>입니다. 즉 삼각형이나 사각형 같은 면을 두 변으로 표현한 뒤 외적을
+    하면, "이 면이 어느 쪽을 향하는가"를 나타내는 <strong>법선(normal)</strong>이 바로 나옵니다.
+  </p>
+  <p>
+    방향은 어느 쪽 수직일까요(위 아니면 아래)? <strong>왼손 법칙</strong>으로 정해집니다: 왼손 손가락을 첫 벡터
+    <code>a</code>에서 둘째 벡터 <code>b</code> 쪽으로 감아쥐면, 엄지가 가리키는 방향이 <code>a×b</code>입니다.
+    그래서 <strong>순서가 바뀌면 방향이 뒤집힙니다</strong>: <code>b×a = −(a×b)</code>. 이 "순서 → 방향" 관계가
+    바로 뒤에서 삼각형 정점 순서(감김)가 앞뒷면을 결정하는 원리로 이어집니다.
+  </p>
+  <p>
+    외적 결과의 <strong>길이</strong>도 의미가 있습니다: <code>|a×b| = |a| |b| sinθ</code>이고, 이것은 두 벡터가
+    만드는 <strong>평행사변형의 넓이</strong>와 같습니다. 삼각형 넓이는 그 절반이죠. 2D 감김 함수의 부호가
+    여기서 나옵니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:48px;">1) 두 벡터의 사잇각 — <code>angleBetween</code></h2>
+
+  <p>
+    <strong>무엇을 만드나:</strong> 두 방향 벡터 사이의 각을 <strong>라디안</strong>으로 돌려주는 함수입니다.
+    <strong>왜 필요한가:</strong> "카메라가 목표를 얼마나 정면으로 보고 있나", "관절이 몇 도 꺾였나",
+    "시야각(FOV) 안에 들어오나" 같은 판정에 씁니다. 내적으로 <code>cosθ</code>를 구한 뒤 <code>acos</code>로
+    각을 되돌립니다.
+  </p>
+
+  <ol class="steps">
+    <li>두 벡터의 길이를 곱해 <code>|a||b|</code>(분모)를 만든다. 0이면(길이 0 벡터) 계산 불가라 조기 반환.</li>
+    <li><code>a·b</code>(내적)를 분모로 나눠 <code>cosθ</code>를 얻는다.</li>
+    <li>부동소수 오차로 −1~1을 벗어날 수 있으니 <code>clamp</code>으로 강제로 가둔다.</li>
+    <li><code>acos</code>(코사인의 역함수)로 <code>cosθ</code> → <code>θ</code>(라디안)를 되돌린다.</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>DotCross.h — angleBetween</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include "Vec3.h"      // 벡터 페이지에서 만든 Vec3, dot, cross, length, normalize
+#include &lt;cmath&gt;       // std::acos
+#include &lt;algorithm&gt;   // std::clamp
+
+// 두 벡터의 사잇각(라디안). cosθ = (a·b) / (|a||b|)
+inline float angleBetween(const Vec3&amp; a, const Vec3&amp; b)
+{
+    float denom = length(a) * length(b);   // |a| * |b|
+    if (denom &lt; 1e-8f) return 0.0f;        // 길이 0 벡터 방어(0으로 나누기 금지)
+    float c = dot(a, b) / denom;           // c = cosθ
+    c = std::clamp(c, -1.0f, 1.0f);        // 부동소수 오차로 |c|&gt;1 되는 것 방지
+    return std::acos(c);                    // θ = arccos(cosθ)
+}</code></pre>
+  </div>
+
+  <h3>시그니처 해부</h3>
+  <p>
+    <code>inline float angleBetween(const Vec3&amp; a, const Vec3&amp; b)</code>
+  </p>
+  <ul>
+    <li><code>inline</code> — 헤더에 함수 <em>정의</em>를 두면 여러 <code>.cpp</code>에서 <code>#include</code>할 때
+      "중복 정의" 링크 오류가 납니다. <code>inline</code>은 "여러 번 정의돼도 같은 것으로 합쳐라"라고 컴파일러에
+      허락하는 표시라 헤더-온리 함수에 붙입니다(성능상 인라인 확장은 부수 효과일 뿐).</li>
+    <li><code>float</code>(반환) — 각도 하나, 스칼라라서 <code>float</code>. 단위는 <strong>라디안</strong>입니다
+      (도(°)가 아님 — 삼각함수 페이지에서 변환을 다룹니다).</li>
+    <li><code>const Vec3&amp; a</code> — <code>&amp;</code>는 <strong>참조</strong>로 받아 <code>Vec3</code> 구조체를
+      값 복사하지 않기 위함입니다(복사는 3개 float 낭비). <code>const</code>는 "이 함수는 <code>a</code>를 절대
+      건드리지 않는다"는 약속이라, 호출부가 안심하고 넘길 수 있고 실수로 수정하면 컴파일 오류로 잡힙니다.</li>
+  </ul>
+
+  <h3><code>cosθ = (a·b) / (|a||b|)</code> — 왜 이 공식인가 (수학 → 기하 → 코드)</h3>
+  <p>
+    <strong>수학적 의미:</strong> 내적의 정의 자체가 <code>a·b = |a| |b| cosθ</code>입니다. 우리가 원하는 건
+    <code>θ</code>이므로, 양변을 <code>|a||b|</code>로 나누면 <code>cosθ = (a·b)/(|a||b|)</code>가 됩니다.
+    이게 코드의 세 번째 줄입니다.
+  </p>
+  <p>
+    <strong>기하학적 직관:</strong> 왜 길이로 나눌까요? 내적 값 자체는 벡터가 <em>길수록</em> 커집니다.
+    같은 각도라도 벡터를 두 배 길게 하면 내적도 두 배가 되죠. 각도는 길이와 무관해야 하므로,
+    <strong>길이의 영향을 나눗셈으로 제거</strong>하는 것입니다. 그러면 순수하게 "방향이 얼마나 일치하는가"만
+    남고, 그 값이 정확히 <code>cosθ</code>(−1~1 사이)가 됩니다. 이 나눗셈은 사실 <em>양쪽 벡터를 각각
+    정규화(길이 1로)한 뒤 내적한 것</em>과 같습니다.
+  </p>
+  <p>
+    <strong>코드 매핑:</strong> <code>denom = length(a)*length(b)</code>가 <code>|a||b|</code>,
+    <code>dot(a,b)/denom</code>가 <code>(a·b)/(|a||b|)</code>, 즉 <code>c = cosθ</code>. 마지막 <code>acos(c)</code>가
+    <code>cosθ → θ</code>. <code>acos</code>는 코사인의 역함수라 0~π(0~180°) 범위의 각을 돌려줍니다 — 방향의
+    <em>부호 없는</em> 사잇각이라 항상 0 이상입니다.
+  </p>
+
+  <h3>왜 <code>denom &lt; 1e-8f</code> 조기 반환인가</h3>
+  <p>
+    분모가 0이면 <code>0/0 = NaN</code>(숫자 아님)이 나와 이후 계산이 전부 오염됩니다. 길이 0 벡터(원점 방향
+    없음)는 애초에 "각도"라는 개념이 없으므로, 아주 작은 임계값 <code>1e-8</code>(= 0.00000001) 아래면
+    안전하게 <code>0</code>을 돌려줍니다. <code>float</code>는 정확히 0인지 비교하기보다 <strong>작은 엡실론과
+    비교</strong>하는 게 안전합니다(부동소수는 정확히 0이 아닐 수 있음).
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>clamp을 빼면 NaN이 터집니다.</strong> 이론상 <code>cosθ</code>는 −1~1이지만, 부동소수 계산에서
+    <code>dot(a,b)/denom</code>이 <code>1.0000001</code>처럼 <em>아주 살짝</em> 1을 넘을 수 있습니다.
+    <code>acos</code>는 정의역이 [−1, 1]이라 그 밖의 값을 넣으면 <strong>NaN</strong>을 반환하고, 그 NaN이
+    각도·회전·행렬로 전파돼 화면이 검게 되거나 물체가 사라집니다. <code>std::clamp(c, -1.f, 1.f)</code>는
+    이 한 줄로 그 재앙을 원천 차단합니다 — 절대 생략하지 마세요.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <strong>"앞을 보고 있나?" 판정엔 <code>acos</code>가 필요 없습니다.</strong> <code>acos</code>·<code>sqrt</code>는
+    비싼 초월함수라 픽셀·정점마다 부르면 부담됩니다. 방향만 알면 될 때는 <strong>정규화된 두 벡터의 내적
+    부호</strong>만 보세요: <code>dot &gt; 0</code>이면 같은 방향(예각), <code>&lt; 0</code>이면 반대(둔각),
+    <code>≈ 0</code>이면 직각. 각도의 <em>정확한 값</em>이 아니라 <em>비교</em>만 필요할 때는 <code>cos</code>
+    상태로 두고 비교하는 게 정석입니다(예: FOV 판정도 <code>cos(FOV/2)</code>와 내적을 직접 비교).
+  </div>
+
+  <h3>손계산 예제</h3>
+  <p>
+    <code>a = (1, 0, 0)</code>, <code>b = (1, 1, 0)</code>이라고 합시다.
+  </p>
+  <ul>
+    <li><code>a·b = 1*1 + 0*1 + 0*0 = 1</code></li>
+    <li><code>|a| = √(1²+0²+0²) = 1</code>, &nbsp; <code>|b| = √(1²+1²+0²) = √2 ≈ 1.4142</code></li>
+    <li><code>cosθ = 1 / (1 × 1.4142) = 0.7071</code></li>
+    <li><code>θ = acos(0.7071) ≈ 0.7854 라디안 = 45°</code></li>
+  </ul>
+  <p>
+    x축과 "x·y 대각선"의 각이 45°. 그림으로 그려봐도 딱 맞습니다.
+  </p>
+
+  <h3>DirectXMath 대응</h3>
+  <div class="code">
+    <div class="code-head"><span>DirectXMath 버전</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+
+float angleBetweenXM(FXMVECTOR a, FXMVECTOR b)
+{
+    // XMVector3AngleBetweenVectors가 내부에서 clamp + acos까지 다 해줍니다.
+    XMVECTOR ang = XMVector3AngleBetweenVectors(a, b);
+    return XMVectorGetX(ang); // 결과는 라디안, 모든 레인에 동일하게 채워져 옴
+}</code></pre>
+  </div>
+  <table class="impl">
+    <tr><th>원본</th><th>DirectXMath</th><th>대응</th></tr>
+    <tr><td><code>dot(a,b)</code></td><td><code>XMVector3Dot</code></td><td>내적(스칼라를 벡터 4레인에 복제)</td></tr>
+    <tr><td><code>length(a)</code></td><td><code>XMVector3Length</code></td><td>벡터 길이</td></tr>
+    <tr><td><code>clamp + acos</code></td><td><code>XMVector3AngleBetweenVectors</code></td><td>사잇각 전체를 한 번에(클램프 내장)</td></tr>
+  </table>
+  <p>
+    실무에서는 <code>XMVector3AngleBetweenVectors</code> 한 줄이면 됩니다(clamp까지 내장). 직접 구현은
+    "그 한 줄 안에서 무슨 일이 일어나는지" 알기 위한 학습용입니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:48px;">2) 한 벡터를 다른 벡터에 투영 — <code>projectOnto</code></h2>
+
+  <p>
+    <strong>무엇을 만드나:</strong> 벡터 <code>a</code>가 벡터 <code>b</code> 방향으로 "드리우는 그림자"
+    벡터를 돌려줍니다. <strong>왜 필요한가:</strong> 속도를 경사면 방향/수직 성분으로 분해(미끄러짐),
+    카메라 이동을 바닥 평면에 눕히기, 어떤 방향으로의 이동량만 뽑아내기 등 <strong>벡터 분해</strong>가 필요한
+    곳이면 어디든 씁니다.
+  </p>
+
+  <ol class="steps">
+    <li><code>b·b</code>(= <code>|b|²</code>)를 구한다. 0이면(b가 길이 0) 투영할 방향이 없으니 영벡터 반환.</li>
+    <li>스칼라 계수 <code>(a·b)/(b·b)</code>를 구한다 — 이것이 "b를 몇 배 해야 하는가".</li>
+    <li>그 계수를 <code>b</code>에 곱해 <strong>b 방향의</strong> 벡터로 되돌린다.</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>DotCross.h — projectOnto</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// a를 b 방향으로 투영. proj = (a·b / b·b) * b
+inline Vec3 projectOnto(const Vec3&amp; a, const Vec3&amp; b)
+{
+    float bb = dot(b, b);                  // b·b = |b|²
+    if (bb &lt; 1e-8f) return {0, 0, 0};      // b가 영벡터면 방향 없음 → 영벡터
+    return b * (dot(a, b) / bb);           // (a·b / b·b) * b
+}</code></pre>
+  </div>
+
+  <h3>반환 타입이 <code>Vec3</code>인 이유, <code>{0,0,0}</code>이 무엇인지</h3>
+  <p>
+    사잇각과 달리 <strong>결과가 벡터</strong>(방향과 크기를 가진 화살표)라서 반환 타입이 <code>Vec3</code>입니다.
+    <code>return {0, 0, 0};</code>는 <strong>집합 초기화(aggregate initialization)</strong>로, 중괄호 안의 값으로
+    <code>Vec3{x=0, y=0, z=0}</code>를 즉석에서 만들어 돌려주는 문법입니다. 반환 타입이 <code>Vec3</code>임을
+    컴파일러가 아니까 타입 이름을 다시 쓸 필요 없이 <code>{0,0,0}</code>만으로 영벡터가 됩니다.
+    두 인자 모두 <code>const Vec3&amp;</code>인 이유는 앞과 동일합니다(복사 회피 + 불변 약속).
+  </p>
+
+  <h3><code>(a·b / b·b) * b</code>가 왜 "투영"인가 (수학 → 기하 → 코드)</h3>
+  <p>
+    <strong>기하학적 직관부터:</strong> <code>b</code>가 바닥에 그어진 <em>직선(레일)</em>이라고 상상하세요.
+    <code>a</code>라는 화살표 끝에서 그 레일로 <strong>수직으로 빛을 내리쬐어 생기는 그림자</strong>가 투영
+    벡터입니다. 그림자는 반드시 레일(<code>b</code>) 위에 있으므로, 결과는 <strong>b의 상수배</strong> 형태
+    <code>k*b</code>일 수밖에 없습니다. 남은 문제는 "그 <code>k</code>가 얼마냐"뿐입니다.
+  </p>
+  <p>
+    <strong>수학적으로 <code>k</code> 구하기:</strong> 투영은 <code>a</code>의 성분 중 <code>b</code> 방향만
+    남긴 것입니다. <code>b</code> 방향의 <em>단위</em>벡터는 <code>b/|b|</code>이고, <code>a</code>가 그 방향으로
+    가진 길이(스칼라 투영)는 내적 <code>a·(b/|b|) = (a·b)/|b|</code>입니다. 이 길이만큼 단위벡터를 곱하면
+    벡터 투영이죠:
+  </p>
+  <p style="text-align:center;">
+    <code>proj = (a·b / |b|) × (b / |b|) = (a·b / |b|²) × b = (a·b / b·b) × b</code>
+  </p>
+  <p>
+    마지막에서 <code>|b|² = b·b</code>를 썼습니다(길이 제곱 = 자기 자신과의 내적). 그래서 코드가
+    <code>b * (dot(a,b) / dot(b,b))</code>가 됩니다. <strong>제곱근(<code>sqrt</code>)이 등장하지 않는 것</strong>이
+    이 공식의 묘미입니다 — <code>|b|</code>를 구하려면 <code>sqrt</code>가 필요하지만, <code>|b|²</code>로 묶어버려
+    <code>b·b</code>만 쓰므로 더 싸고 정확합니다.
+  </p>
+
+  <h3>부호와 크기의 의미</h3>
+  <p>
+    계수 <code>(a·b)/(b·b)</code>의 <strong>부호</strong>는 곧 <code>a·b</code>의 부호입니다(분모 <code>b·b</code>는
+    항상 양수). 즉 <code>a</code>가 <code>b</code>와 같은 쪽을 보면 투영이 <code>b</code>와 같은 방향,
+    반대쪽을 보면 <code>b</code>와 반대 방향으로 나옵니다. 크기는 <code>a</code>가 <code>b</code> 방향으로 얼마나
+    "멀리 가는가"에 비례합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">활용</span>
+    투영을 알면 <strong>수직 성분</strong>도 공짜로 얻습니다: <code>perp = a - projectOnto(a, b)</code>.
+    이 <code>perp</code>는 <code>b</code>에 정확히 수직인 성분입니다. 경사면에서 중력을 "면을 따라 미끄러지는
+    힘(수직 성분)"과 "면을 누르는 힘(투영 성분)"으로 나눌 때 이 한 쌍을 그대로 씁니다.
+  </div>
+
+  <h3>손계산 예제</h3>
+  <p>
+    <code>a = (3, 4, 0)</code>를 <code>b = (1, 0, 0)</code>(x축)에 투영해 봅시다.
+  </p>
+  <ul>
+    <li><code>a·b = 3*1 + 4*0 + 0*0 = 3</code></li>
+    <li><code>b·b = 1*1 + 0 + 0 = 1</code></li>
+    <li>계수 <code>= 3 / 1 = 3</code></li>
+    <li><code>proj = 3 * (1,0,0) = (3, 0, 0)</code></li>
+  </ul>
+  <p>
+    <code>(3,4,0)</code>의 x축 그림자는 <code>(3,0,0)</code> — x 성분만 남고 y는 사라졌습니다. 직관과 정확히 일치.
+    수직 성분은 <code>a - proj = (0,4,0)</code>이 됩니다.
+  </p>
+
+  <h3>DirectXMath 대응</h3>
+  <table class="impl">
+    <tr><th>원본</th><th>DirectXMath</th><th>대응</th></tr>
+    <tr><td>수동 투영 공식</td><td><code>XMVector3ClampLength</code>는 아님 → 직접 계산</td><td>투영 전용 함수는 없어 <code>Dot</code>로 조립</td></tr>
+    <tr><td><code>dot(a,b)</code>, <code>dot(b,b)</code></td><td><code>XMVector3Dot</code></td><td>내적 두 번</td></tr>
+    <tr><td><code>b * scalar</code></td><td><code>XMVectorScale(b, k)</code></td><td>벡터에 스칼라 곱</td></tr>
+  </table>
+  <div class="code">
+    <div class="code-head"><span>DirectXMath 버전</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">XMVECTOR projectOntoXM(FXMVECTOR a, FXMVECTOR b)
+{
+    XMVECTOR ab = XMVector3Dot(a, b);   // (a·b)를 4레인에 복제
+    XMVECTOR bb = XMVector3Dot(b, b);   // (b·b)를 4레인에 복제
+    XMVECTOR k  = XMVectorDivide(ab, bb); // 레인별 나눗셈 = a·b / b·b
+    return XMVectorMultiply(k, b);        // k * b (레인별 곱)
+}</code></pre>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:48px;">3) 삼각형 법선 — <code>triangleNormal</code></h2>
+
+  <p>
+    <strong>무엇을 만드나:</strong> 세 정점으로 이뤄진 삼각형이 <strong>어느 쪽을 향하는지</strong>를
+    가리키는 단위 법선 벡터를 돌려줍니다. <strong>왜 필요한가:</strong> 조명(빛과 법선의 내적으로 밝기 결정),
+    앞뒷면 판정(back-face culling), 반사 계산 — <em>표면이 향하는 방향</em>이 필요한 모든 곳의 출발점입니다.
+  </p>
+
+  <ol class="steps">
+    <li>한 정점 <code>p0</code>를 기준으로 두 변 벡터 <code>e1 = p1 − p0</code>, <code>e2 = p2 − p0</code>를 만든다.</li>
+    <li>두 변의 외적 <code>e1 × e2</code>를 구한다 → 삼각형 평면에 수직인 벡터.</li>
+    <li>정규화해서 길이를 1로 맞춘다(법선은 방향만 중요, 크기는 1로 통일).</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>DotCross.h — triangleNormal</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 삼각형 법선: 두 모서리의 외적을 정규화. 정점 순서가 법선 방향을 결정한다.
+inline Vec3 triangleNormal(const Vec3&amp; p0, const Vec3&amp; p1, const Vec3&amp; p2)
+{
+    Vec3 e1 = p1 - p0;                 // 모서리 1: p0 → p1
+    Vec3 e2 = p2 - p0;                 // 모서리 2: p0 → p2
+    return normalize(cross(e1, e2));   // 두 모서리에 수직 → 정규화
+}</code></pre>
+  </div>
+
+  <h3>왜 정점이 아니라 "변 벡터"로 외적하나</h3>
+  <p>
+    외적은 <strong>두 벡터(방향)</strong>에 대한 연산이지 점(위치)에 대한 게 아닙니다. 삼각형의 세 점 자체는
+    "위치"라 그대로 외적하면 의미가 없습니다. 그래서 <strong>한 점을 기준으로 뺄셈</strong>해서
+    <code>e1 = p1 - p0</code>, <code>e2 = p2 - p0</code>라는 두 <em>모서리 방향</em>을 만듭니다. 이 두 방향은
+    삼각형 평면 안에 놓여 있으므로, 둘 모두에 수직인 외적은 곧 <strong>평면에 수직 = 법선</strong>이 됩니다.
+    (점 − 점 = 방향 벡터라는 규칙은 <a href="./01-vector.html">벡터 페이지</a>에서 다뤘습니다.)
+  </p>
+
+  <h3>정점 순서(감김)와 법선 방향 — CCW / CW (수학 → 기하 → 규약)</h3>
+  <p>
+    <strong>기하학적 직관:</strong> 외적은 순서에 민감합니다(<code>e1×e2 = −(e2×e1)</code>). 따라서 삼각형을
+    이루는 <strong>정점을 도는 방향</strong>이 법선이 앞으로 나올지 뒤로 나올지를 결정합니다. 삼각형을 정면에서
+    볼 때 정점 <code>p0→p1→p2</code>가:
+  </p>
+  <ul>
+    <li><strong>반시계(CCW)</strong>로 감기면 → 법선이 <em>당신(화면 밖)</em>을 향합니다.</li>
+    <li><strong>시계(CW)</strong>로 감기면 → 법선이 <em>화면 안쪽</em>을 향합니다.</li>
+  </ul>
+  <p>
+    이건 왼손 법칙을 정점 순서에 적용한 결과입니다. 어느 쪽이 "앞면"인지는 <strong>API 규약</strong>이
+    정합니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">D3D 규약</span>
+    Direct3D 기본은 <strong>시계 방향(CW) 감김이 앞면(front face)</strong>입니다(왼손 좌표계).
+    OpenGL 기본은 반대로 <strong>반시계(CCW)가 앞면</strong>입니다. 그래서 같은 모델 데이터를 두 API 사이에서
+    옮기면 안팎이 뒤집혀 보이거나 컬링이 반대로 걸릴 수 있습니다. 법선이 반대로 나오면
+    <strong>두 인자 순서를 바꾸거나</strong>(<code>cross(e2, e1)</code>) 결과에 <code>-1</code>을 곱하면 됩니다.
+    래스터라이저 상태(<code>D3D11_RASTERIZER_DESC::FrontCounterClockwise</code>)로 규약 자체를 바꿀 수도 있습니다.
+  </div>
+
+  <h3>왜 <code>normalize</code>가 필요한가</h3>
+  <p>
+    외적의 <em>길이</em>는 <code>|e1||e2|sinθ</code> = 삼각형 평행사변형의 넓이라, 삼각형이 클수록 법선도
+    길어집니다. 하지만 법선은 <strong>방향만</strong> 의미 있고 크기는 필요 없습니다. 조명 공식(<code>N·L</code>)이
+    올바로 작동하려면 법선의 길이가 <strong>정확히 1</strong>이어야 하므로 <code>normalize</code>로 통일합니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>퇴화(degenerate) 삼각형</strong>에 주의하세요. 세 점이 한 직선 위에 있거나 두 점이 겹치면
+    <code>e1</code>과 <code>e2</code>가 평행이 되어 외적이 영벡터가 됩니다. 그러면 <code>normalize</code>가
+    0으로 나눠 <strong>NaN</strong>을 냅니다. 신뢰할 수 없는 메시 데이터를 다룬다면
+    <code>cross</code> 결과의 길이가 임계값보다 큰지 먼저 확인하세요.
+  </div>
+
+  <h3>손계산 예제</h3>
+  <p>
+    <code>p0=(0,0,0)</code>, <code>p1=(1,0,0)</code>, <code>p2=(0,1,0)</code> (xy 평면 위 삼각형).
+  </p>
+  <ul>
+    <li><code>e1 = p1-p0 = (1,0,0)</code>, &nbsp; <code>e2 = p2-p0 = (0,1,0)</code></li>
+    <li><code>cross(e1,e2)</code> 성분별:
+      <ul>
+        <li>x = e1.y*e2.z − e1.z*e2.y = 0*0 − 0*1 = 0</li>
+        <li>y = e1.z*e2.x − e1.x*e2.z = 0*0 − 1*0 = 0</li>
+        <li>z = e1.x*e2.y − e1.y*e2.x = 1*1 − 0*0 = 1</li>
+      </ul>
+    </li>
+    <li>외적 = <code>(0, 0, 1)</code>, 이미 길이 1이라 정규화 후에도 <code>(0,0,1)</code></li>
+  </ul>
+  <p>
+    xy 평면 삼각형의 법선이 <code>+z</code>(평면에 수직) — 정확합니다. 왼손 좌표계에서 <code>+z</code>는
+    화면 <em>안쪽</em>을 향하므로, 이 감김 순서는 D3D 기준으로 뒷면을 향하는 셈입니다. 앞면 법선을 원하면
+    <code>p1</code>과 <code>p2</code>를 맞바꾸면 <code>(0,0,-1)</code>이 나옵니다.
+  </p>
+
+  <h3>DirectXMath 대응</h3>
+  <div class="code">
+    <div class="code-head"><span>DirectXMath 버전</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">XMVECTOR triangleNormalXM(FXMVECTOR p0, FXMVECTOR p1, FXMVECTOR p2)
+{
+    XMVECTOR e1 = XMVectorSubtract(p1, p0);   // p1 - p0
+    XMVECTOR e2 = XMVectorSubtract(p2, p0);   // p2 - p0
+    XMVECTOR n  = XMVector3Cross(e1, e2);      // 외적
+    return XMVector3Normalize(n);              // 정규화
+}</code></pre>
+  </div>
+  <table class="impl">
+    <tr><th>원본</th><th>DirectXMath</th><th>대응</th></tr>
+    <tr><td><code>p1 - p0</code></td><td><code>XMVectorSubtract</code></td><td>변 벡터 만들기(레인별 뺄셈)</td></tr>
+    <tr><td><code>cross(e1,e2)</code></td><td><code>XMVector3Cross</code></td><td>외적(왼손, 순서 동일)</td></tr>
+    <tr><td><code>normalize(...)</code></td><td><code>XMVector3Normalize</code></td><td>길이 1로</td></tr>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:48px;">4) 2D 외적 부호 — <code>cross2D</code></h2>
+
+  <p>
+    <strong>무엇을 만드나:</strong> 2D에서 두 벡터의 "외적"에 해당하는 <strong>스칼라 하나</strong>를 냅니다.
+    <strong>왜 필요한가:</strong> 이 값의 <strong>부호</strong>가 "점이 선의 어느 쪽에 있나", "삼각형이 앞/뒤로
+    감겼나(winding)", "세 점이 좌회전/우회전하나"를 즉시 알려줍니다. 2D 피킹·볼록 껍질·삼각형 채우기의
+    기본 원자 연산입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>DotCross.h — cross2D</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 2D 외적(스칼라). &gt;0 이면 반시계(좌회전), &lt;0 이면 시계(우회전), 0 이면 일직선.
+inline float cross2D(float ax, float ay, float bx, float by)
+{
+    return ax * by - ay * bx;
+}</code></pre>
+  </div>
+
+  <h3>왜 2D 외적은 벡터가 아니라 스칼라인가</h3>
+  <p>
+    3D 외적은 두 벡터에 수직인 <em>벡터</em>를 냅니다. 그런데 2D에서 두 벡터에 수직인 방향은 항상
+    <strong>화면 밖으로 나오는 z축</strong> 하나뿐입니다. 방향이 정해져 있으니 남는 정보는 그 z 성분의 값
+    하나 — 그래서 <strong>스칼라</strong>로 취급합니다. 실제로 <code>ax*by - ay*bx</code>는 3D 외적
+    <code>(ax,ay,0) × (bx,by,0)</code>의 <strong>z 성분</strong>과 정확히 같습니다. 삼각형 법선 손계산에서 봤던
+    <code>z = e1.x*e2.y − e1.y*e2.x</code>과 같은 꼴이죠.
+  </p>
+
+  <h3>부호가 뜻하는 것 (수학 → 기하)</h3>
+  <p>
+    이 스칼라는 <code>|a||b|sinθ</code>와 같습니다. <code>sin</code>은 각 <code>θ</code>가 0~180°(반시계로 돌 때)면
+    양수, 180~360°(=음의 각, 시계로 돌 때)면 음수입니다. 그래서:
+  </p>
+  <ul>
+    <li><strong>cross2D &gt; 0</strong> — <code>b</code>가 <code>a</code>의 <em>왼쪽</em>에 있음(반시계, 좌회전 / CCW).</li>
+    <li><strong>cross2D = 0</strong> — <code>a</code>와 <code>b</code>가 <em>평행</em>(같은 직선 위, 일직선).</li>
+    <li><strong>cross2D &lt; 0</strong> — <code>b</code>가 <code>a</code>의 <em>오른쪽</em>에 있음(시계, 우회전 / CW).</li>
+  </ul>
+  <p>
+    크기 <code>|cross2D|</code>는 두 벡터가 만드는 <strong>평행사변형 넓이</strong>이고, 그 절반이 삼각형 넓이입니다.
+    부호까지 살리면 <strong>부호 있는 넓이(signed area)</strong>가 되어 감김 방향을 그대로 담습니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">활용</span>
+    <strong>점이 선분의 어느 쪽인가:</strong> 선분 방향 <code>d = B - A</code>, 점 방향 <code>p = P - A</code>일 때
+    <code>cross2D(d.x, d.y, p.x, p.y)</code>의 부호가 곧 좌/우입니다. 삼각형의 세 변에 대해 이걸 세 번 하면
+    "점이 삼각형 안에 있나"(세 부호가 모두 같은가)를 판정할 수 있습니다 — 소프트웨어 래스터라이저의
+    엣지 함수(edge function)가 바로 이것입니다.
+  </div>
+
+  <h3>손계산 예제</h3>
+  <p>
+    <code>a = (1, 0)</code>(오른쪽), <code>b = (0, 1)</code>(위쪽).
+  </p>
+  <ul>
+    <li><code>cross2D(1, 0, 0, 1) = 1*1 − 0*0 = 1 &gt; 0</code> → 반시계(좌회전). x축에서 y축으로는 왼쪽으로 도는 게 맞습니다.</li>
+    <li>순서를 바꿔 <code>cross2D(0, 1, 1, 0) = 0*0 − 1*1 = −1 &lt; 0</code> → 시계. 순서를 뒤집으니 부호가 뒤집힙니다(외적의 반대칭성).</li>
+  </ul>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>cross2D</code>는 곱셈 2번, 뺄셈 1번뿐 — <code>sqrt</code>·<code>acos</code> 없이 부호만으로 방향을
+    판정하므로 대량 반복(래스터라이저 픽셀 루프, 충돌 넓은 페이즈)에 이상적입니다. "각도가 몇 도인가"를
+    묻지 말고 "어느 쪽인가"만 물으면 이렇게 싸게 끝납니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:48px;">정리 — 언제 무엇을 쓰나</h2>
+  <table class="impl">
+    <tr><th>질문</th><th>도구</th><th>핵심</th></tr>
+    <tr><td>두 방향이 같은 쪽? / 얼마나?</td><td>내적 부호 / <code>angleBetween</code></td><td>부호만 필요하면 <code>acos</code> 생략</td></tr>
+    <tr><td>이 방향 성분만 뽑아내기</td><td><code>projectOnto</code></td><td><code>sqrt</code> 없이 <code>b·b</code>로</td></tr>
+    <tr><td>면이 향하는 방향</td><td><code>triangleNormal</code></td><td>정점 순서가 앞뒤 결정, 정규화 필수</td></tr>
+    <tr><td>2D 좌/우, 감김, 점 안팎</td><td><code>cross2D</code></td><td>부호 = 방향, 크기 = 넓이×2</td></tr>
+  </table>
+  <p>
+    네 함수 모두 재료는 <a href="./01-vector.html"><code>dot</code>과 <code>cross</code></a> 둘뿐입니다.
+    내적은 "방향 일치도(스칼라)", 외적은 "수직 방향과 넓이(벡터/부호)" — 이 두 직관만 확실히 잡으면
+    조명·컬링·충돌·피킹의 코드가 전부 이 페이지의 조합으로 읽힙니다.
+  </p>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./01-transform.html">← 좌표계와 변환</a>
+    <a href="./01-trig.html">삼각함수 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

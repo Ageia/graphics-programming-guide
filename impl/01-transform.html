@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 좌표계와 변환 — C++/DirectX 11</title>
+<meta name="description" content="이동·크기·회전 행렬을 행벡터 규약으로 직접 만들고, 곱 순서(S*R*T)가 결과를 바꾸는 이유와 동차좌표 w의 의미를 코드 한 줄·성분 하나까지 해부." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./01-math.html">1장. 기초 수학</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">좌표계와 변환</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 1</span>
+  <h1>좌표계와 변환 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    3D 물체를 화면 위에서 <strong>옮기고(translate) · 키우고(scale) · 돌리는(rotate)</strong> 일은
+    전부 <strong>4×4 행렬</strong> 하나로 표현됩니다. 이 페이지에서는 이동·크기·회전 행렬을 직접 손으로
+    만들고, 이 행렬들을 <strong>어떤 순서로 곱하느냐</strong>가 결과를 완전히 바꾼다는 사실을 확인합니다.
+    마지막으로 점과 방향을 구분하는 <strong>동차좌표(homogeneous coordinate) w</strong>의 의미를
+    성분 하나까지 파고듭니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드는 D3D 규약입니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행렬은 <strong>행 우선</strong> 저장(<code>m[r*4+c]</code>), <strong>왼손 좌표계</strong>.
+    행벡터에서는 <strong>가장 왼쪽 행렬이 가장 먼저 적용</strong>됩니다. 이 한 가지 사실이 아래
+    모든 배치와 곱 순서를 결정하니 꼭 붙잡고 읽어 주세요. OpenGL/GLM(열벡터)과는 <strong>곱 순서가 정확히 반대</strong>입니다.
+  </div>
+
+  <h2 style="margin-top:40px;">이 페이지에서 만드는 것</h2>
+  <ol class="steps">
+    <li><strong>이동 행렬</strong> <code>makeTranslate</code> — 물체를 공간에서 평행 이동.</li>
+    <li><strong>크기 행렬</strong> <code>makeScale</code> — 축별 배율로 늘리거나 줄임.</li>
+    <li><strong>회전 행렬</strong> <code>makeRotate</code> — 임의의 축을 중심으로 로드리게스 공식으로 회전.</li>
+    <li><strong>곱 순서 실험</strong> — <code>R*T</code>와 <code>T*R</code>이 왜 다른 결과를 내는지.</li>
+    <li><strong>동차좌표</strong> — <code>w=1</code>(점)과 <code>w=0</code>(방향)의 차이, <code>mul(Vec4, Mat4)</code> 성분별 해부.</li>
+    <li><strong>표준 조립</strong> — 실무의 <code>model = S*R*T</code>와 DirectXMath 대응.</li>
+  </ol>
+
+  <hr style="border:none;border-top:1px solid var(--border);margin:36px 0;" />
+
+  <!-- ============================================================ -->
+  <h2>0. 변환 행렬이란 무엇인가 — 왜 4×4인가</h2>
+  <p>
+    벡터 <code>(x, y, z)</code>에 3×3 행렬을 곱하면 <strong>크기·회전·전단</strong>은 표현할 수 있습니다.
+    하지만 <strong>이동</strong>은 표현할 수 없습니다. 이동은 "모든 성분에 상수를 더하는" 연산인데,
+    행렬 곱은 근본적으로 <strong>곱셈과 덧셈의 조합(선형 결합)</strong>일 뿐 "무조건 상수를 더하는" 항이 없기 때문입니다.
+  </p>
+  <p>
+    그래서 그래픽스는 차원을 하나 늘려 <strong>4번째 성분 w</strong>를 도입합니다. 점을 <code>(x, y, z, 1)</code>로
+    적으면, 행렬의 마지막 행에 넣어 둔 이동량이 <code>w(=1)</code>와 곱해져 결과에 <strong>더해지는</strong> 효과가 생깁니다.
+    이 트릭 덕분에 이동·크기·회전을 <strong>모두 하나의 4×4 행렬 곱으로 통일</strong>할 수 있습니다.
+    이것이 4×4를 쓰는 이유이고, 아래 모든 행렬이 <code>Mat4</code>인 이유입니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>1. 이동 행렬 <code>makeTranslate</code></h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 물체를 <code>(t.x, t.y, t.z)</code>만큼 평행 이동시키는 행렬입니다.
+    <strong>왜 필요한가:</strong> 모델을 월드의 원하는 위치에 배치하거나(월드 변환), 카메라를 이동시키는 등
+    거의 모든 변환 파이프라인의 기본 벽돌입니다.
+  </p>
+
+  <ol class="steps">
+    <li>항등 행렬로 시작해 "아무것도 하지 않는" 상태를 만든다.</li>
+    <li>이동량을 <strong>마지막 행(3번 행)</strong>의 x·y·z 자리에 넣는다.</li>
+    <li>반환하면 곱했을 때 좌표에 이동량이 더해진다.</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>math/Transform.h</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#pragma once
+#include "Mat4.h"
+#include "Vec3.h"
+#include &lt;cmath&gt;
+
+// 이동: 행벡터 규약이라 마지막 행(3번)에 이동량을 넣는다.
+inline Mat4 makeTranslate(const Vec3&amp; t) {
+    Mat4 r = Mat4::identity();
+    r.at(3, 0) = t.x;   // 마지막 행, 0번 열
+    r.at(3, 1) = t.y;   // 마지막 행, 1번 열
+    r.at(3, 2) = t.z;   // 마지막 행, 2번 열
+    return r;
+}</code></pre>
+  </div>
+
+  <h3>시그니처 한 조각씩</h3>
+  <p>
+    <code>inline</code>: 이 함수는 헤더에 정의되어 여러 <code>.cpp</code>에서 <code>#include</code>됩니다.
+    <code>inline</code>이 없으면 같은 함수 정의가 여러 번 링크되어 <em>중복 정의(ODR 위반)</em> 오류가 납니다.
+    <code>inline</code>은 "이 정의가 여러 번역 단위에 나타나도 하나로 합쳐 달라"고 링커에 알려 줍니다.
+  </p>
+  <p>
+    <code>const Vec3&amp; t</code>: <strong>참조(&amp;)</strong>로 받아 <code>Vec3</code> 세 개 float를 복사하는 비용을 피하고,
+    <strong>const</strong>를 붙여 "이 함수는 입력 <code>t</code>를 절대 바꾸지 않는다"를 컴파일러와 독자 모두에게 보장합니다.
+    반환 타입은 값 타입 <code>Mat4</code> — 새로 만든 행렬을 통째로 돌려줍니다.
+  </p>
+
+  <h3>왜 <strong>마지막 행</strong>에 이동량이 들어가는가 (핵심)</h3>
+  <p>
+    행벡터 규약에서 결과는 <code>v' = v * M</code>으로 계산됩니다. <code>v = (x, y, z, 1)</code>라 하면,
+    결과의 각 성분은 <code>v</code>의 성분들과 <code>M</code>의 <strong>열</strong>을 곱해 더한 값입니다.
+    예를 들어 결과의 x 성분은:
+  </p>
+  <div class="code"><pre><code class="language-cpp">x' = x*M(0,0) + y*M(1,0) + z*M(2,0) + w*M(3,0)</code></pre></div>
+  <p>
+    여기서 <code>w = 1</code>이므로 마지막 항 <code>w*M(3,0)</code>은 그대로 <code>M(3,0)</code>이 됩니다.
+    즉 <strong>3번 행에 넣어 둔 값이 언제나 결과에 더해집니다.</strong> 이것이 바로 우리가 원하는
+    "무조건 상수를 더하는" 이동 효과입니다. <code>M(3,0)=t.x</code>로 두었으니 <code>x' = x + t.x</code>가 됩니다.
+    같은 논리로 <code>y' = y + t.y</code>, <code>z' = z + t.z</code>가 되죠.
+  </p>
+  <p>
+    반대로 열벡터 규약(GLM)에서는 <code>v' = M * v</code>라서 이동량이 <strong>마지막 열</strong>에 들어갑니다.
+    즉 우리 코드의 <code>at(3,0)=t.x</code>는 GLM에서 <code>[0][3]=t.x</code>에 해당합니다.
+    행/열이 전치(transpose) 관계라는 것이 여기서부터 갈립니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    이동량을 실수로 <strong>마지막 열</strong>(<code>at(0,3), at(1,3), at(2,3)</code>)에 넣으면, 행벡터 규약에서는
+    엉뚱하게 <code>w'</code>에 값이 새어 들어가 원근 분할이 망가집니다. 행벡터를 쓴다면 이동량은 <strong>반드시 3번 행</strong>입니다.
+  </div>
+
+  <h3>손계산으로 확인</h3>
+  <p>
+    <code>makeTranslate({10, 0, 0})</code>은 <code>M(3,0)=10</code>인 행렬입니다. 점 <code>(1, 2, 3, 1)</code>을 곱하면
+    <code>x' = 1 + 1*10 = 11</code>, y·z는 그대로라서 결과는 <strong>(11, 2, 3, 1)</strong>. 정확히 x축으로 10만큼 옮겨졌습니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>2. 크기 행렬 <code>makeScale</code></h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 각 축 방향으로 <code>(s.x, s.y, s.z)</code> 배율로 늘리거나 줄이는 행렬입니다.
+    <strong>왜 필요한가:</strong> 모델의 크기를 조정하거나(2배 확대 등), 비균일 스케일로 납작하게 만드는 등에 쓰입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Transform.h</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 크기: 대각선에 축별 배율을 넣는다.
+inline Mat4 makeScale(const Vec3&amp; s) {
+    Mat4 r = Mat4::identity();
+    r.at(0, 0) = s.x;   // x 성분에 곱해질 배율
+    r.at(1, 1) = s.y;   // y 성분에 곱해질 배율
+    r.at(2, 2) = s.z;   // z 성분에 곱해질 배율
+    return r;
+}</code></pre>
+  </div>
+
+  <h3>왜 <strong>대각선</strong>인가</h3>
+  <p>
+    다시 <code>x' = x*M(0,0) + y*M(1,0) + z*M(2,0) + w*M(3,0)</code>을 봅시다. 우리가 원하는 것은
+    <strong>x'가 오직 x에만 배율을 곱한 값</strong>, 즉 <code>x' = x * s.x</code>가 되는 것입니다. 그러려면
+    x 항의 계수 <code>M(0,0)</code>만 <code>s.x</code>로 두고 <strong>다른 항의 계수는 0</strong>이어야 합니다.
+    항등 행렬은 대각선만 1이고 나머지는 0이므로, 대각선 값 <code>M(0,0)</code>을 <code>s.x</code>로 바꾸기만 하면
+    <code>x' = x * s.x</code>가 딱 나옵니다. 그래서 대각선 <code>(0,0), (1,1), (2,2)</code>에 각각 배율을 넣는 것입니다.
+  </p>
+  <p>
+    <code>at(3,3)</code>은 항등 그대로 <code>1</code>로 남습니다. 즉 <code>w</code>는 건드리지 않으므로
+    점의 동차 성분은 <code>1</code>로 유지됩니다. 크기 변환은 이동과 달리 원점을 기준으로 작동한다는 점도 기억하세요 —
+    원점에서 멀리 있는 물체는 확대 시 원점에서 더 멀어집니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>3. 회전 행렬 <code>makeRotate</code> — 로드리게스 공식</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 임의의 축 <code>axis</code>를 중심으로 <code>angle</code>(라디안)만큼 회전하는 행렬입니다.
+    <strong>왜 필요한가:</strong> 물체를 자기 축으로 돌리거나, 카메라 시선을 회전하는 등 회전은 변환의 3대 요소 중 하나입니다.
+    임의 축 회전은 로드리게스 회전 공식(Rodrigues' rotation formula)으로 유도됩니다.
+  </p>
+
+  <ol class="steps">
+    <li>축을 <strong>정규화</strong>한다(단위 길이여야 공식이 성립).</li>
+    <li><code>c=cos θ</code>, <code>s=sin θ</code>, <code>t=1-cos θ</code>를 미리 계산한다.</li>
+    <li>9개 성분에 로드리게스 공식을 채운다(행벡터 배치 = 열벡터용의 전치).</li>
+  </ol>
+
+  <div class="code">
+    <div class="code-head"><span>math/Transform.h</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 임의 축 회전 (로드리게스), 행벡터 규약(v*R) 배치 = 열벡터용의 전치.
+inline Mat4 makeRotate(const Vec3&amp; axis, float angle) {
+    Vec3 a = normalize(axis);
+    float c = cos(angle), s = sin(angle), t = 1 - c;
+    Mat4 r = Mat4::identity();
+    r.at(0,0) = t*a.x*a.x + c;    r.at(0,1) = t*a.x*a.y + s*a.z; r.at(0,2) = t*a.x*a.z - s*a.y;
+    r.at(1,0) = t*a.x*a.y - s*a.z; r.at(1,1) = t*a.y*a.y + c;    r.at(1,2) = t*a.y*a.z + s*a.x;
+    r.at(2,0) = t*a.x*a.z + s*a.y; r.at(2,1) = t*a.y*a.z - s*a.x; r.at(2,2) = t*a.z*a.z + c;
+    return r;
+}</code></pre>
+  </div>
+
+  <h3>왜 축을 <code>normalize</code>하는가</h3>
+  <p>
+    로드리게스 공식은 축이 <strong>단위 벡터(길이 1)</strong>라는 전제 아래 유도됩니다. 예를 들어 대각선 항
+    <code>t*a.x*a.x + c</code>에서, <code>a</code>가 단위 벡터가 아니면 <code>a.x*a.x</code>가 실제 방향 성분의 제곱을
+    벗어나 회전이 <strong>왜곡·확대</strong>됩니다. 그래서 첫 줄에서 반드시 <code>normalize(axis)</code>로 길이를 1로 맞춥니다.
+    호출자가 <code>{0, 0, 5}</code>처럼 길이 5인 축을 넘겨도 내부에서 <code>{0, 0, 1}</code>로 정규화되어 안전합니다.
+  </p>
+
+  <h3><code>c</code>, <code>s</code>, <code>t</code> 세 상수의 의미</h3>
+  <p>
+    <code>c = cos θ</code>, <code>s = sin θ</code>는 회전각의 코사인·사인입니다. <code>t = 1 - cos θ</code>는
+    "1에서 코사인을 뺀 값"으로, 로드리게스 공식에서 <strong>축 방향으로의 성분</strong>을 다루는 계수입니다.
+    직관적으로: 벡터를 축 둘레로 돌릴 때, <strong>축에 평행한 성분은 그대로 남고</strong>, <strong>축에 수직인 성분만 회전</strong>합니다.
+    <code>t</code>는 "축 방향으로 얼마나 투영해 되돌려 놓을지"를 조절하는 항이라, 축 성분들의 곱(<code>a.x*a.x</code> 등)과 함께 나타납니다.
+    미리 한 번씩만 계산해 두고 9번 재사용하므로 <code>cos</code>/<code>sin</code> 호출도 각 1회로 절약됩니다.
+  </p>
+
+  <h3>9개 성분 하나씩 — 어디서 오는가</h3>
+  <p>
+    로드리게스 공식의 각 성분은 세 부분의 합입니다: (1) <strong>축 방향 성분</strong> <code>t·aᵢ·aⱼ</code>,
+    (2) <strong>대각선의 코사인 항</strong> <code>c</code>(같은 축끼리일 때만), (3) <strong>사인 항</strong> <code>±s·aₖ</code>(외적 성분, 서로 다른 축일 때).
+  </p>
+
+  <table class="impl">
+    <tr><th>성분</th><th>수식</th><th>구성 요소</th></tr>
+    <tr><td><code>at(0,0)</code></td><td><code>t*a.x*a.x + c</code></td><td>축 항 <code>t·aₓ²</code> + 대각선 코사인 <code>c</code></td></tr>
+    <tr><td><code>at(1,1)</code></td><td><code>t*a.y*a.y + c</code></td><td>축 항 <code>t·a_y²</code> + 대각선 코사인 <code>c</code></td></tr>
+    <tr><td><code>at(2,2)</code></td><td><code>t*a.z*a.z + c</code></td><td>축 항 <code>t·a_z²</code> + 대각선 코사인 <code>c</code></td></tr>
+    <tr><td><code>at(0,1)</code></td><td><code>t*a.x*a.y + s*a.z</code></td><td>축 항 <code>t·aₓa_y</code> + 사인 항 <code>+s·a_z</code></td></tr>
+    <tr><td><code>at(1,0)</code></td><td><code>t*a.x*a.y - s*a.z</code></td><td>같은 축 항, 사인 항 부호만 반대 <code>-s·a_z</code></td></tr>
+    <tr><td><code>at(0,2)</code></td><td><code>t*a.x*a.z - s*a.y</code></td><td>축 항 <code>t·aₓa_z</code> + 사인 항 <code>-s·a_y</code></td></tr>
+    <tr><td><code>at(2,0)</code></td><td><code>t*a.x*a.z + s*a.y</code></td><td>같은 축 항, 사인 항 부호만 반대 <code>+s·a_y</code></td></tr>
+    <tr><td><code>at(1,2)</code></td><td><code>t*a.y*a.z + s*a.x</code></td><td>축 항 <code>t·a_ya_z</code> + 사인 항 <code>+s·aₓ</code></td></tr>
+    <tr><td><code>at(2,1)</code></td><td><code>t*a.y*a.z - s*a.x</code></td><td>같은 축 항, 사인 항 부호만 반대 <code>-s·aₓ</code></td></tr>
+  </table>
+
+  <p>
+    <strong>대각선</strong>(<code>0,0 / 1,1 / 2,2</code>)에만 <code>+c</code>가 붙는 이유: 대각선은 "같은 축끼리"의 계수라
+    코사인만큼 원래 성분을 유지해야 하기 때문입니다. <strong>비대각선</strong>은 서로 다른 축이 섞이는 자리라,
+    축 곱 항 <code>t·aᵢaⱼ</code>에 <strong>외적에서 나온 사인 항</strong> <code>±s·aₖ</code>이 더해집니다.
+    이 사인 항이 바로 "축에 수직인 평면에서 벡터를 실제로 돌려 주는" 부분입니다.
+  </p>
+  <p>
+    부호가 대칭 위치에서 반대인 것(<code>at(0,1)</code>은 <code>+s·a_z</code>, <code>at(1,0)</code>은 <code>-s·a_z</code>)도 외적의 반대칭성에서 옵니다.
+    외적 <code>a × v</code>는 성분을 바꾸면 부호가 뒤집히는데, 이 성질이 회전 행렬의 비대각 성분에 그대로 반영됩니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    이 배치는 <strong>행벡터(v*R)용</strong>입니다. 교과서(대개 열벡터 <code>R*v</code> 기준)의 회전 행렬과 비교하면
+    비대각 성분의 사인 항 부호가 <strong>전치(transpose)된 형태</strong>로 보입니다. 즉 우리 <code>at(0,1)</code>은
+    열벡터 표준의 <code>at(1,0)</code> 자리와 같습니다. 다른 자료를 그대로 옮기면 회전 방향이 반대(시계↔반시계)로 돌 수 있으니 규약을 통일하세요.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. 곱 순서가 결과를 바꾼다 — <code>R*T</code> vs <code>T*R</code></h2>
+  <p>
+    변환의 가장 흔한 함정입니다. 행렬 곱은 <strong>교환법칙이 성립하지 않습니다</strong>(<code>A*B ≠ B*A</code>).
+    따라서 "회전 후 이동"과 "이동 후 회전"은 완전히 다른 결과를 냅니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>순서 실험</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">Mat4 T = makeTranslate({5, 0, 0});
+Mat4 R = makeRotate({0, 0, 1}, 1.5708f);   // z축 90도(π/2)
+
+Mat4 RT = R * T;   // 먼저 R, 그 다음 T  → 제자리서 돌고 옆으로
+Mat4 TR = T * R;   // 먼저 T, 그 다음 R  → 원점 중심으로 궤도를 돎</code></pre>
+  </div>
+
+  <h3>행벡터에서 "왼쪽이 먼저 적용"인 이유</h3>
+  <p>
+    결과는 <code>v' = v * (R * T)</code>입니다. 결합법칙으로 묶으면 <code>v' = (v * R) * T</code>가 됩니다.
+    즉 <strong>벡터에 가장 먼저 닿는 것은 왼쪽 행렬 <code>R</code></strong>입니다. 벡터가 왼쪽에 있으니
+    바로 옆(왼쪽) 행렬부터 순서대로 적용되는 것이죠. 그래서 <code>R*T</code>는 "먼저 회전(R), 그 다음 이동(T)"입니다.
+  </p>
+
+  <table class="impl">
+    <tr><th>곱</th><th>적용 순서(행벡터)</th><th>기하학적 결과</th></tr>
+    <tr><td><code>R * T</code></td><td>회전 → 이동</td><td>물체가 <strong>제자리에서 돌고</strong> 나서 옆으로 5만큼 밀림</td></tr>
+    <tr><td><code>T * R</code></td><td>이동 → 회전</td><td>먼저 5만큼 밀린 뒤 <strong>원점 기준으로 회전</strong> = 원점 둘레를 도는 궤도</td></tr>
+  </table>
+
+  <p>
+    직관: 회전은 언제나 <strong>원점을 중심</strong>으로 일어납니다. <code>R*T</code>는 물체가 아직 원점에 있을 때 돌리므로
+    자기 자리에서 방향만 바뀌고, 그 다음 이동으로 옮겨집니다. <code>T*R</code>은 먼저 원점에서 5만큼 떨어뜨린 뒤 돌리므로,
+    반지름 5짜리 원을 그리며 원점 둘레를 도는 것처럼 보입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>GLM/OpenGL(열벡터)과 곱 순서가 정확히 반대입니다.</strong> GLM에서는 <code>v' = M * v</code>라서
+    "먼저 적용할 변환을 <strong>오른쪽</strong>에" 두어 <code>T * R</code>이 "먼저 회전 후 이동"이 됩니다.
+    우리(행벡터)는 "먼저 적용할 변환을 <strong>왼쪽</strong>에" 두어 <code>R * T</code>가 "먼저 회전 후 이동"입니다.
+    인터넷 예제를 코드 순서만 그대로 베끼면 회전 중심과 이동이 뒤엉킵니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. 동차좌표: 점(w=1) vs 방향(w=0)</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 4차원 벡터 <code>Vec4</code>와, 그것에 행렬을 곱하는 <code>mul(Vec4, Mat4)</code>.
+    <strong>왜 필요한가:</strong> 같은 <code>(x,y,z)</code>라도 그것이 <strong>위치</strong>인지 <strong>방향</strong>인지에 따라
+    이동에 반응해야 할지 말지가 달라집니다. 이 구분을 <code>w</code> 한 성분으로 처리합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>math/Transform.h</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">struct Vec4 { float x, y, z, w; };
+
+// v' = v * M  (HLSL의 mul(v, M)와 동일한 행벡터 곱)
+inline Vec4 mul(const Vec4&amp; v, const Mat4&amp; M) {
+    return {
+        v.x*M.at(0,0) + v.y*M.at(1,0) + v.z*M.at(2,0) + v.w*M.at(3,0),  // x'
+        v.x*M.at(0,1) + v.y*M.at(1,1) + v.z*M.at(2,1) + v.w*M.at(3,1),  // y'
+        v.x*M.at(0,2) + v.y*M.at(1,2) + v.z*M.at(2,2) + v.w*M.at(3,2),  // z'
+        v.x*M.at(0,3) + v.y*M.at(1,3) + v.z*M.at(2,3) + v.w*M.at(3,3)   // w'
+    };
+}</code></pre>
+  </div>
+
+  <h3>출력 성분 4개, 어느 행·열의 곱인가</h3>
+  <p>
+    행벡터 곱에서 결과의 <strong>k번째 성분</strong>은 "입력 벡터 전체"와 "행렬의 <strong>k번째 열</strong>"의 내적입니다.
+    즉 입력 성분 <code>v.x, v.y, v.z, v.w</code>가 각각 행렬의 <strong>0·1·2·3번 행</strong>에서 <strong>같은 k번 열</strong> 값과 곱해집니다.
+  </p>
+  <table class="impl">
+    <tr><th>출력</th><th>사용하는 행렬 열</th><th>전개</th></tr>
+    <tr><td><code>x'</code></td><td>0번 열</td><td><code>v.x·M(0,0) + v.y·M(1,0) + v.z·M(2,0) + v.w·M(3,0)</code></td></tr>
+    <tr><td><code>y'</code></td><td>1번 열</td><td><code>v.x·M(0,1) + v.y·M(1,1) + v.z·M(2,1) + v.w·M(3,1)</code></td></tr>
+    <tr><td><code>z'</code></td><td>2번 열</td><td><code>v.x·M(0,2) + v.y·M(1,2) + v.z·M(2,2) + v.w·M(3,2)</code></td></tr>
+    <tr><td><code>w'</code></td><td>3번 열</td><td><code>v.x·M(0,3) + v.y·M(1,3) + v.z·M(2,3) + v.w·M(3,3)</code></td></tr>
+  </table>
+  <p>
+    핵심은 각 항의 <strong>마지막 성분</strong> <code>v.w * M(3, k)</code>입니다. 앞서 이동 행렬은 이동량을 3번 행
+    <code>M(3,0), M(3,1), M(3,2)</code>에 넣었습니다. 따라서 이 <strong>이동량이 결과에 더해질지 여부는 오직 <code>v.w</code>가 결정</strong>합니다.
+  </p>
+
+  <h3>w=1(점)과 w=0(방향)의 결정적 차이</h3>
+  <div class="code"><pre><code class="language-cpp">Mat4 T = makeTranslate({10, 0, 0});
+
+Vec4 point{1, 2, 3, 1};   // w=1 → 위치. 이동 영향받음
+Vec4 dir  {1, 0, 0, 0};   // w=0 → 방향. 이동 무시
+
+Vec4 p2 = mul(point, T);  // (1+1*10, 2, 3, 1) = (11, 2, 3, 1)
+Vec4 d2 = mul(dir,   T);  // (1+0*10, 0, 0, 0) = ( 1, 0, 0, 0)</code></pre></div>
+  <p>
+    점의 <code>x'</code>는 <code>v.x + v.w*M(3,0) = 1 + 1*10 = 11</code>이 되어 <strong>이동합니다</strong>.
+    방향의 <code>x'</code>는 <code>v.x + v.w*M(3,0) = 1 + 0*10 = 1</code>이라 <strong>이동량이 0으로 곱해져 사라집니다</strong>.
+    같은 행렬, 같은 <code>(1,0,0)</code>인데 <code>w</code> 한 성분 차이로 "옮겨지는 위치"와 "옮겨지지 않는 방향"이 갈립니다.
+    이것이 동차좌표의 핵심 발상입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>법선·시선·빛 방향 등 방향 벡터는 반드시 <code>w = 0</code></strong>으로 두어야 합니다. 실수로 <code>w = 1</code>로 두면
+    방향에 카메라·모델의 이동량이 더해져, 물체가 화면에서 움직일 때마다 조명 방향이 <strong>흔들리는</strong> 버그가 생깁니다.
+    "위치는 1, 방향은 0" — 이 규칙을 기계적으로 외우세요.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6. 표준 조립 — <code>model = S * R * T</code></h2>
+  <p>
+    실무에서 하나의 물체에 크기·회전·이동을 모두 적용할 때는 세 행렬을 곱해 <strong>모델 행렬</strong> 하나로 만듭니다.
+    행벡터 규약에서 자연스러운 순서는 <strong>크기 → 회전 → 이동</strong>, 즉 <code>S * R * T</code>입니다.
+  </p>
+  <div class="code"><pre><code class="language-cpp">Mat4 S = makeScale({2, 2, 2});
+Mat4 R = makeRotate({0, 0, 1}, 1.5708f);
+Mat4 T = makeTranslate({5, 0, 0});
+
+Mat4 model = S * R * T;   // 적용 순서: 크기 → 회전 → 이동</code></pre></div>
+  <p>
+    <code>v' = v * (S*R*T) = ((v*S)*R)*T</code>로 풀리므로 왼쪽부터 <strong>S(크기) → R(회전) → T(이동)</strong> 순서로 적용됩니다.
+    이 순서가 옳은 이유: 먼저 원점에서 크기를 키우고, 원점 중심으로 회전한 뒤, 마지막에 원하는 위치로 옮겨야
+    <strong>물체가 자기 중심으로 커지고 돌고 나서 배치</strong>됩니다. 이동을 먼저 하면 회전·크기가 원점이 아닌
+    엉뚱한 곳을 기준으로 작동해 결과가 뒤틀립니다.
+  </p>
+
+  <h3>DirectXMath 버전 — 실무 표준</h3>
+  <div class="code">
+    <div class="code-head"><span>DirectXMath</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+
+XMMATRIX S = XMMatrixScaling(2, 2, 2);
+XMMATRIX R = XMMatrixRotationZ(XMConvertToRadians(90));
+XMMATRIX T = XMMatrixTranslation(5, 0, 0);
+
+XMMATRIX model = S * R * T;   // D3D도 행벡터 → S*R*T (GLM의 T*R*S와 좌우 반대)
+
+// 임의 축 회전 / 오일러 각
+XMMATRIX Rax  = XMMatrixRotationAxis(XMVectorSet(0,0,1,0), XMConvertToRadians(90));
+XMMATRIX Reul = XMMatrixRotationRollPitchYaw(pitch, yaw, roll);</code></pre>
+  </div>
+  <p>
+    DirectXMath 함수는 우리가 손으로 만든 것과 1:1로 대응합니다:
+  </p>
+  <table class="impl">
+    <tr><th>직접 구현</th><th>DirectXMath</th><th>대응</th></tr>
+    <tr><td><code>makeScale</code></td><td><code>XMMatrixScaling</code></td><td>대각선 배율 행렬</td></tr>
+    <tr><td><code>makeRotate(axis, θ)</code></td><td><code>XMMatrixRotationAxis</code></td><td>임의 축 로드리게스 회전</td></tr>
+    <tr><td>(z축 회전)</td><td><code>XMMatrixRotationZ</code></td><td>축을 z로 고정한 회전</td></tr>
+    <tr><td><code>makeTranslate</code></td><td><code>XMMatrixTranslation</code></td><td>3번 행에 이동량</td></tr>
+    <tr><td><code>mul(Vec4, Mat4)</code></td><td><code>XMVector4Transform</code></td><td>행벡터 v*M 변환</td></tr>
+  </table>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>DirectXMath의 곱 순서는 GLM과 정확히 반대입니다.</strong> 인터넷의 OpenGL/GLM 예제가 쓰는
+    <code>model = T * R * S</code>를 D3D에 그대로 옮기면 회전 중심과 이동이 엉킵니다. D3D는 행벡터라
+    <strong>"먼저 적용할 변환을 왼쪽에"</strong> = <code>S * R * T</code>입니다. 이 한 줄만 반대로 써도 물체가 궤도를 도는 버그가 납니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    같은 <code>model</code> 행렬로 정점을 수만 개 변환한다면, 세 행렬 곱 <code>S*R*T</code>는 CPU에서 <strong>한 번만</strong> 미리
+    계산해 두고 결과 행렬만 셰이더로 올리세요. 정점마다 <code>S*R*T</code>를 다시 곱하는 것은 큰 낭비입니다.
+    또한 cbuffer로 올릴 때는 (HLSL 기본 열 우선 해석 때문에) 필요 시 <code>transpose</code>를 잊지 마세요.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./01-matrix.html">← 행렬 — Mat4</a>
+    <a href="./01-dotcross.html">내적 · 외적 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

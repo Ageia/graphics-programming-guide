@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 디버깅과 검증 — C++/DirectX 11</title>
+<meta name="description" content="D3D11 디버깅의 3층 방어선 — HRESULT 확인 매크로, 디버그 레이어 + InfoQueue 브레이크, PIX/RenderDoc 프레임 캡처를 한 줄 한 줄 해부한다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./05-api.html">5장. 그래픽스 API</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">디버깅과 검증</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 5</span>
+  <h1>디버깅과 검증 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    명시적 API의 대가는 <strong>"잘못된 DESC·바인딩도 대개 조용히 무시되고, 몇 프레임 뒤 엉뚱한 곳에서 검은 화면으로만 드러난다"</strong>는 점입니다.
+    D3D11에서 삼각형이 안 나올 때 원인은 셰이더 컴파일 실패일 수도, 인풋 레이아웃 불일치일 수도, 렌더 타깃 미바인딩일 수도, 깊이 테스트 설정 오류일 수도 있는데,
+    화면은 똑같이 새까맣게만 나옵니다. 그래서 D3D11 프로그래밍의 절반은 <strong>"조용한 실패를 시끄러운 실패로 바꾸는 장치를 미리 깔아두는 일"</strong>입니다.
+    이 페이지에서는 세 겹의 방어선 — ① 반환값(<code>HRESULT</code>)을 즉시 검사하는 매크로, ② 런타임이 모든 호출을 검증해주는 <strong>디버그 레이어 + InfoQueue</strong>,
+    ③ 한 프레임을 통째로 뜯어보는 <strong>PIX·RenderDoc 프레임 캡처</strong> — 를 코드 한 줄, 인자 하나까지 해부합니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <section id="why">
+    <h2>0. 왜 디버깅이 "장치를 미리 까는 일"인가</h2>
+    <p>
+      D3D11은 성능을 위해 <strong>낙관적으로 동작</strong>합니다. 여러분이 <code>CreateBuffer</code>에 말이 안 되는 <code>BindFlags</code>를 넘겨도,
+      드라이버는 매 호출마다 "이 값이 정말 유효한가?"를 꼼꼼히 검사하며 시간을 낭비하지 않습니다. 유효성 검사는 비싸니까요.
+      대신 <strong>반환값(<code>HRESULT</code>)에 실패 코드를 담아 돌려줄 뿐</strong>이고, 그마저 여러분이 확인하지 않으면 그냥 지나갑니다.
+      결과적으로 잘못된 리소스가 파이프라인에 꽂히고, 몇 개의 드로우 콜을 지나 <em>완전히 다른 위치에서</em> 화면이 검게 나옵니다.
+      "증상이 나타난 곳"과 "원인이 있는 곳"이 멀리 떨어져 있는 것 — 이게 그래픽스 디버깅이 어려운 근본 이유입니다.
+    </p>
+    <p>
+      해결 전략은 항상 같습니다. <strong>실패를 원인 지점에 최대한 가깝게, 최대한 시끄럽게 만드는 것.</strong>
+      아래 세 방어선은 정확히 그 순서대로 "실패와 원인 사이의 거리"를 좁혀 나갑니다.
+    </p>
+    <ol class="steps">
+      <li><strong>1층 — HRESULT 확인</strong>: 함수가 실패를 반환한 <em>바로 그 순간</em> 파일·줄 번호와 함께 잡는다. "어느 호출이" 실패했는지 알아낸다.</li>
+      <li><strong>2층 — 디버그 레이어 + InfoQueue</strong>: 런타임이 "<em>왜</em>" 실패했는지 사람이 읽을 수 있는 문장으로 알려주고, 그 호출에서 디버거를 멈춰 콜스택을 보여준다.</li>
+      <li><strong>3층 — 프레임 캡처(PIX·RenderDoc)</strong>: 코드가 성공했는데도 화면이 이상할 때, GPU에 실제로 올라간 리소스·셰이더·픽셀을 눈으로 확인한다.</li>
+    </ol>
+    <p>
+      1층은 "실패한 함수"를, 2층은 "실패한 이유"를, 3층은 "성공했지만 결과가 틀린 이유"를 잡습니다. 세 층은 대체재가 아니라 <strong>보완재</strong>입니다.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="hresult">
+    <h2>1. 기본 방어선 — HRESULT 확인</h2>
+    <p>
+      D3D11의 거의 모든 생성·매핑 함수(<code>CreateBuffer</code>, <code>CreateTexture2D</code>, <code>CreateInputLayout</code>, <code>Map</code>, <code>D3D11CreateDevice</code> …)는
+      <code>HRESULT</code>라는 32비트 정수를 반환합니다. 이름은 "Handle to a RESULT"에서 왔지만, 실제로는 <strong>성공/실패와 상세 오류 코드를 함께 담은 비트필드</strong>입니다.
+      최상위 비트(bit 31)가 1이면 실패, 0이면 성공을 뜻합니다.
+    </p>
+    <p>
+      문제는 <strong>왜 실패했는지 코드만 봐서는 알기 어렵다</strong>는 것입니다. <code>0x80070057</code>이라는 숫자를 받아도 그게 "<code>E_INVALIDARG</code>(인자가 틀림)"라는 걸 외우고 있어야 하죠.
+      그래서 실무 전략은 이렇습니다 — <strong>"실패했다"는 사실은 매크로로 즉시·자동으로 잡고, "왜 실패했나"라는 상세 이유는 다음 절의 디버그 레이어에 맡긴다.</strong>
+      아래 매크로는 그 1층 방어선입니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>hr_check.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">// 호출 직후 HRESULT를 검사하는 매크로 — 실패하면 파일·줄과 함께 즉시 중단
+#define HR_CHECK(call) do {                                      \
+    HRESULT _hr = (call);                                        \
+    if (FAILED(_hr))                                             \
+        std::fprintf(stderr, "[D3D] 0x%08lX @ %s:%d -&gt; %s\n",   \
+                     (unsigned long)_hr, __FILE__, __LINE__, #call); \
+} while (0)
+
+// 사용 예
+HR_CHECK(device->CreateBuffer(&amp;vbd, &amp;vinit, &amp;vbo));</code></pre>
+    </div>
+
+    <h3>1-1. 매크로의 골격 — <code>do { ... } while (0)</code>가 왜 필요한가</h3>
+    <p>
+      <code>#define</code>은 함수가 아니라 <strong>텍스트 치환</strong>입니다. 컴파일러가 코드를 읽기 전에 전처리기가 <code>HR_CHECK(...)</code>라는 글자를
+      정의된 본문으로 <em>그대로 갈아끼웁니다</em>. 그래서 매크로 본문을 어떻게 감싸느냐가 중요합니다. 만약 본문을 그냥 <code>{ ... }</code> 블록으로만 두면
+      다음처럼 뒤에 세미콜론을 붙이는 자연스러운 사용에서 문제가 생깁니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>매크로가 왜 do-while(0)로 감싸이는가</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">// 만약 매크로가 그냥 { ... } 라면, 이렇게 쓸 때
+if (조건)
+    HR_CHECK(foo());   // 치환 후: if (조건) { ... };  ← 뒤에 세미콜론이 남는다
+else
+    bar();             // 그 세미콜론이 if를 "끝내버려" else가 붕 떠서 컴파일 에러
+
+// do { ... } while (0) 로 감싸면
+if (조건)
+    HR_CHECK(foo());   // 치환 후: if (조건) do { ... } while (0);  ← 세미콜론이 while을 정상 종결
+else
+    bar();             // else가 if에 제대로 붙는다</code></pre>
+    </div>
+    <p>
+      <code>do { ... } while (0)</code>는 <strong>"단 한 번만 실행되는 블록"</strong>인데, 이 관용구의 목적은 반복이 아닙니다.
+      목적은 오직 <strong>"매크로 본문 전체를 하나의 문(statement)으로 만들고, 사용처에서 붙이는 세미콜론이 자연스럽게 소화되게 하는 것"</strong>입니다.
+      <code>while (0)</code>이므로 조건이 거짓이라 절대 반복하지 않고, 최적화 컴파일러는 루프를 통째로 제거합니다 — 런타임 비용은 0입니다.
+    </p>
+
+    <h3>1-2. 줄별 해부</h3>
+    <table class="impl">
+      <tr><th>코드 조각</th><th>의미</th></tr>
+      <tr><td><code>HRESULT _hr = (call);</code></td><td>매크로 인자 <code>call</code>(예: <code>device-&gt;CreateBuffer(...)</code>)을 <em>딱 한 번만</em> 실행하고 그 반환값을 <code>_hr</code>에 저장. 괄호 <code>(call)</code>로 감싸 연산자 우선순위 사고를 막는다.</td></tr>
+      <tr><td><code>if (FAILED(_hr))</code></td><td><code>FAILED</code>는 Windows SDK 매크로로, 내부적으로 <code>((HRESULT)(hr) &lt; 0)</code> — 즉 최상위 비트(부호 비트)가 켜졌는지 검사. 실패면 참.</td></tr>
+      <tr><td><code>0x%08lX</code></td><td>HRESULT를 <strong>8자리 대문자 16진수, 앞을 0으로 채워</strong> 출력. <code>l</code>은 <code>long</code> 크기 지정. 예: <code>0x80070057</code>.</td></tr>
+      <tr><td><code>__FILE__</code>, <code>__LINE__</code></td><td>전처리기가 채워주는 <strong>현재 소스 파일 경로와 줄 번호</strong>. 실패 지점을 정확히 짚어준다.</td></tr>
+      <tr><td><code>#call</code></td><td><strong>문자열화(stringize) 연산자</strong>. 매크로 인자 <code>call</code>을 그 소스 텍스트 그대로 문자열로 바꾼다. 즉 <code>"device-&gt;CreateBuffer(&amp;vbd, &amp;vinit, &amp;vbo)"</code>가 로그에 그대로 찍힌다.</td></tr>
+    </table>
+    <p>
+      정리하면 이 한 줄 <code>HR_CHECK(device-&gt;CreateBuffer(&amp;vbd, &amp;vinit, &amp;vbo));</code>이 실패하면 출력창에 이렇게 찍힙니다:
+    </p>
+    <div class="code">
+      <div class="code-head"><span>실패 시 출력 예</span><span class="lang">text</span></div>
+      <pre><code class="language-cpp">[D3D] 0x80070057 @ C:\proj\mesh.cpp:142 -&gt; device-&gt;CreateBuffer(&amp;vbd, &amp;vinit, &amp;vbo)</code></pre>
+    </div>
+    <p>
+      숫자(<code>0x80070057</code> = <code>E_INVALIDARG</code>) + 파일:줄(<code>mesh.cpp:142</code>) + 실패한 호출 원문까지 한 줄에 모두 들어있습니다.
+      "어느 함수가 실패했나?"라는 첫 번째 질문이 즉시 해결됩니다.
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <strong>매크로 인자는 반드시 딱 한 번만 실행되어야 합니다.</strong> 이 매크로가 <code>_hr = (call)</code>로 결과를 <em>변수에 저장</em>한 뒤
+      그 변수만 검사하는 이유가 여기 있습니다. 만약 매크로 본문에서 <code>call</code>을 두 번 써서 <code>if (FAILED(call)) ... print(call)</code>처럼 만들면,
+      <code>CreateBuffer</code>가 <strong>두 번 호출되어 버퍼가 두 개 생성</strong>됩니다(누수!). "인자를 한 번만 평가하라"는 것은 매크로 작성의 철칙입니다.
+    </div>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      로그만 찍고 <strong>실행을 계속</strong>하면, 실패한 <code>vbo</code>는 <code>nullptr</code>인 채로 다음 드로우 콜까지 흘러가 결국 다른 곳에서 크래시합니다.
+      학습·디버그 빌드에서는 실패 시 <code>assert(false)</code>나 <code>DebugBreak()</code>로 <strong>즉시 멈추는</strong> 편이 원인 추적에 훨씬 유리합니다.
+      (아래 InfoQueue의 <code>SetBreakOnSeverity</code>가 이 역할을 자동으로 해줍니다.)
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      <code>HR_CHECK</code> 자체는 실패했을 때만 <code>fprintf</code>를 부르므로 성공 경로에서는 사실상 <strong>비교 한 번</strong>이 전부입니다.
+      다만 <strong>렌더 루프 안쪽</strong>(매 프레임 수천 번 호출되는 <code>Map</code> 등)에 무겁게 두는 것은 피하고,
+      생성·초기화처럼 프레임당 몇 번 안 부르는 경로에 쓰는 것이 이상적입니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="debuglayer">
+    <h2>2. 모던 방어선 — 디버그 레이어 + InfoQueue</h2>
+    <p>
+      1층 매크로는 "<em>어느</em> 호출이 실패했나"를 알려주지만, "<em>왜</em>"는 <code>0x80070057</code> 같은 숫자로만 말합니다.
+      D3D11은 이보다 훨씬 친절한 수단을 내장하고 있습니다 — <strong>디버그 레이어(Debug Layer)</strong>입니다.
+      디바이스를 <code>D3D11_CREATE_DEVICE_DEBUG</code> 플래그로 만들면, 런타임이 <strong>모든 API 호출을 가로채 검증</strong>하고
+      "이 DESC의 BindFlags가 이 Usage와 호환되지 않습니다", "슬롯 0에 nullptr SRV가 바인딩됐습니다" 같은
+      <strong>사람이 읽을 수 있는 문장</strong>을 디버거 출력창에 찍어줍니다.
+    </p>
+    <p>
+      한 걸음 더 나아가 <code>ID3D11InfoQueue</code> 인터페이스를 얻으면, 이 메시지들을 <strong>심각도(severity)별로 필터링</strong>하고,
+      특정 심각도가 발생하면 <strong>디버거를 그 자리에서 멈추게(break)</strong> 할 수 있습니다. 그러면 콜스택을 타고 올라가 정확한 범인 줄을 짚을 수 있죠.
+      코드는 두 부분으로 나뉩니다 — ① 디바이스 <em>생성 시점</em>에 디버그 플래그를 켜는 함수, ② 생성 <em>후에</em> InfoQueue를 설정하는 함수.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>d3d_debug.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;wrl/client.h&gt;
+#include &lt;cstdio&gt;
+using Microsoft::WRL::ComPtr;
+
+// 디바이스 생성 "시점"에 디버그 플래그를 켜야 한다
+HRESULT createDebugDevice(ComPtr&lt;ID3D11Device&gt;&amp; device,
+                          ComPtr&lt;ID3D11DeviceContext&gt;&amp; context) {
+    UINT flags = 0;
+#if defined(_DEBUG)
+    flags |= D3D11_CREATE_DEVICE_DEBUG;   // 릴리스에선 자동으로 빠짐
+#endif
+    D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+    return D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+                             &amp;fl, 1, D3D11_SDK_VERSION,
+                             &amp;device, nullptr, &amp;context);
+}
+
+// 디바이스 생성 "후"에 InfoQueue로 심각도별 브레이크·필터를 건다
+void installInfoQueue(ID3D11Device* device) {
+    ComPtr&lt;ID3D11InfoQueue&gt; iq;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&amp;iq)))) return; // 디버그 레이어 없음
+
+    // 오류/경고가 나면 디버거에서 즉시 멈추게 — 콜스택으로 범인을 짚는다
+    iq->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_ERROR,   TRUE);
+    iq->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_CORRUPTION, TRUE);
+    iq->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING, TRUE);
+
+    // 무해한 알림성 메시지는 걸러 소음을 줄인다
+    D3D11_MESSAGE_SEVERITY deny[] = { D3D11_MESSAGE_SEVERITY_INFO };
+    D3D11_INFO_QUEUE_FILTER filter{};
+    filter.DenyList.NumSeverities = 1;
+    filter.DenyList.pSeverityList = deny;
+    iq->AddStorageFilterEntries(&amp;filter);
+}</code></pre>
+    </div>
+
+    <h3>2-1. 인클루드와 <code>using</code> — 무대를 세우는 줄들</h3>
+    <p>
+      맨 위 네 줄은 이 코드가 무엇에 의존하는지 선언합니다. 하나씩 볼게요.
+    </p>
+    <ul>
+      <li><code>&lt;d3d11.h&gt;</code> — <code>ID3D11Device</code>, <code>ID3D11InfoQueue</code>, <code>D3D11CreateDevice</code> 등 D3D11의 모든 타입·함수 선언이 들어있는 헤더입니다.</li>
+      <li><code>&lt;wrl/client.h&gt;</code> — <strong>WRL(Windows Runtime Library)</strong>의 <code>Microsoft::WRL::ComPtr</code>가 정의된 헤더. COM 객체의 참조 카운트를 RAII로 자동 관리해주는 스마트 포인터입니다(다음 페이지에서 상세히 다룹니다).</li>
+      <li><code>&lt;cstdio&gt;</code> — <code>fprintf</code> 등 C 표준 입출력. (여기서는 직접 안 쓰지만 로깅 확장 대비용입니다.)</li>
+      <li><code>using Microsoft::WRL::ComPtr;</code> — 매번 <code>Microsoft::WRL::ComPtr&lt;...&gt;</code>라고 길게 쓰지 않도록 이름을 끌어옵니다.</li>
+    </ul>
+
+    <h3>2-2. <code>createDebugDevice</code> — 디버그 플래그는 "생성 시점"에만 켤 수 있다</h3>
+    <p>
+      가장 중요한 사실부터 짚습니다. <strong>디버그 레이어는 디바이스를 만드는 그 순간에만 활성화할 수 있습니다.</strong>
+      이미 만든 디바이스에 나중에 "디버그 모드 켜기"를 할 수는 없습니다. 그래서 이 함수가 <code>D3D11CreateDevice</code> 호출을 감싸고 있는 것이죠.
+    </p>
+
+    <h4>시그니처 해부</h4>
+    <div class="code">
+      <div class="code-head"><span>시그니처</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">HRESULT createDebugDevice(ComPtr&lt;ID3D11Device&gt;&amp; device,
+                          ComPtr&lt;ID3D11DeviceContext&gt;&amp; context)</code></pre>
+    </div>
+    <ul>
+      <li><strong>반환 <code>HRESULT</code></strong> — 생성 성공/실패를 호출자가 <code>HR_CHECK</code>로 검사할 수 있게 그대로 돌려줍니다.</li>
+      <li><strong><code>ComPtr&lt;ID3D11Device&gt;&amp; device</code></strong> — <code>&amp;</code>는 <strong>참조(reference)</strong>입니다. 값 복사가 아니라 <em>호출한 쪽의 실제 변수</em>를 함수 안에서 채워 넣기 위함입니다. 즉 이 인자는 "출력 파라미터"로, 함수가 끝나면 호출자의 <code>device</code>에 완성된 디바이스가 담깁니다.</li>
+      <li><strong><code>context</code></strong>도 같은 방식으로 즉시 컨텍스트를 받아옵니다.</li>
+    </ul>
+    <p>
+      만약 <code>&amp;</code> 없이 값으로 받았다면(<code>ComPtr&lt;ID3D11Device&gt; device</code>), 함수 안에서 채운 값은 <strong>함수 지역 복사본</strong>에만 담기고
+      함수가 끝나는 순간 사라져 호출자는 여전히 빈 <code>device</code>를 갖게 됩니다. 그래서 출력 파라미터에는 참조 <code>&amp;</code>가 필수입니다.
+    </p>
+
+    <h4>본문 한 줄씩</h4>
+    <table class="impl">
+      <tr><th>줄</th><th>의미</th></tr>
+      <tr><td><code>UINT flags = 0;</code></td><td>디바이스 생성 옵션 비트필드. 기본은 아무 플래그 없음(0).</td></tr>
+      <tr><td><code>#if defined(_DEBUG)</code></td><td><strong>전처리 조건부 컴파일.</strong> 디버그 빌드에서만 정의되는 <code>_DEBUG</code> 매크로가 있을 때만 다음 줄을 포함시킨다.</td></tr>
+      <tr><td><code>flags |= D3D11_CREATE_DEVICE_DEBUG;</code></td><td><code>|=</code>는 <strong>비트 OR 대입</strong> — 기존 flags에 디버그 비트를 <em>추가</em>로 켠다. 다른 플래그를 지우지 않고 합쳐진다.</td></tr>
+      <tr><td><code>#endif</code></td><td>조건부 블록 종료. 즉 <strong>릴리스 빌드에선 이 세 줄이 통째로 코드에서 사라진다</strong> — 검증 비용이 0이 된다.</td></tr>
+      <tr><td><code>D3D_FEATURE_LEVEL fl = ..._11_0;</code></td><td>요구할 기능 레벨(하드웨어 능력 등급). 여기선 D3D11.0을 요구.</td></tr>
+      <tr><td><code>return D3D11CreateDevice(...);</code></td><td>실제 생성. 아래에서 인자를 하나씩 본다.</td></tr>
+    </table>
+
+    <h4><code>D3D11CreateDevice</code>의 11개 인자 — 하나씩</h4>
+    <table class="impl">
+      <tr><th>인자</th><th>값</th><th>의미</th></tr>
+      <tr><td>pAdapter</td><td><code>nullptr</code></td><td>어떤 GPU를 쓸지. <code>nullptr</code>이면 <strong>기본 어댑터(주 GPU)</strong> 자동 선택.</td></tr>
+      <tr><td>DriverType</td><td><code>D3D_DRIVER_TYPE_HARDWARE</code></td><td>실제 GPU 하드웨어 드라이버 사용(가장 빠름). WARP는 소프트웨어 대체.</td></tr>
+      <tr><td>Software</td><td><code>nullptr</code></td><td>소프트웨어 래스터라이저 DLL. HARDWARE일 땐 반드시 <code>nullptr</code>.</td></tr>
+      <tr><td>Flags</td><td><code>flags</code></td><td><strong>여기가 핵심.</strong> 위에서 조립한 <code>D3D11_CREATE_DEVICE_DEBUG</code> 비트가 이 자리로 전달돼 디버그 레이어가 켜진다.</td></tr>
+      <tr><td>pFeatureLevels</td><td><code>&amp;fl</code></td><td>요구 기능 레벨 배열의 시작 주소.</td></tr>
+      <tr><td>FeatureLevels</td><td><code>1</code></td><td>그 배열의 원소 개수(여기선 1개).</td></tr>
+      <tr><td>SDKVersion</td><td><code>D3D11_SDK_VERSION</code></td><td>SDK 버전 상수. 항상 이 매크로를 그대로 넘긴다.</td></tr>
+      <tr><td>ppDevice</td><td><code>&amp;device</code></td><td>생성된 디바이스를 받을 곳. <code>ComPtr</code>에 <code>&amp;</code>를 쓰면 내부 포인터의 주소가 넘어가 out 파라미터로 채워진다.</td></tr>
+      <tr><td>pFeatureLevel</td><td><code>nullptr</code></td><td>실제로 얻은 기능 레벨을 돌려받을 곳. 관심 없으면 <code>nullptr</code>.</td></tr>
+      <tr><td>ppImmediateContext</td><td><code>&amp;context</code></td><td>즉시 컨텍스트를 받을 곳.</td></tr>
+    </table>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>D3D11_CREATE_DEVICE_DEBUG</code>로 생성이 <strong>실패</strong>하면(반환 <code>DXGI_ERROR_SDK_COMPONENT_MISSING</code> 등), 그건 대개
+      <strong>"그래픽스 도구(Graphics Tools)" 선택적 기능이 Windows에 설치되지 않은 것</strong>입니다. 설정 → 앱 → 선택적 기능에서 "그래픽스 도구"를 추가하면 됩니다.
+      릴리스 배포 PC에는 이게 없으므로, <code>#if defined(_DEBUG)</code>로 감싸 <strong>디버그 빌드에서만</strong> 켜는 이 패턴이 안전합니다.
+    </div>
+
+    <h3>2-3. <code>installInfoQueue</code> — "왜"를 문장으로, 그리고 브레이크</h3>
+    <p>
+      디버그 레이어를 켠 것만으로도 오류 메시지가 출력창에 찍히기 시작합니다. <code>installInfoQueue</code>는 여기에 두 가지를 더합니다 —
+      ① 특정 심각도에서 <strong>디버거를 멈추게</strong> 하고, ② 시끄러운 정보성 메시지를 <strong>걸러</strong> 신호 대 잡음비를 높입니다.
+    </p>
+
+    <h4><code>QueryInterface</code>와 <code>IID_PPV_ARGS</code> — COM에서 "다른 얼굴" 꺼내기</h4>
+    <div class="code">
+      <div class="code-head"><span>InfoQueue 획득</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">ComPtr&lt;ID3D11InfoQueue&gt; iq;
+if (FAILED(device->QueryInterface(IID_PPV_ARGS(&amp;iq)))) return; // 디버그 레이어 없음</code></pre>
+    </div>
+    <p>
+      COM 객체 하나는 <strong>여러 인터페이스(얼굴)</strong>를 가질 수 있습니다. 우리가 가진 <code>ID3D11Device</code>는 "리소스를 만드는 얼굴"이지만,
+      같은 객체가 디버그 레이어가 켜져 있을 때는 <code>ID3D11InfoQueue</code>라는 "진단 메시지 큐 얼굴"도 갖습니다.
+      <code>QueryInterface</code>는 <strong>"이 객체에게 저 얼굴이 있으면 그 포인터를 달라"</strong>고 요청하는 함수입니다.
+    </p>
+    <ul>
+      <li><strong><code>IID_PPV_ARGS(&amp;iq)</code></strong> — 이 매크로는 두 인자를 자동으로 만들어줍니다: ① <code>iq</code>가 가리키는 인터페이스의 <strong>GUID(인터페이스 식별자, IID)</strong>, ② 결과를 받을 <strong><code>void**</code> 포인터</strong>. 즉 손으로 <code>__uuidof(ID3D11InfoQueue)</code>와 캐스팅을 쓰지 않아도 되게 타입에서 자동 추론합니다.</li>
+      <li><strong><code>if (FAILED(...)) return;</code></strong> — <strong>디버그 레이어가 없으면(릴리스 빌드 등)</strong> 이 얼굴이 존재하지 않아 <code>QueryInterface</code>가 실패합니다. 그때는 조용히 <code>return</code>해 아무 것도 하지 않습니다. 그래서 이 함수는 릴리스에서 호출돼도 안전합니다.</li>
+    </ul>
+
+    <h4><code>SetBreakOnSeverity</code> — 실패한 그 자리에서 멈추기</h4>
+    <div class="code">
+      <div class="code-head"><span>심각도별 브레이크</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">iq->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_ERROR,      TRUE);
+iq->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_CORRUPTION, TRUE);
+iq->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING,    TRUE);</code></pre>
+    </div>
+    <p>
+      각 호출은 "<strong>이 심각도의 메시지가 발생하면 <code>DebugBreak()</code>처럼 디버거를 그 순간 멈춰라</strong>"라고 지시합니다. 심각도는 위에서 아래로 갈수록 덜 치명적입니다.
+    </p>
+    <table class="impl">
+      <tr><th>심각도</th><th>의미</th><th>예</th></tr>
+      <tr><td><code>CORRUPTION</code></td><td>메모리·상태가 이미 망가짐. 가장 치명적.</td><td>이미 해제된 리소스를 바인딩.</td></tr>
+      <tr><td><code>ERROR</code></td><td>API 사용 규칙 위반. 이 호출은 무시되거나 실패.</td><td>호환 안 되는 BindFlags.</td></tr>
+      <tr><td><code>WARNING</code></td><td>동작은 하지만 의도와 다를 가능성.</td><td>SRV가 렌더 타깃과 동시에 바인딩.</td></tr>
+      <tr><td><code>INFO</code> / <code>MESSAGE</code></td><td>단순 알림. 대개 무해.</td><td>리소스 생성됨 같은 로그.</td></tr>
+    </table>
+    <p>
+      <strong>기하 직관(디버깅 직관):</strong> 로그를 나중에 스크롤하며 "몇 번째 메시지가 진짜 원인이었지?"를 찾는 대신,
+      브레이크를 걸어두면 프로그램이 <strong>범행 현장에서 얼어붙습니다.</strong> 디버거의 <em>콜스택(Call Stack)</em> 창을 보면
+      "이 오류를 유발한 함수 → 그 함수를 부른 함수 → …" 하고 여러분의 코드까지 화살표가 그려집니다. 그 화살표 끝이 범인 줄입니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>WARNING</code>까지 브레이크를 거는 것은 개발 초기엔 유용하지만, 일부 무해한 경고(예: 드라이버별 관용 경고)에서도 멈춰 짜증날 수 있습니다.
+      그럴 땐 <code>WARNING</code>은 <code>FALSE</code>로 두고 <code>ERROR</code>·<code>CORRUPTION</code>만 <code>TRUE</code>로 남기세요.
+      "일단 다 켜고, 무해하다고 확인된 것만 하나씩 끈다"가 안전한 순서입니다.
+    </div>
+
+    <h4>필터 — 무해한 소음 걸러내기</h4>
+    <div class="code">
+      <div class="code-head"><span>정보성 메시지 억제</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">D3D11_MESSAGE_SEVERITY deny[] = { D3D11_MESSAGE_SEVERITY_INFO };
+D3D11_INFO_QUEUE_FILTER filter{};
+filter.DenyList.NumSeverities = 1;
+filter.DenyList.pSeverityList = deny;
+iq->AddStorageFilterEntries(&amp;filter);</code></pre>
+    </div>
+    <table class="impl">
+      <tr><th>줄</th><th>의미</th></tr>
+      <tr><td><code>D3D11_MESSAGE_SEVERITY deny[] = { ...INFO };</code></td><td>차단할 심각도 목록. 여기선 <code>INFO</code>(정보성) 하나만.</td></tr>
+      <tr><td><code>D3D11_INFO_QUEUE_FILTER filter{};</code></td><td>필터 구조체를 <strong><code>{}</code>로 값 초기화</strong> — 모든 필드가 0/nullptr로 깨끗이 시작. 쓰레기값으로 인한 오동작 방지.</td></tr>
+      <tr><td><code>filter.DenyList.NumSeverities = 1;</code></td><td>거부 목록에 심각도가 <strong>1개</strong> 있다고 알림. 배열 길이와 반드시 일치해야 함.</td></tr>
+      <tr><td><code>filter.DenyList.pSeverityList = deny;</code></td><td>그 심각도 배열의 시작 주소를 연결.</td></tr>
+      <tr><td><code>iq->AddStorageFilterEntries(&amp;filter);</code></td><td>이 필터를 <strong>저장 필터(storage filter)</strong>에 추가 — 이후 <code>INFO</code> 메시지는 큐에 쌓이지도 않는다.</td></tr>
+    </table>
+    <p>
+      <code>D3D11_INFO_QUEUE_FILTER</code>는 <code>AllowList</code>(허용)와 <code>DenyList</code>(거부) 두 하위 구조체를 갖습니다. 여기서는 <strong>거부 목록</strong>만 채워
+      "<code>INFO</code> 심각도는 버려라"라고 지시합니다. 그러면 진짜 봐야 할 <code>ERROR</code>·<code>WARNING</code>만 남아 로그가 읽을 만해집니다.
+    </p>
+
+    <div class="callout perf">
+      <span class="tag">TIP</span>
+      <code>SetBreakOnSeverity</code>를 켜면 오류를 일으킨 <em>바로 그 호출에서</em> 디버거가 멈춥니다. 콜스택으로 정확한 범인 줄을 짚을 수 있죠.
+      단 <strong>디버그 레이어는 검증 비용이 붙습니다</strong> — 모든 API 호출을 가로채 검사하므로 프레임 시간이 눈에 띄게 늘어날 수 있습니다.
+      그래서 <strong>릴리스 빌드에서는 반드시 <code>D3D11_CREATE_DEVICE_DEBUG</code>를 빼야</strong> 합니다(위 <code>#if defined(_DEBUG)</code> 패턴이 이를 자동화합니다).
+    </div>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      <strong>호출 순서를 지키세요.</strong> <code>createDebugDevice</code>(디버그 플래그로 생성) → <code>installInfoQueue</code>(InfoQueue 설정) 순입니다.
+      디버그 플래그 없이 만든 디바이스에서는 <code>QueryInterface(IID_PPV_ARGS(&amp;iq))</code>가 실패해 InfoQueue를 못 얻습니다.
+      즉 <strong>디버그 레이어가 켜져 있어야 InfoQueue라는 "얼굴"이 생깁니다.</strong>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="capture">
+    <h2>3. 최종 방어선 — 프레임 캡처: PIX · RenderDoc</h2>
+    <p>
+      1층·2층은 <strong>API를 잘못 썼을 때</strong>를 잡습니다. 하지만 모든 호출이 성공했는데도(즉 <code>HRESULT</code>도 <code>S_OK</code>, 디버그 레이어도 조용한데도)
+      화면이 이상한 경우가 있습니다 — 텍스처가 엉뚱하게 나오거나, UV가 위아래로 뒤집혀 있거나, 깊이가 엉켜 뒷면이 앞을 가리는 등.
+      이건 <strong>"코드는 문법적으로 옳은데 데이터·논리가 틀린"</strong> 부류라, 코드만 봐서는 안 잡힙니다. 이럴 때 쓰는 것이 <strong>프레임 캡처 도구</strong>입니다.
+    </p>
+    <ul>
+      <li><strong>PIX on Windows</strong> — 마이크로소프트 공식 도구. D3D11/D3D12에 특히 강하고, GPU 타이밍·성능 분석까지 됩니다.</li>
+      <li><strong>RenderDoc</strong> — 오픈소스이며 D3D11/D3D12/Vulkan/OpenGL을 폭넓게 지원. 가볍고 UI가 직관적이라 입문자에게 특히 좋습니다.</li>
+    </ul>
+    <p>
+      사용법은 개념적으로 같습니다. 도구로 실행 파일을 띄우고, 문제가 보이는 순간 <strong>한 프레임을 캡처</strong>합니다. 그러면 그 프레임의
+      <strong>모든 드로우 콜, 각 드로우에 바인딩된 리소스(버퍼·텍스처·상태), 파이프라인 각 단계(IA→VS→RS→PS→OM)의 입출력, 셰이더 소스와 그 실행 결과</strong>를
+      클릭 한 번으로 뜯어볼 수 있습니다. "지금 GPU에 실제로 뭐가 올라가 있나?"에 대한 <strong>최종 진실</strong>입니다.
+    </p>
+    <p>
+      예를 들어 UV가 뒤집혀 보인다면, 캡처에서 해당 드로우의 <em>텍스처 미리보기</em>와 <em>픽셀 셰이더 입력 UV</em>를 직접 확인해
+      "샘플링 좌표 V가 0~1이 아니라 1~0으로 들어오는구나 → 정점 데이터의 V를 뒤집어야겠다"처럼 <strong>눈으로 원인을 특정</strong>할 수 있습니다.
+      (우리 규약은 텍스처 V가 위→아래로 증가합니다.)
+    </p>
+
+    <h3>3-1. 캡처를 읽기 쉽게 — 디버그 마커와 리소스 이름</h3>
+    <p>
+      캡처를 열면 드로우 콜이 <code>Draw #0, Draw #1, …</code>처럼 번호로만 나열됩니다. 프로젝트가 커지면 어느 게 그림자 패스이고 어느 게 UI인지 알 수 없죠.
+      그래서 <strong>코드에 미리 라벨과 이름을 심어두면</strong> 캡처 화면이 "GBuffer Pass", "Shadow Pass" 같은 <strong>사람이 읽는 트리</strong>로 정리됩니다.
+      두 가지 도구가 있습니다.
+    </p>
+
+    <h4>드로우 묶음에 라벨 — <code>ID3DUserDefinedAnnotation</code></h4>
+    <div class="code">
+      <div class="code-head"><span>debug_markers.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;d3d11_1.h&gt;   // ID3DUserDefinedAnnotation
+#include &lt;wrl/client.h&gt;
+using Microsoft::WRL::ComPtr;
+
+// 컨텍스트에서 "주석(annotation)" 얼굴을 얻는다 (1회만)
+ComPtr&lt;ID3DUserDefinedAnnotation&gt; anno;
+context->QueryInterface(IID_PPV_ARGS(&amp;anno));
+
+// 드로우 묶음을 라벨로 감싼다
+anno->BeginEvent(L"GBuffer Pass");   // ← 캡처 트리에 이 이름으로 그룹이 생김
+    context->DrawIndexed(idxCount, 0, 0);
+    context->DrawIndexed(idxCount2, 0, 0);
+anno->EndEvent();                    // 그룹 닫기 (Begin/End 짝을 반드시 맞출 것)</code></pre>
+    </div>
+    <table class="impl">
+      <tr><th>요소</th><th>의미</th></tr>
+      <tr><td><code>&lt;d3d11_1.h&gt;</code></td><td><code>ID3DUserDefinedAnnotation</code>은 D3D11.1에서 추가돼 이 헤더에 있습니다.</td></tr>
+      <tr><td><code>QueryInterface(IID_PPV_ARGS(&amp;anno))</code></td><td>2절과 같은 패턴 — 컨텍스트의 "주석 얼굴"을 얻습니다.</td></tr>
+      <tr><td><code>BeginEvent(L"...")</code></td><td>여기부터의 드로우들을 하나의 그룹으로 묶기 시작. <strong>인자는 와이드 문자열(<code>L"..."</code>)</strong>이라 <code>L</code> 접두사가 필수입니다.</td></tr>
+      <tr><td><code>EndEvent()</code></td><td>그룹 닫기. <strong><code>BeginEvent</code>와 개수가 정확히 짝지어져야</strong> 캡처 트리가 올바르게 중첩됩니다.</td></tr>
+    </table>
+    <p>
+      <strong>기하/도구 직관:</strong> <code>Begin/EndEvent</code>는 캡처 화면에서 폴더처럼 접히는 <strong>트리 노드</strong>를 만듭니다. 중첩도 됩니다 —
+      "Frame → Shadow Pass → Cascade 0" 식으로 감싸면 수백 개의 드로우 콜이 의미 단위로 접혀, 원하는 패스만 펼쳐 볼 수 있습니다.
+    </p>
+
+    <h4>객체에 이름 — <code>SetPrivateData</code> + <code>WKPDID_D3DDebugObjectName</code></h4>
+    <div class="code">
+      <div class="code-head"><span>naming.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">// 리소스에 사람이 읽을 이름을 붙여 캡처에서 식별하기 쉽게 만든다
+const char name[] = "AlbedoTexture";
+tex->SetPrivateData(WKPDID_D3DDebugObjectName,
+                    (UINT)(sizeof(name) - 1),  // 널 종료 문자 제외한 길이
+                    name);</code></pre>
+    </div>
+    <table class="impl">
+      <tr><th>인자</th><th>의미</th></tr>
+      <tr><td><code>WKPDID_D3DDebugObjectName</code></td><td>"이 private data는 <strong>디버그용 이름</strong>이다"라고 알려주는 특수 GUID. 도구가 이 키로 저장된 문자열을 이름으로 표시합니다.</td></tr>
+      <tr><td><code>sizeof(name) - 1</code></td><td>바이트 길이. <code>"AlbedoTexture"</code>는 널 종료(<code>\0</code>)를 포함해 14바이트라, <code>-1</code>로 <strong>널 문자를 빼</strong> 13바이트를 넘깁니다.</td></tr>
+      <tr><td><code>name</code></td><td>실제 이름 데이터의 포인터.</td></tr>
+    </table>
+    <p>
+      <code>SetPrivateData</code>는 <code>ID3D11DeviceChild</code>(버퍼·텍스처·셰이더 등 거의 모든 D3D11 객체의 공통 조상)에 있어, <strong>어떤 리소스에든</strong> 이름을 붙일 수 있습니다.
+      이름을 붙여두면 디버그 레이어의 오류 메시지에도 "<code>AlbedoTexture</code>에서 문제 발생"처럼 <strong>이름이 함께 찍혀</strong> 2절의 진단까지 훨씬 명료해집니다.
+    </p>
+
+    <h4>실행 중인 GPU 이름 확인 — <code>IDXGIAdapter::GetDesc</code></h4>
+    <div class="code">
+      <div class="code-head"><span>gpu_name.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;dxgi.h&gt;
+// device → DXGI 디바이스 → 어댑터로 거슬러 올라가 GPU 설명을 읽는다
+ComPtr&lt;IDXGIDevice&gt; dxgiDev;
+device->QueryInterface(IID_PPV_ARGS(&amp;dxgiDev));
+
+ComPtr&lt;IDXGIAdapter&gt; adapter;
+dxgiDev->GetAdapter(&amp;adapter);
+
+DXGI_ADAPTER_DESC desc{};
+adapter->GetDesc(&amp;desc);
+// desc.Description 은 와이드 문자열: 예) L"NVIDIA GeForce RTX 4070"</code></pre>
+    </div>
+    <p>
+      실행 중인 하드웨어를 로그에 남겨두면, "특정 GPU에서만 재현되는 버그"를 추적할 때 결정적 단서가 됩니다.
+      경로는 <strong><code>ID3D11Device</code> → <code>IDXGIDevice</code> → <code>IDXGIAdapter</code></strong> 순으로 거슬러 올라가며(모두 <code>QueryInterface</code>/<code>GetAdapter</code>),
+      마지막 <code>GetDesc</code>로 채운 <code>DXGI_ADAPTER_DESC.Description</code>이 바로 "NVIDIA GeForce RTX 4070" 같은 <strong>사람이 읽는 GPU 이름</strong>(와이드 문자열)입니다.
+    </p>
+
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      캡처를 편하게 보려면 <strong>디버그 마커·리소스 이름</strong>을 남겨두는 습관이 큰 차이를 만듭니다.
+      <code>BeginEvent</code>/<code>EndEvent</code>로 드로우 묶음에 라벨을, <code>SetPrivateData</code>(<code>WKPDID_D3DDebugObjectName</code>)로 객체에 이름을 붙이면
+      캡처 화면이 "GBuffer Pass" 같은 라벨로 정리돼 탐색이 훨씬 빨라집니다. 다만 이 마커들도 <strong>약간의 오버헤드</strong>가 있으니,
+      성능이 극도로 중요한 릴리스 경로에서는 매크로로 감싸 디버그 빌드에서만 켜는 것을 고려하세요.
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      프레임 캡처는 <strong>드로우 콜 수·리소스 크기에 비례</strong>해 무거워집니다. 문제 상황을 <em>가능한 한 작은 씬</em>으로 재현한 뒤 캡처하면
+      분석이 빨라지고, 캡처 파일 크기도 관리 가능해집니다. "버그를 최소 재현 케이스로 좁힌 뒤 캡처"가 정석입니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="wrapup">
+    <h2>4. 정리 — 세 방어선을 언제 쓰나</h2>
+    <table class="impl">
+      <tr><th>증상</th><th>먼저 볼 방어선</th><th>이유</th></tr>
+      <tr><td>생성 함수가 실패(<code>nullptr</code> 리소스)</td><td>1층 <code>HR_CHECK</code></td><td>어느 호출이 실패했는지 파일·줄로 즉시 특정.</td></tr>
+      <tr><td>실패 이유를 모르겠다</td><td>2층 디버그 레이어</td><td>"왜"를 사람이 읽는 문장으로 설명 + 브레이크로 콜스택 확인.</td></tr>
+      <tr><td>모든 호출은 성공인데 화면이 이상</td><td>3층 프레임 캡처</td><td>GPU에 올라간 실제 데이터·픽셀을 눈으로 검증.</td></tr>
+    </table>
+    <p>
+      순서는 항상 <strong>싼 것 → 비싼 것</strong>입니다. 반환값 검사(1층)는 공짜에 가깝고, 디버그 레이어(2층)는 개발 빌드 한정으로 켜고,
+      프레임 캡처(3층)는 앞의 둘로 안 잡히는 시각적 버그에만 꺼내 씁니다. 이 세 겹을 미리 깔아두는 것이,
+      "몇 프레임 뒤 엉뚱한 검은 화면"이라는 명시적 API의 대가를 감당 가능한 수준으로 낮추는 실무의 핵심입니다.
+    </p>
+    <div class="callout">
+      <span class="tag warn">실무 권장</span>
+      직접 구현한 <code>HR_CHECK</code> 매크로는 학습·이해용으로 훌륭하지만, 실무에서는 <strong>DirectXTK의 <code>ThrowIfFailed</code></strong>나 검증된 헬퍼를 쓰는 편이 안전합니다.
+      마찬가지로 GPU 수학은 직접 짜기보다 <strong>DirectXMath</strong>를, 캡처는 검증된 <strong>PIX·RenderDoc</strong>을 쓰는 것이 정석입니다.
+      직접 구현은 "내부가 어떻게 도는지"를 아는 데 의미가 있고, 프로덕션 코드는 검증된 라이브러리 위에 세우는 것이 원칙입니다.
+    </div>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./05-api-overview.html">← D3D11의 두 축 — 디바이스와 즉시 컨텍스트</a>
+    <a href="./05-resources.html">리소스 관리와 상태 팁 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

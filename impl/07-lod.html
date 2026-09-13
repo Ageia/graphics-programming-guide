@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: LOD · 컬링 — C++/DirectX 11</title>
+<meta name="description" content="프러스텀 평면 추출·AABB 컬링·거리 기반 LOD·인스턴싱을 C++/DirectX 11로 한 줄 한 줄 해부하는 입문자용 구현 가이드." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./07-techniques.html">7장. 실전 렌더링 기법</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">LOD · 컬링</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 7</span>
+  <h1>LOD · 컬링 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    대규모 씬을 실시간으로 그리는 비결은 딱 두 문장으로 요약됩니다.
+    <strong>“안 보이는 건 아예 그리지 않는다(컬링)”</strong>, 그리고
+    <strong>“멀리 있어 작게 보이는 건 대충 그린다(LOD)”</strong>입니다.
+    이 페이지에서는 뷰-투영 행렬 하나에서 절두체(프러스텀) 6개 평면을 뽑아내는 <em>Gribb–Hartmann</em>
+    기법, AABB(축 정렬 바운딩 박스)를 평면과 비교해 시야 밖 물체를 버리는 컬링,
+    카메라 거리로 메시 해상도를 고르는 거리 기반 LOD, 그리고 같은 메시 수천 개를 드로우콜 한 번으로
+    그리는 인스턴싱까지, C++와 DirectX 11 코드를 <strong>성분 하나, 부호 하나까지</strong> 풀어서
+    설명합니다. 코드 로직은 원본 그대로 두되, 그 밑에 깔린 수학·기하 직관을 최대한 자세히 파헤칩니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">규약</span>
+    이 시리즈는 <strong>행벡터 규약</strong>을 씁니다. 즉 벡터를 행렬 왼쪽에 두고
+    <code>v' = v * M</code>으로 변환하며, HLSL에서는 <code>mul(v, M)</code> 순서입니다.
+    행렬은 <strong>행 우선(row-major)</strong>으로 저장하고, 좌표계는 <strong>왼손</strong>,
+    클립 공간 z 범위는 <strong>[0, 1]</strong>(D3D 관례), 텍스처 V축은 위→아래입니다.
+    DirectXMath도 행벡터 관례라 뷰-투영 행렬은 <code>view * proj</code> 순서로 곱합니다.
+    실무에서는 검증된 라이브러리(DirectXMath, DirectXCollision의 <code>BoundingFrustum</code> 등)를
+    쓰는 것을 권장하며, 여기 코드는 <em>원리를 눈으로 확인하기 위한 학습용</em>입니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>프러스텀 평면 추출</strong> — 뷰-투영 행렬의 행들을 더하고 빼서 좌·우·하·상·근·원 6평면을 얻습니다.</li>
+    <li><strong>AABB vs 프러스텀 테스트</strong> — 물체를 감싼 박스가 6평면 중 하나라도 완전히 바깥이면 컬링합니다.</li>
+    <li><strong>거리 기반 LOD 선택</strong> — 카메라와의 거리(제곱)로 고/중/저 폴리곤 메시 중 하나를 고릅니다.</li>
+    <li><strong>인스턴싱</strong> — 같은 메시 수천 개를 두 번째 정점 버퍼 + <code>DrawIndexedInstanced</code>로 한 방에 그립니다.</li>
+  </ol>
+  <p>
+    이 네 가지는 서로 물려 돌아갑니다. 먼저 컬링으로 <em>보이는 것만</em> 걸러내고, 그 물체마다 LOD로
+    <em>얼마나 정밀하게</em> 그릴지 정하고, 같은 것이 많으면 인스턴싱으로 <em>드로우콜을 뭉칩니다</em>.
+    하나만 써서는 반쪽짜리이고, 세 개를 함께 써야 프레임 레이트가 실제로 살아납니다.
+  </p>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 프러스텀 평면 6개 추출</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 카메라의 시야 절두체(near·far·좌·우·상·하로 둘러싸인 잘린 피라미드)를
+    이루는 6개 평면을, 뷰-투영 행렬 <em>하나</em>에서 계산으로 뽑아냅니다.
+    <strong>왜 필요한가:</strong> 물체가 “화면에 보이는가”를 판정하려면 시야 경계를 수식으로 들고 있어야
+    하는데, 그 경계가 바로 이 6평면입니다. 절두체의 꼭짓점 8개를 일일이 구할 필요 없이,
+    행렬의 행 4개를 조합하는 것만으로 평면 방정식이 튀어나옵니다.
+  </p>
+
+  <h3>1-1. 평면을 어떻게 표현하나 — <code>ax + by + cz + d = 0</code></h3>
+  <p>
+    한 평면은 <strong>법선</strong> <code>n = (a, b, c)</code>와 스칼라 <code>d</code>로 표현합니다.
+    평면 위의 점 <code>p = (x, y, z)</code>는 <code>a·x + b·y + c·z + d = 0</code>을 만족합니다.
+    이 좌변에 임의의 점을 넣으면 값이 <strong>0이면 평면 위</strong>, <strong>양수면 법선이 가리키는
+    쪽</strong>, <strong>음수면 반대쪽</strong>이라는 <em>부호 있는 거리</em>가 됩니다.
+    우리는 6평면의 법선이 모두 <strong>절두체 안쪽</strong>을 향하도록 맞출 것이므로,
+    “좌변 값이 양수 = 안쪽”이 판정 규칙이 됩니다.
+  </p>
+  <p>
+    수학적으로 <code>n</code>이 단위벡터(길이 1)일 때만 이 좌변 값이 실제 <em>유클리드 거리</em>와 같아집니다.
+    그래서 아래 코드 마지막에 각 평면을 <strong>정규화</strong>하는 단계가 반드시 들어갑니다.
+    정규화를 안 하면 “안/밖” 판정 자체는 맞지만(부호는 보존되므로), 거리 값의 스케일이 평면마다 제각각이라
+    “박스가 평면에서 얼마나 떨어졌나” 같은 수치를 쓸 수 없게 됩니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>frustum.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+#include &lt;array&gt;
+using namespace DirectX;
+
+struct Plane {
+    XMFLOAT3 n;   // 정규화된 법선 (프러스텀 안쪽을 향함)
+    float    d;   // 부호 있는 원점 거리
+    // 점 p의 부호 있는 거리: 양수면 평면 안쪽
+    float distance(const XMFLOAT3&amp; p) const {
+        return n.x * p.x + n.y * p.y + n.z * p.z + d;
+    }
+};
+
+// 뷰-투영 행렬 m = view * projection 에서 6평면 추출 (Gribb–Hartmann 방식)
+// DirectXMath는 행벡터 관례라 곱 순서가 GL(proj*view)과 반대이며,
+// XMFLOAT4X4는 행우선 저장이므로 m(row, col)로 행을 그대로 꺼낼 수 있다.
+std::array&lt;Plane, 6&gt; extractFrustumPlanes(const XMMATRIX&amp; vp) {
+    XMFLOAT4X4 m;
+    XMStoreFloat4x4(&amp;m, vp);
+    std::array&lt;Plane, 6&gt; planes;
+    // 행벡터를 r0..r3로 꺼내둔다 (행우선이라 m.m[row][col]).
+    XMFLOAT4 r0(m._11, m._12, m._13, m._14);
+    XMFLOAT4 r1(m._21, m._22, m._23, m._24);
+    XMFLOAT4 r2(m._31, m._32, m._33, m._34);
+    XMFLOAT4 r3(m._41, m._42, m._43, m._44);
+
+    auto add = [](XMFLOAT4 a, XMFLOAT4 b, float s) {
+        return XMFLOAT4(a.x + s*b.x, a.y + s*b.y, a.z + s*b.z, a.w + s*b.w);
+    };
+    XMFLOAT4 raw[6] = {
+        add(r3, r0,  1.0f),   // 좌
+        add(r3, r0, -1.0f),   // 우
+        add(r3, r1,  1.0f),   // 하
+        add(r3, r1, -1.0f),   // 상
+        r2,                   // 근 (near)  — D3D clip z 범위 [0,1]
+        add(r3, r2, -1.0f)    // 원 (far)
+    };
+    for (int i = 0; i &lt; 6; ++i) {
+        float len = std::sqrt(raw[i].x*raw[i].x + raw[i].y*raw[i].y + raw[i].z*raw[i].z);
+        planes[i].n = XMFLOAT3(raw[i].x/len, raw[i].y/len, raw[i].z/len);
+        planes[i].d = raw[i].w / len;        // 정규화: 거리 스케일을 맞춤
+    }
+    return planes;
+}</code></pre>
+  </div>
+
+  <h3>1-2. <code>struct Plane</code>와 <code>distance()</code> 뜯어보기</h3>
+  <p>
+    <code>struct Plane</code>은 법선 <code>XMFLOAT3 n</code>과 스칼라 <code>float d</code> 두 필드로
+    평면 하나를 담습니다. <code>XMFLOAT3</code>는 DirectXMath가 <strong>메모리에 저장할 때</strong> 쓰는
+    평범한 <code>float x, y, z;</code> 구조체입니다. 계산 전용 타입인 <code>XMVECTOR</code>(SIMD 레지스터에
+    올라가는 16바이트 정렬 타입)와 대비되는데, 구조체 필드처럼 <em>저장</em>할 때는 <code>XMFLOAT3</code>,
+    <em>연산</em>할 때는 <code>XMLoadFloat3</code>로 <code>XMVECTOR</code>에 올리는 것이 DirectXMath의 표준
+    작업 흐름입니다.
+  </p>
+  <p>
+    <code>float distance(const XMFLOAT3&amp; p) const</code>의 시그니처를 한 조각씩 봅시다.
+  </p>
+  <ul>
+    <li><code>const XMFLOAT3&amp; p</code> — 인자를 <strong>참조(<code>&amp;</code>)</strong>로 받습니다.
+      값 복사(<code>XMFLOAT3 p</code>)를 하면 12바이트를 매번 복사하지만, 참조는 주소만 넘겨 복사가 없습니다.
+      앞의 <code>const</code>는 “이 함수가 <code>p</code>를 절대 수정하지 않겠다”는 약속이라, 호출부가
+      안심하고 임시 객체나 상수도 넘길 수 있게 해 줍니다.</li>
+    <li>맨 뒤의 <code>const</code> — “이 멤버 함수는 <code>Plane</code> 자신(<code>this</code>)도
+      건드리지 않는다”는 뜻입니다. 그래서 <code>const Plane&amp;</code>로 받은 평면에도 호출할 수 있습니다.
+      뒤에 나올 <code>aabbInFrustum</code>이 평면을 <code>const</code>로 순회하며 이 함수를 부르므로,
+      이 <code>const</code>가 없으면 컴파일이 안 됩니다.</li>
+    <li>본문 <code>n.x*p.x + n.y*p.y + n.z*p.z + d</code> — 이것이 바로
+      <strong>내적 <code>n·p</code>에 <code>d</code>를 더한</strong> 것,
+      즉 평면 방정식 좌변 <code>ax + by + cz + d</code>입니다.</li>
+  </ul>
+  <p>
+    <strong>기하 직관(그림글):</strong> 법선 <code>n</code>이 “안쪽을 가리키는 화살표”라고 생각하세요.
+    점 <code>p</code>를 그 화살표 방향으로 얼마나 나아간 곳에 있는지 재는 것이 내적 <code>n·p</code>이고,
+    거기에 평면을 원점에서 밀어낸 오프셋 <code>d</code>를 더하면 “평면을 기준으로 <code>p</code>가 안쪽으로
+    몇 미터 들어와 있나(음수면 몇 미터 밖으로 나갔나)”가 됩니다. <code>n</code>이 단위벡터라서 이 값이 곧
+    <em>수직 거리</em>가 됩니다.
+  </p>
+
+  <h3>1-3. 행렬을 저장하고 행을 꺼내기 — 행벡터·행우선의 핵심</h3>
+  <p>
+    <code>extractFrustumPlanes(const XMMATRIX&amp; vp)</code>는 뷰-투영 행렬을 받습니다.
+    <code>XMMATRIX</code>는 SIMD 레지스터 4개로 이루어진 <em>계산용</em> 행렬 타입이라, 개별 성분에
+    직접 접근하기 불편합니다. 그래서 첫 줄에서 <code>XMStoreFloat4x4(&amp;m, vp)</code>로
+    <strong>저장용</strong> <code>XMFLOAT4X4 m</code>에 내려받습니다. 이제 <code>m._11</code>,
+    <code>m._12</code>처럼 <code>_행열</code> 표기로 각 성분을 읽을 수 있습니다.
+  </p>
+  <p>
+    <code>XMFLOAT4X4</code>는 <strong>행 우선</strong>으로 저장됩니다. 즉 메모리에서
+    <code>_11 _12 _13 _14</code>가 먼저 나오고(0번 행), 그 다음 <code>_21 _22 _23 _24</code>(1번 행)가
+    이어집니다. 그래서 아래 네 줄은 각각 행렬의 <strong>한 행 전체</strong>를 <code>XMFLOAT4</code>로 뽑는
+    작업입니다.
+  </p>
+  <pre style="font-family:monospace; font-size:.9em; overflow-x:auto; background:rgba(255,255,255,.03); padding:.6em; border-radius:6px;">
+r0 = ( m._11, m._12, m._13, m._14 )   ← 0번 행
+r1 = ( m._21, m._22, m._23, m._24 )   ← 1번 행
+r2 = ( m._31, m._32, m._33, m._34 )   ← 2번 행
+r3 = ( m._41, m._42, m._43, m._44 )   ← 3번 행 (w 성분들이 모인 "동차" 행)</pre>
+  <p>
+    왜 하필 “행”을 뽑을까요? Gribb–Hartmann 유도의 핵심이 여기 있습니다.
+    행벡터 규약에서 어떤 점 <code>p = (x, y, z, 1)</code>을 클립 공간으로 보내는 계산은
+    <code>clip = p * VP</code>입니다. 이때 클립 좌표의 각 성분은
+    <code>clip.x = p · (VP의 0번 열)</code>, <code>clip.w = p · (VP의 3번 열)</code> …식으로 나옵니다.
+    그런데 <code>XMFLOAT4X4</code>가 행 우선이고 우리가 <code>r0..r3</code>로 뽑은 것은 “행”이므로,
+    실제로 유도에서 필요한 “열”과 맞추려면 성분 인덱스를 잘 대응시켜야 합니다.
+    다행히 이 구현은 그 대응까지 반영해 “<code>r3 ± r0</code>” 같은 조합으로 정리되어 있으니,
+    <strong>우리는 결과 공식을 그대로 쓰면 됩니다.</strong> 중요한 것은
+    <em>DirectXMath(행벡터·행우선)에서는 이 조합이 맞다</em>는 사실이고, GL 계열(열벡터·<code>proj*view</code>)에서
+    베낀 공식을 그대로 쓰면 부호나 축이 틀어진다는 점입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    다른 자료의 프러스텀 추출 코드를 그대로 붙여 넣었는데 “근평면에서 뭔가 이상하게 잘린다”면
+    십중팔구 <strong>클립 z 범위</strong> 불일치입니다. OpenGL은 클립 z가 <code>[-1, 1]</code>이라
+    근평면을 <code>r3 + r2</code>로 뽑지만, <strong>D3D는 <code>[0, 1]</code></strong>이라
+    근평면이 그냥 <code>r2</code>입니다(위 코드의 다섯 번째 항목). 이 한 줄 차이가 near 컬링을 통째로
+    망가뜨리니 API에 맞는 공식을 써야 합니다.
+  </div>
+
+  <h3>1-4. <code>add</code> 람다와 6평면 조합</h3>
+  <p>
+    <code>auto add = [](XMFLOAT4 a, XMFLOAT4 b, float s) { ... };</code>는
+    <strong>람다(익명 함수)</strong>입니다. <code>[]</code>는 캡처 목록으로, 바깥 변수를 전혀 끌어오지
+    않는다는 뜻입니다(순수 계산이라 필요 없음). 이 람다는 성분별로 <code>a + s·b</code>를 계산해
+    돌려줍니다. 즉 <code>s = +1</code>이면 <code>a + b</code>, <code>s = -1</code>이면 <code>a - b</code>가
+    되어, “행을 더하거나 빼는” 한 가지 도구로 좌·우·하·상·원 평면을 모두 만들 수 있습니다.
+  </p>
+  <p>
+    이제 <code>raw[6]</code> 배열이 6평면을 만들어 냅니다. 각 항이 어떤 경계선을 뜻하는지 봅시다.
+  </p>
+  <table class="impl">
+    <thead><tr><th>인덱스</th><th>조합</th><th>평면</th><th>직관</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td><code>r3 + r0</code></td><td>좌(Left)</td><td>클립 <code>x ≥ -w</code> 경계</td></tr>
+      <tr><td>1</td><td><code>r3 - r0</code></td><td>우(Right)</td><td>클립 <code>x ≤ +w</code> 경계</td></tr>
+      <tr><td>2</td><td><code>r3 + r1</code></td><td>하(Bottom)</td><td>클립 <code>y ≥ -w</code> 경계</td></tr>
+      <tr><td>3</td><td><code>r3 - r1</code></td><td>상(Top)</td><td>클립 <code>y ≤ +w</code> 경계</td></tr>
+      <tr><td>4</td><td><code>r2</code></td><td>근(Near)</td><td>클립 <code>z ≥ 0</code> 경계 (D3D)</td></tr>
+      <tr><td>5</td><td><code>r3 - r2</code></td><td>원(Far)</td><td>클립 <code>z ≤ +w</code> 경계</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <strong>왜 이런 조합이 평면이 되나:</strong> 클립 공간에서 “화면 안”의 조건은
+    <code>-w ≤ x ≤ w</code>, <code>-w ≤ y ≤ w</code>, <code>0 ≤ z ≤ w</code>입니다.
+    예를 들어 좌 경계 <code>x ≥ -w</code>는 <code>x + w ≥ 0</code>으로 옮겨 적을 수 있습니다.
+    그런데 <code>clip.x = p·(0열)</code>, <code>clip.w = p·(3열)</code>이므로
+    <code>x + w = p·(0열 + 3열)</code>입니다. 즉 “0열 + 3열”이라는 벡터가 바로 <em>월드 공간에서의
+    좌평면 법선+d</em>가 됩니다. 위 코드가 행 인덱스로 정리해 <code>r3 + r0</code>으로 쓴 것이 그것입니다.
+    부등호 <code>≥ 0</code>이 “안쪽이 양수”라는 우리의 규칙과 정확히 맞아떨어집니다.
+  </p>
+
+  <h3>1-5. 정규화 — 왜 마지막에 나눠 주나</h3>
+  <p>
+    마지막 <code>for</code> 루프가 6평면 각각을 정규화합니다.
+    <code>len</code>은 법선 부분 <code>(x, y, z)</code>의 길이
+    <code>√(x² + y² + z²)</code>입니다. <strong>w 성분(<code>d</code>)은 길이 계산에서 빼는</strong> 점에
+    주목하세요. 평면의 “방향”은 오직 법선이 정하고, <code>d</code>는 그 방향을 따라 얼마나 밀렸는지의
+    오프셋일 뿐이라, 법선의 길이로 <code>x, y, z, w</code>를 <em>모두</em> 나눠 줘야 스케일이 일관됩니다.
+  </p>
+  <pre style="font-family:monospace; font-size:.9em; overflow-x:auto; background:rgba(255,255,255,.03); padding:.6em; border-radius:6px;">
+len = √(a² + b² + c²)          // 법선 길이 (d 제외)
+n   = (a/len, b/len, c/len)    // 단위 법선
+d   = w / len                  // 같은 스케일로 오프셋도 나눔</pre>
+  <p>
+    정규화 후에는 <code>distance(p)</code>가 <strong>진짜 수직 거리(미터 단위)</strong>를 돌려줍니다.
+    안/밖만 볼 거면 정규화를 건너뛰어도 부호는 맞지만, 뒤에서 “박스가 평면에서 얼마나 밖으로 나갔나”를
+    수치로 쓰거나 크로스페이드 임계에 거리를 쓰려면 정규화가 필수입니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    프러스텀 추출은 <strong>카메라가 움직인 프레임에 딱 한 번</strong>만 하면 됩니다(6평면 = 24개 float).
+    이걸 물체마다 다시 계산하는 실수를 하지 마세요. 한 번 뽑아 두고 그 프레임의 모든 컬링 테스트에서
+    재사용합니다. 실무에서는 DirectXCollision의 <code>BoundingFrustum::CreateFromMatrix</code>가 같은 일을
+    해 주며, SIMD로 최적화되어 있습니다.
+  </div>
+
+  <div class="callout">
+    <span class="tag">DirectXMath 대응</span>
+    이 절의 수작업을 라이브러리로 바꾸면 이렇게 됩니다.
+    <br>· <code>XMStoreFloat4x4</code> → <code>XMMATRIX</code>를 저장용 <code>XMFLOAT4X4</code>로 내림(위와 동일).
+    <br>· 전체 흐름 → <code>BoundingFrustum bf; BoundingFrustum::CreateFromMatrix(bf, projMatrix);</code>
+    로 투영 행렬에서 절두체를 만들고, 뷰 역행렬로 <code>bf.Transform(...)</code>해 월드로 옮긴 뒤
+    <code>bf.Contains(box)</code>로 판정합니다. 우리가 손으로 뽑은 6평면은 그 <code>BoundingFrustum</code>이
+    내부에 들고 있는 것과 같은 정보입니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. AABB vs 프러스텀 테스트</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 물체를 감싼 축 정렬 바운딩 박스(AABB)가 절두체 안에 있는지(또는 걸치는지)
+    판정하는 함수입니다. <strong>왜 필요한가:</strong> 삼각형 하나하나를 절두체와 비교하면 너무 비싸니,
+    물체를 단순한 박스로 근사해 “이 박스가 아예 시야 밖이면 통째로 스킵”하는 것이 컬링의 실전 형태입니다.
+  </p>
+
+  <h3>2-1. positive vertex — 박스에서 “가장 안쪽에 가까운 꼭짓점”</h3>
+  <p>
+    박스는 꼭짓점이 8개입니다. 8개를 전부 평면과 비교할 수도 있지만, 사실 평면 하나에 대해서는
+    <strong>단 한 꼭짓점만 보면 충분</strong>합니다. 그 한 꼭짓점을 <em>positive vertex(p-vertex)</em>라
+    부르는데, “평면 법선 방향으로 박스에서 가장 멀리(=가장 안쪽으로) 나아간 꼭짓점”입니다.
+  </p>
+  <p>
+    <strong>기하 직관(그림글):</strong> 평면의 법선이 오른쪽·위·앞을 향한다고 합시다. 그러면 박스에서 그
+    방향으로 가장 튀어나온 모서리는 <code>(max.x, max.y, max.z)</code>입니다. 만약 이 “가장 유리한”
+    꼭짓점조차 평면 <em>바깥</em>에 있다면, 나머지 7개는 더 바깥이므로 박스 전체가 바깥이라고 확신할 수
+    있습니다. 반대로 법선의 어떤 축 성분이 음수라면, 그 축에서는 <code>min</code> 값이 더 “안쪽”으로
+    가는 꼭짓점이 됩니다. 그래서 축마다 법선 부호를 보고 <code>max</code>냐 <code>min</code>이냐를 고릅니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>frustum_cull.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">struct AABB { XMFLOAT3 min, max; };
+
+// 프러스텀 안(또는 걸침)에 있으면 true → 그려야 함
+bool aabbInFrustum(const std::array&lt;Plane, 6&gt;&amp; planes, const AABB&amp; box) {
+    for (const Plane&amp; pl : planes) {
+        // 법선 방향으로 가장 "안쪽에 가까운" 꼭짓점 = positive vertex
+        XMFLOAT3 pv;
+        pv.x = (pl.n.x &gt;= 0.0f) ? box.max.x : box.min.x;
+        pv.y = (pl.n.y &gt;= 0.0f) ? box.max.y : box.min.y;
+        pv.z = (pl.n.z &gt;= 0.0f) ? box.max.z : box.min.z;
+
+        // 가장 유리한 꼭짓점조차 평면 바깥이면 박스 전체가 바깥 → 컬링
+        if (pl.distance(pv) &lt; 0.0f)
+            return false;
+    }
+    return true;   // 어떤 평면에도 완전히 밀려나지 않음 → 보임
+}</code></pre>
+  </div>
+
+  <h3>2-2. 코드 한 줄씩 매핑</h3>
+  <ul>
+    <li><code>struct AABB { XMFLOAT3 min, max; };</code> — 박스를 두 점으로 표현합니다.
+      <code>min</code>은 세 축 모두 최솟값을 모은 꼭짓점, <code>max</code>는 최댓값을 모은 꼭짓점입니다.
+      이 두 점만 있으면 나머지 6개 꼭짓점은 두 점의 성분을 섞어(<code>min.x, max.y, min.z</code> …)
+      복원할 수 있으므로, 박스를 저장하는 가장 조밀한 방법입니다.</li>
+    <li><code>const std::array&lt;Plane, 6&gt;&amp; planes</code> — 1절에서 뽑은 6평면을 <strong>참조</strong>로
+      받습니다. 배열이 24개 float라 복사가 아깝기도 하고, 이 함수가 평면을 바꾸지 않으니 <code>const</code>를
+      붙였습니다. 그래서 <code>distance()</code>도 <code>const</code> 멤버여야 했던 것입니다.</li>
+    <li><code>for (const Plane&amp; pl : planes)</code> — 6평면을 하나씩 순회합니다. 한 평면이라도 박스를
+      완전히 밀어내면 즉시 <code>false</code>로 나갑니다(조기 탈출).</li>
+    <li><code>pv.x = (pl.n.x &gt;= 0.0f) ? box.max.x : box.min.x;</code> — 삼항 연산자로
+      “법선의 x가 0 이상이면 <code>max.x</code>, 아니면 <code>min.x</code>”를 고릅니다. y, z도 동일합니다.
+      이 세 줄이 축마다 독립적으로 최적의 꼭짓점을 조립해 <code>pv</code>(positive vertex)를 만듭니다.</li>
+    <li><code>if (pl.distance(pv) &lt; 0.0f) return false;</code> — p-vertex의 부호 있는 거리가 음수면
+      “가장 유리한 꼭짓점마저 바깥”이므로 박스 전체가 바깥 → 컬링(그리지 않음).</li>
+    <li>루프를 다 돌고도 살아남으면 <code>return true;</code> — 어떤 평면에도 완전히 밀려나지 않았으니
+      절두체 안에 있거나 경계를 걸치는 것이라 그려야 합니다.</li>
+  </ul>
+
+  <h3>2-3. 손계산으로 확인해 보기</h3>
+  <p>
+    좌평면 하나가 정규화 후 <code>n = (1, 0, 0)</code>, <code>d = 5</code>라고 합시다.
+    즉 평면 방정식은 <code>x + 5 = 0</code> → 평면은 <code>x = -5</code>에 있고, 법선이 +x(안쪽)를 향합니다.
+    이제 박스가 <code>min = (-9, 0, 0)</code>, <code>max = (-7, 2, 2)</code>라고 하면
+    (즉 박스 전체가 <code>x = -7 ~ -9</code>에 있어 평면보다 왼쪽에 있음):
+  </p>
+  <pre style="font-family:monospace; font-size:.9em; overflow-x:auto; background:rgba(255,255,255,.03); padding:.6em; border-radius:6px;">
+n.x = 1 ≥ 0  → pv.x = max.x = -7
+n.y = 0 ≥ 0  → pv.y = max.y =  2
+n.z = 0 ≥ 0  → pv.z = max.z =  2
+pv = (-7, 2, 2)
+
+distance(pv) = n·pv + d
+             = (1)(-7) + (0)(2) + (0)(2) + 5
+             = -7 + 5 = -2   ( < 0 )  → return false → 컬링!</pre>
+  <p>
+    가장 안쪽 꼭짓점(<code>x = -7</code>)마저 평면(<code>x = -5</code>) 바깥에 2만큼 나가 있으니
+    박스 전체가 시야 왼쪽 밖이라는 결론이 맞습니다. 만약 박스를 오른쪽으로 밀어
+    <code>max.x = -3</code>이 되면 <code>distance = -3 + 5 = +2 ≥ 0</code>이 되어 이 평면은 통과하고,
+    다음 평면 검사로 넘어갑니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    이 테스트는 <strong>보수적(conservative)</strong>입니다. 즉 “확실히 밖인 것”만 걸러내고, 절두체
+    모서리 근처의 큰 박스는 실제로 안 보여도 <code>true</code>가 나올 수 있습니다(false positive).
+    이는 안전한 방향의 오차입니다 — <em>보이는 걸 실수로 안 그리는 것</em>(false negative, 물체가
+    깜빡 사라짐)이 훨씬 치명적이니까요. 더 정밀하게 하려면 구(sphere) 1차 컬링 → AABB 2차 컬링처럼
+    단계를 두거나, 박스가 6평면과 <em>완전히</em> 안쪽인지(negative vertex까지) 검사해 “교차/포함”을
+    구분합니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    수천 개 물체를 매 프레임 도는 뜨거운 루프이므로, <code>distance</code> 안의 곱셈·덧셈을
+    <code>XMVector3Dot</code> + <code>XMPlaneDotCoord</code>로 벡터화하면 이득이 큽니다. 더 나아가
+    <strong>SoA(구조체 배열이 아닌 배열 구조체)</strong>로 박스들을 정렬해 SIMD로 4~8개를 한꺼번에 테스트하는
+    것이 상용 엔진의 방식입니다. 학습 단계에서는 위 코드가 읽기 쉬워 좋습니다.
+  </div>
+
+  <div class="callout">
+    <span class="tag">DirectXMath 대응</span>
+    라이브러리로 바꾸면 이 함수 전체가
+    <code>frustum.Contains(BoundingBox{center, extents})</code> 한 줄이 됩니다.
+    반환값 <code>ContainmentType</code>은 <code>DISJOINT</code>(완전 밖 → 컬링),
+    <code>INTERSECTS</code>(걸침 → 그림), <code>CONTAINS</code>(완전 안 → 그림) 세 가지라,
+    우리 코드의 <code>false</code>가 <code>DISJOINT</code>, <code>true</code>가 나머지 둘에 대응합니다.
+    <code>plane.distance(p)</code>는 <code>XMPlaneDotCoord(plane, XMVectorSetW(p, 1))</code>과 같습니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 거리 기반 LOD 선택</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 카메라와 물체 중심 사이의 거리를 재서, 고/중/저 폴리곤 메시 중 하나를
+    고릅니다. <strong>왜 필요한가:</strong> 멀리 있는 물체는 화면에서 몇 픽셀 안 되므로 고폴리곤을 그려
+    봐야 낭비입니다. 거리에 따라 해상도를 낮추면 시각적 손실 없이 정점 처리량을 크게 아낍니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>lod_pick.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">struct Model {
+    Mesh lod0, lod1, lod2;   // 고 → 중 → 저 폴리곤
+    XMFLOAT3 center;
+};
+
+Mesh&amp; pickLOD(Model&amp; model, const XMFLOAT3&amp; camPos) {
+    // sqrt를 피하려 거리 제곱으로 비교 (임계값도 제곱해 둠)
+    XMVECTOR d = XMVectorSubtract(XMLoadFloat3(&amp;model.center),
+                                  XMLoadFloat3(&amp;camPos));
+    float d2 = XMVectorGetX(XMVector3LengthSq(d));
+    const float near2 = 15.0f * 15.0f;   // 15m 이내: 최고 디테일
+    const float mid2  = 50.0f * 50.0f;   // 50m 이내: 중간
+    if (d2 &lt; near2) return model.lod0;
+    if (d2 &lt; mid2)  return model.lod1;
+    return model.lod2;                    // 그 밖: 최저 (또는 임포스터)
+}
+
+// 사용: 컬링 통과한 것만 LOD 골라 그린다
+void drawModels(std::vector&lt;Model&gt;&amp; models,
+                const std::array&lt;Plane,6&gt;&amp; frustum,
+                const XMFLOAT3&amp; camPos) {
+    for (Model&amp; m : models) {
+        AABB box = boundsOf(m);
+        if (!aabbInFrustum(frustum, box)) continue;   // 시야 밖 스킵
+        draw(pickLOD(m, camPos));
+    }
+}</code></pre>
+  </div>
+
+  <h3>3-1. 거리 “제곱”으로 비교하는 이유</h3>
+  <p>
+    <code>pickLOD</code>는 참조 반환 타입 <code>Mesh&amp;</code>를 씁니다. 값으로 돌려주면 무거운 메시를
+    통째로 복사하니, 세 LOD 중 골라진 것을 <strong>복사 없이 그 자리(원본)로</strong> 넘기려는 것입니다.
+    인자 <code>Model&amp; model</code>도 참조라 복사가 없고, <code>const XMFLOAT3&amp; camPos</code>는
+    “읽기만” 하는 카메라 위치입니다.
+  </p>
+  <p>
+    핵심 아이디어는 <strong>제곱근을 피하는 것</strong>입니다. 두 점 사이 실제 거리는
+    <code>√(dx² + dy² + dz²)</code>인데, <code>sqrt</code>는 상대적으로 비싼 연산입니다.
+    하지만 우리는 “거리가 15보다 작냐?”만 알면 되지 <em>정확한 거리 값</em>은 필요 없습니다.
+    거리가 양수인 한 <code>거리 &lt; 15</code>는 <code>거리² &lt; 15²</code>와 완전히 동치이므로,
+    양변을 제곱해 비교하면 <code>sqrt</code>를 통째로 없앨 수 있습니다. 그래서 임계값도 미리
+    <code>15*15</code>, <code>50*50</code>으로 제곱해 둡니다.
+  </p>
+
+  <h3>3-2. DirectXMath 성분 해부</h3>
+  <ul>
+    <li><code>XMLoadFloat3(&amp;model.center)</code>, <code>XMLoadFloat3(&amp;camPos)</code> —
+      저장용 <code>XMFLOAT3</code>를 계산용 <code>XMVECTOR</code>(SIMD)로 <strong>로드</strong>합니다.
+      DirectXMath의 벡터 연산 함수들은 전부 <code>XMVECTOR</code>를 받으므로, 계산 전 이 로드가 필요합니다.</li>
+    <li><code>XMVectorSubtract(center, camPos)</code> — 두 <code>XMVECTOR</code>를 성분별로 빼서
+      카메라→물체 방향 벡터 <code>d = (cx-px, cy-py, cz-pz)</code>를 만듭니다.
+      부호는 상관없습니다(길이만 쓸 것이므로).</li>
+    <li><code>XMVector3LengthSq(d)</code> — <code>d</code>의 <strong>길이 제곱</strong>
+      <code>dx² + dy² + dz²</code>를 계산해, 그 값을 네 성분(x,y,z,w) 모두에 복제한 <code>XMVECTOR</code>로
+      돌려줍니다. 이름의 <code>3</code>은 “xyz 세 성분만 쓴다(w 무시)”는 뜻입니다.</li>
+    <li><code>XMVectorGetX(...)</code> — 그 <code>XMVECTOR</code>의 x 성분 하나를 평범한
+      <code>float</code>로 꺼냅니다. 네 성분이 다 같은 값이니 x를 꺼내면 됩니다. 이렇게 스칼라로 내려야
+      <code>if (d2 &lt; near2)</code> 같은 일반 비교가 가능합니다.</li>
+  </ul>
+  <p>
+    <strong>손계산 예:</strong> 카메라 <code>(0,0,0)</code>, 물체 중심 <code>(12, 0, 9)</code>이면
+    <code>d = (12, 0, 9)</code>, <code>d2 = 144 + 0 + 81 = 225</code>.
+    <code>near2 = 225</code>이므로 <code>225 &lt; 225</code>는 거짓 → lod0을 건너뛰고,
+    <code>mid2 = 2500</code>에 대해 <code>225 &lt; 2500</code> 참 → <strong>lod1(중간)</strong>이 선택됩니다.
+    실제 거리는 <code>√225 = 15m</code>로 정확히 경계인데, <code>&lt;</code>(미만) 비교라 경계값은 다음 단계로
+    넘어감을 볼 수 있습니다.
+  </p>
+
+  <h3>3-3. <code>drawModels</code> — 컬링과 LOD가 물리는 지점</h3>
+  <p>
+    사용 함수는 세 조각을 한 흐름으로 엮습니다.
+  </p>
+  <ol class="steps">
+    <li><code>AABB box = boundsOf(m);</code> — 물체의 바운딩 박스를 얻습니다(월드 공간 기준).</li>
+    <li><code>if (!aabbInFrustum(frustum, box)) continue;</code> — 시야 밖이면 <strong>즉시 스킵</strong>.
+      LOD 선택도, 드로우콜도 아예 하지 않습니다. 컬링이 가장 먼저 오는 이유는 “안 보이는 것에는
+      LOD 계산조차 아깝다”는 것입니다.</li>
+    <li><code>draw(pickLOD(m, camPos));</code> — 컬링을 통과한 것만 거리로 LOD를 골라 그립니다.</li>
+  </ol>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    경계 임계값(15m, 50m)에서 두 LOD가 <strong>딱 바뀌는 순간</strong>, 실루엣이 눈에 띄게 튀는
+    “<strong>LOD 팝핑</strong>”이 생깁니다. 완화법은 (1) 임계에 <em>히스테리시스</em>를 넣어 들어갈 때와
+    나올 때 기준을 다르게 하거나(예: 15m에서 lod1로 내려가고, 13m에서야 lod0로 올라옴 → 경계에서 왔다갔다
+    깜빡임 방지), (2) 두 LOD를 짧은 구간에서 <em>크로스페이드</em>(알파 블렌드)하거나, (3)
+    스크린도어 <em>디더링</em>으로 픽셀 단위로 섞는 것입니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    거리 임계는 “미터”보다 <strong>화면 투영 크기(스크린 스페이스 에러)</strong>로 잡는 게 더 정확합니다.
+    같은 15m라도 시야각(FOV)이 좁거나 해상도가 높으면 물체가 화면에서 더 크게 보이기 때문입니다.
+    상용 엔진은 물체의 바운딩 반경과 카메라 파라미터로 “이 물체가 화면에서 몇 픽셀인가”를 추정해 LOD를
+    고릅니다. 학습 단계에서는 거리 제곱 비교로 충분합니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 인스턴싱 — 같은 메시 대량 렌더</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 풀·바위·군중처럼 <em>같은 메시</em>를 수천 개 그릴 때, 인스턴스마다
+    다른 변환 행렬만 바꿔 가며 드로우콜 <strong>한 번</strong>으로 전부 그립니다.
+    <strong>왜 필요한가:</strong> 물체 하나당 드로우콜을 부르면 CPU→GPU 통신 오버헤드가 수천 배로 늘어
+    CPU가 병목이 됩니다. 인스턴싱은 “메시는 한 벌, 위치만 다르게” 방식으로 이 오버헤드를 없앱니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>instancing.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">using namespace DirectX;
+using Microsoft::WRL::ComPtr;
+
+// 인스턴스별 model 행렬 배열을 준비한다.
+std::vector&lt;XMFLOAT4X4&gt; models = buildInstanceMatrices();  // 예: 5000개
+const UINT count = (UINT)models.size();
+
+// ── 인스턴스 행렬용 정점 버퍼 (슬롯 1) ──
+D3D11_BUFFER_DESC bd = {};
+bd.ByteWidth = count * sizeof(XMFLOAT4X4);
+bd.Usage = D3D11_USAGE_DEFAULT;
+bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+D3D11_SUBRESOURCE_DATA sd = {};
+sd.pSysMem = models.data();
+ComPtr&lt;ID3D11Buffer&gt; instanceVB;
+device->CreateBuffer(&amp;bd, &amp;sd, &amp;instanceVB);
+
+// ── 입력 레이아웃: 슬롯 0 = 메시(정점당), 슬롯 1 = 행렬(인스턴스당) ──
+// float4x4 = float4 4개 → 시맨틱 INSTMAT 0~3, StepRate=1 로 "인스턴스마다" 전진
+D3D11_INPUT_ELEMENT_DESC layout[] = {
+    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA,   0 },
+    { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA,   0 },
+    { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA,   0 },
+    { "INSTMAT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0,  D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+    { "INSTMAT",  1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+    { "INSTMAT",  2, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+    { "INSTMAT",  3, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+};
+ComPtr&lt;ID3D11InputLayout&gt; inputLayout;
+device->CreateInputLayout(layout, _countof(layout),
+                          vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
+                          &amp;inputLayout);
+
+// ── 렌더: 두 정점 버퍼를 슬롯 0/1에 바인딩, 드로우콜 한 번으로 count개 ──
+ID3D11Buffer* vbs[2] = { meshVB.Get(), instanceVB.Get() };
+UINT strides[2] = { (UINT)sizeof(Vertex), (UINT)sizeof(XMFLOAT4X4) };
+UINT offsets[2] = { 0, 0 };
+context->IASetInputLayout(inputLayout.Get());
+context->IASetVertexBuffers(0, 2, vbs, strides, offsets);
+context->IASetIndexBuffer(meshIB.Get(), DXGI_FORMAT_R32_UINT, 0);
+context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+context->DrawIndexedInstanced(indexCount, count, 0, 0, 0);</code></pre>
+  </div>
+
+  <h3>4-1. 인스턴스 데이터 준비와 버퍼 생성</h3>
+  <p>
+    <code>std::vector&lt;XMFLOAT4X4&gt; models</code>는 인스턴스마다의 월드 변환 행렬을 담은 배열입니다.
+    <code>XMFLOAT4X4</code>(저장용 4×4 행렬)를 쓰는 이유는 GPU 버퍼에 그대로 <code>memcpy</code>할 수 있는
+    평탄한 64바이트 레이아웃이기 때문입니다. <code>const UINT count</code>는 인스턴스 개수인데,
+    D3D API가 부호 없는 32비트 정수 <code>UINT</code>를 요구하므로 <code>size()</code>를 캐스팅합니다.
+  </p>
+  <p>
+    <code>D3D11_BUFFER_DESC bd = {};</code>의 <code>= {}</code>는 <strong>집합 초기화</strong>로
+    구조체 전체를 0으로 채웁니다(안 쓰는 필드가 쓰레기값이 되는 것을 막음). 필드를 봅시다.
+  </p>
+  <ul>
+    <li><code>bd.ByteWidth = count * sizeof(XMFLOAT4X4);</code> — 버퍼 전체 크기. 행렬 하나가 64바이트니
+      5000개면 320,000바이트입니다.</li>
+    <li><code>bd.Usage = D3D11_USAGE_DEFAULT;</code> — GPU가 읽는, CPU가 자주 안 바꾸는 버퍼.
+      매 프레임 내용이 바뀌면 뒤의 성능 콜아웃대로 <code>DYNAMIC</code>을 씁니다.</li>
+    <li><code>bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;</code> — 이 버퍼를 <strong>정점 버퍼</strong>로
+      쓰겠다는 선언. 인스턴스 데이터도 결국 입력 어셈블러가 “정점 스트림”처럼 읽으므로 정점 버퍼입니다.</li>
+    <li><code>sd.pSysMem = models.data();</code> — 초기 내용으로 CPU 쪽 배열을 가리킵니다.
+      <code>CreateBuffer</code>가 이 메모리를 GPU로 복사합니다.</li>
+    <li><code>ComPtr&lt;ID3D11Buffer&gt; instanceVB;</code> — <code>ComPtr</code>는 COM 객체의
+      참조 카운트를 자동 관리하는 스마트 포인터라, 범위를 벗어나면 <code>Release()</code>를 알아서 불러
+      누수를 막습니다.</li>
+  </ul>
+
+  <h3>4-2. 입력 레이아웃 — 두 슬롯, 두 스텝 방식</h3>
+  <p>
+    입력 레이아웃은 GPU에게 “정점 버퍼 바이트를 어떻게 셰이더 입력으로 쪼갤지” 알려 주는 설명서입니다.
+    각 <code>D3D11_INPUT_ELEMENT_DESC</code>의 필드는 순서대로
+    <em>시맨틱 이름, 시맨틱 인덱스, 포맷, 입력 슬롯, 바이트 오프셋, 스텝 종류, 스텝 레이트</em>입니다.
+  </p>
+  <p>
+    앞의 세 요소(<code>POSITION</code>, <code>NORMAL</code>, <code>TEXCOORD</code>)는
+    <strong>슬롯 0</strong>(메시 정점 버퍼)에서 오고, <code>D3D11_INPUT_PER_VERTEX_DATA</code>이며
+    스텝 레이트가 <code>0</code>입니다. 즉 <strong>정점마다</strong> 다음 데이터로 전진합니다. 오프셋
+    <code>0 / 12 / 24</code>는 <code>Vertex</code> 구조체 안에서 위치(12바이트=float3), 법선(12바이트),
+    UV(8바이트=float2)가 차례로 놓인 바이트 위치입니다.
+  </p>
+  <p>
+    뒤의 네 요소가 인스턴싱의 핵심입니다. 4×4 행렬은 셰이더 입력으로 한 번에 받을 수 없어
+    <strong><code>float4</code> 4개</strong>로 쪼개, 같은 시맨틱 이름 <code>"INSTMAT"</code>에
+    <strong>인덱스 0, 1, 2, 3</strong>을 붙입니다. 공통점을 봅시다.
+  </p>
+  <ul>
+    <li>입력 슬롯이 <strong>1</strong> — 방금 만든 <code>instanceVB</code>에서 읽습니다.</li>
+    <li>오프셋 <code>0 / 16 / 32 / 48</code> — 행렬 한 개(64바이트) 안에서 각 행(float4=16바이트)의 시작
+      바이트입니다. 즉 행렬의 0행, 1행, 2행, 3행을 순서대로 집습니다.</li>
+    <li><code>D3D11_INPUT_PER_INSTANCE_DATA</code> + 스텝 레이트 <strong>1</strong> —
+      “<strong>인스턴스마다</strong> 다음 행렬로 전진”. 즉 한 인스턴스를 그리는 동안 이 행렬은 고정이고,
+      다음 인스턴스로 넘어갈 때 버퍼에서 1칸(=1개 행렬) 나아갑니다. 이것이 “정점당”과 “인스턴스당”을 가르는
+      단 하나의 스위치입니다.</li>
+  </ul>
+  <p>
+    <code>CreateInputLayout</code>은 이 배열과 정점 셰이더 바이트코드(<code>vsBlob</code>)를 대조해,
+    셰이더 입력 시그니처와 레이아웃이 맞는지 검증하며 레이아웃 객체를 만듭니다. <code>_countof(layout)</code>은
+    배열 원소 개수(여기선 7)를 컴파일 타임에 세는 매크로입니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">HLSL 쪽 대응</span>
+    정점 셰이더에서는 이 네 조각을 받아 행렬로 다시 조립해 씁니다. 행벡터 규약이므로
+    <code>mul(pos, world)</code> 순서입니다.
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>instanced_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer PerFrame : register(b0) {
+    row_major float4x4 gViewProj;   // 뷰*투영 (행벡터 규약)
+};
+
+struct VSIn {
+    float3 pos      : POSITION;
+    float3 normal   : NORMAL;
+    float2 uv       : TEXCOORD;
+    // 인스턴스별 world 행렬: float4 4개로 쪼개 들어옴
+    float4 world0   : INSTMAT0;
+    float4 world1   : INSTMAT1;
+    float4 world2   : INSTMAT2;
+    float4 world3   : INSTMAT3;
+};
+
+struct VSOut {
+    float4 posH : SV_Position;
+    float2 uv   : TEXCOORD0;
+};
+
+VSOut main(VSIn i) {
+    VSOut o;
+    // 4개의 행을 다시 4x4 행렬로 조립
+    float4x4 world = float4x4(i.world0, i.world1, i.world2, i.world3);
+    // 행벡터 규약: v' = v * M  →  mul(v, M)
+    float4 worldPos = mul(float4(i.pos, 1.0), world);
+    o.posH = mul(worldPos, gViewProj);
+    o.uv   = i.uv;
+    return o;
+}</code></pre>
+  </div>
+
+  <h3>4-3. HLSL 셰이더 해부</h3>
+  <ul>
+    <li><code>cbuffer PerFrame : register(b0)</code> — 프레임당 한 번 올리는 상수 버퍼로 뷰-투영 행렬을
+      담습니다. <code>row_major</code>는 “이 행렬은 행 우선으로 저장돼 있다”고 HLSL에 알려, C++ 쪽
+      <code>XMFLOAT4X4</code>와 메모리 배치가 맞도록 합니다(이걸 빼면 HLSL 기본 열 우선과 어긋나
+      transpose가 필요해집니다).</li>
+    <li><code>float4 world0 : INSTMAT0; ...</code> — 입력 레이아웃에서 쪼갠 네 조각을 시맨틱
+      <code>INSTMAT0~3</code>으로 그대로 받습니다. C++ 레이아웃의 시맨틱 이름·인덱스와 <strong>정확히
+      일치</strong>해야 합니다.</li>
+    <li><code>float4x4 world = float4x4(i.world0, ...);</code> — 네 행을 다시 4×4 행렬로 조립합니다.
+      각 <code>float4</code>가 행렬의 한 <em>행</em>이 되어, C++에서 저장한 행 우선 행렬과 같은 형태로
+      복원됩니다.</li>
+    <li><code>mul(float4(i.pos, 1.0), world)</code> — 위치에 <code>w = 1</code>을 붙여 동차 좌표로 만든 뒤
+      월드 행렬을 곱합니다. <strong>행벡터 규약이라 벡터가 <code>mul</code>의 왼쪽</strong>입니다
+      (<code>v * M</code>). 순서를 <code>mul(world, v)</code>로 바꾸면 전치된 변환이 적용돼 물체가 엉뚱하게
+      찌그러집니다.</li>
+    <li><code>mul(worldPos, gViewProj)</code> — 이어서 뷰-투영을 곱해 클립 공간
+      <code>SV_Position</code>으로 보냅니다. 역시 벡터가 왼쪽입니다.</li>
+  </ul>
+
+  <h3>4-4. 렌더 — 두 버퍼 바인딩과 <code>DrawIndexedInstanced</code></h3>
+  <ul>
+    <li><code>ID3D11Buffer* vbs[2] = { meshVB.Get(), instanceVB.Get() };</code> — 슬롯 0에 메시 정점 버퍼,
+      슬롯 1에 인스턴스 행렬 버퍼를 놓습니다. <code>.Get()</code>은 <code>ComPtr</code>에서 원시 포인터를
+      꺼내되 참조 카운트는 건드리지 않습니다.</li>
+    <li><code>UINT strides[2] = { sizeof(Vertex), sizeof(XMFLOAT4X4) };</code> — 각 슬롯에서 “한 원소가
+      몇 바이트인지”. 슬롯 0은 정점 하나 크기, 슬롯 1은 행렬 하나(64바이트)입니다. GPU가 이 값만큼씩
+      건너뛰며 읽습니다.</li>
+    <li><code>UINT offsets[2] = { 0, 0 };</code> — 각 버퍼에서 읽기 시작 바이트(둘 다 처음부터).</li>
+    <li><code>IASetVertexBuffers(0, 2, vbs, strides, offsets)</code> — 슬롯 0부터 2개 버퍼를 한 번에
+      바인딩합니다.</li>
+    <li><code>IASetIndexBuffer(meshIB.Get(), DXGI_FORMAT_R32_UINT, 0)</code> — 인덱스 버퍼(32비트 정수)를
+      바인딩. 인스턴스마다 <em>같은</em> 인덱스 목록을 재사용하므로 인덱스 버퍼는 하나면 됩니다.</li>
+    <li><code>DrawIndexedInstanced(indexCount, count, 0, 0, 0)</code> — 이 한 줄이 전부입니다.
+      인자는 <em>인스턴스당 인덱스 개수, 인스턴스 개수, 시작 인덱스, 베이스 정점, 시작 인스턴스</em>입니다.
+      GPU가 내부적으로 인덱스 목록을 <code>count</code>번 돌면서, 매 회 인스턴스 슬롯의 다음 행렬을
+      집어 그립니다 → <strong>드로우콜은 1번, 그려지는 물체는 5000개</strong>.</li>
+  </ul>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    인스턴싱의 이득은 <strong>드로우콜(CPU→GPU 오버헤드) 절감</strong>이지 GPU 정점 처리량 자체를
+    줄이진 않습니다. 그래서 프러스텀 컬링·LOD와 함께 써야 진짜로 빨라집니다. 인스턴스 데이터가 매 프레임
+    바뀌면 <code>D3D11_USAGE_DYNAMIC</code> + <code>Map/Unmap</code>으로 만들고, CPU에서 프러스텀 컬링해
+    <em>보이는 인스턴스만</em> 버퍼에 채워 넣으세요. 이렇게 하면 “컬링 → 컴팩션 → 인스턴싱”이 한 파이프라인이
+    되어, 5000개 중 화면에 보이는 800개만 그리면서도 드로우콜은 여전히 1번입니다.</div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>DYNAMIC</code> 버퍼를 매 프레임 <code>Map(D3D11_MAP_WRITE_DISCARD)</code>로 갱신하지 않고
+    <code>Map(WRITE_NO_OVERWRITE)</code>나 <code>UpdateSubresource</code>를 잘못 쓰면, GPU가 아직 이전
+    프레임을 그리는 중인 버퍼를 덮어써 화면이 깜빡이거나 스톨이 걸립니다. 매 프레임 통째로 다시 채운다면
+    <code>WRITE_DISCARD</code>가 정석입니다(드라이버가 새 백업 메모리를 줘 동기화 스톨을 피함).
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>정리 — 세 기법이 하나의 파이프라인으로</h2>
+  <p>
+    지금까지 만든 조각을 프레임 루프에 놓으면 이런 순서가 됩니다.
+  </p>
+  <ol class="steps">
+    <li>카메라가 움직인 프레임에 <code>extractFrustumPlanes(view * proj)</code>로 6평면을 <strong>한 번</strong> 뽑는다.</li>
+    <li>물체(또는 인스턴스)마다 <code>aabbInFrustum</code>으로 <strong>안 보이는 것을 버린다</strong>.</li>
+    <li>살아남은 것에 <code>pickLOD</code>로 <strong>거리에 맞는 해상도</strong>를 고른다.</li>
+    <li>같은 메시가 많으면 보이는 인스턴스만 모아 <code>DrawIndexedInstanced</code>로 <strong>드로우콜을 뭉친다</strong>.</li>
+  </ol>
+  <p>
+    각 단계는 “일을 줄이는 방향”으로만 작동하며, 서로의 이득을 곱셈으로 키워 줍니다. 컬링이 개수를 줄이고,
+    LOD가 개당 비용을 줄이고, 인스턴싱이 호출 횟수를 줄입니다. 실무에서는 여기에
+    <strong>오클루전 컬링</strong>(다른 물체 뒤에 가려진 것 제거), <strong>임포스터</strong>(아주 먼 물체를
+    빌보드 텍스처로 치환), <strong>GPU 컬링</strong>(컴퓨트 셰이더로 절두체 판정) 등이 더해집니다.
+    그 기반 개념이 바로 이 페이지에서 손으로 짜 본 4가지입니다.
+  </p>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./07-ao.html">← 앰비언트 오클루전 (Ambient Occlusion)</a>
+    <a href="./index.html">구현 허브 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

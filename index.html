@@ -85,7 +85,7 @@
         <strong>직접 만져보는 인터랙티브 데모</strong>가 있습니다. 슬라이더를 움직이고,
         점을 드래그하면서 "아 이게 이런 거였구나"를 느껴보세요.</p>
       <p style="margin:16px 0 0;">개념을 넘어 <strong>직접 코드로 구현</strong>하고 싶다면 →
-        <a class="impl-link" href="impl/index.html">C++ / OpenGL 구현 가이드</a></p>
+        <a class="impl-link" href="impl/index.html">C++ / DirectX 11 구현 가이드</a></p>
     </div>
 
     <!-- ========================================================= -->
@@ -95,7 +95,7 @@
     <section id="vector">
       <h2>벡터 (Vector)</h2>
       <p class="lead">그래픽스의 알파벳. 위치, 방향, 속도, 색깔까지 전부 벡터로 표현합니다.</p>
-      <a class="impl-link" href="impl/01-math.html">이 챕터를 C++로 직접 구현하기</a>
+      <a class="impl-link" href="impl/01-vector.html">벡터를 C++로 한 줄 한 줄 직접 구현하기</a>
 
       <p>벡터는 그냥 <strong>숫자 묶음</strong>이에요. 2D에서는 <code>(x, y)</code> 두 개,
         3D에서는 <code>(x, y, z)</code> 세 개죠. 이걸 두 가지로 볼 수 있어요:</p>
@@ -131,6 +131,7 @@
     <section id="matrix">
       <h2>행렬 (Matrix)</h2>
       <p class="lead">벡터를 한꺼번에 이동·회전·확대하는 "변환 기계".</p>
+      <a class="impl-link" href="impl/01-matrix.html">행렬을 C++로 한 줄 한 줄 직접 구현하기</a>
 
       <p>행렬은 숫자를 격자로 늘어놓은 것입니다. 그래픽스에서 행렬의 진짜 의미는
         <strong>"공간을 통째로 변형시키는 규칙"</strong>이에요. 어떤 점에 행렬을 곱하면
@@ -154,6 +155,7 @@
     <section id="coord">
       <h2>좌표계와 변환</h2>
       <p class="lead">이동(Translate) · 회전(Rotate) · 확대(Scale), 그리고 순서의 중요성.</p>
+      <a class="impl-link" href="impl/01-transform.html">변환 행렬을 C++로 한 줄 한 줄 직접 구현하기</a>
 
       <p>물체를 화면에 놓는 것은 세 가지 기본 변환의 조합입니다. 중요한 건 <strong>순서</strong>예요.
         "회전 후 이동"과 "이동 후 회전"은 완전히 다른 결과를 만듭니다.</p>
@@ -173,6 +175,7 @@
     <section id="dotcross">
       <h2>내적 · 외적</h2>
       <p class="lead">두 벡터의 관계를 숫자로: 내적은 "얼마나 같은 방향인가", 외적은 "수직 방향과 넓이".</p>
+      <a class="impl-link" href="impl/01-dotcross.html">내적·외적 활용을 C++로 한 줄 한 줄 직접 구현하기</a>
 
       <h3>내적 (Dot Product)</h3>
       <p><code>A · B = |A||B|cosθ</code>. 결과는 <strong>스칼라(숫자 하나)</strong>입니다.
@@ -203,6 +206,7 @@
     <section id="trig">
       <h2>삼각함수</h2>
       <p class="lead">원운동, 회전, 파동의 언어. sin·cos만 이해하면 절반은 끝납니다.</p>
+      <a class="impl-link" href="impl/01-trig.html">삼각함수 활용을 C++로 한 줄 한 줄 직접 구현하기</a>
 
       <p>단위원(반지름 1인 원) 위의 한 점을 각도 θ로 표현하면 그 좌표가 바로
         <code>(cos θ, sin θ)</code>입니다. 즉 <strong>cos은 x, sin은 y</strong>예요.
@@ -222,6 +226,7 @@
     <section id="linalg">
       <h2>선형대수와 기하학</h2>
       <p class="lead">지금까지의 도구를 합쳐서 "선분 교차", "점과 선 거리" 같은 실전 문제 풀기.</p>
+      <a class="impl-link" href="impl/01-geometry.html">기하 교차 판정을 C++로 한 줄 한 줄 직접 구현하기</a>
 
       <p>게임과 그래픽스에서 끝없이 나오는 질문들 — "이 점이 이 도형 안에 있나?",
         "두 선분이 만나나?", "마우스가 버튼 위에 있나?" — 은 전부 앞의 내적·외적으로 풀립니다.</p>
@@ -241,7 +246,7 @@
     <section id="pixel">
       <h2>픽셀과 색상</h2>
       <p class="lead">화면은 작은 빛 점들의 격자. 각 점은 빨강·초록·파랑의 밝기로 색을 만듭니다.</p>
-      <a class="impl-link" href="impl/02-raster2d.html">이 챕터를 C++로 직접 구현하기</a>
+      <a class="impl-link" href="impl/02-raster2d.html">이 챕터를 C++/DirectX로 직접 구현하기</a>
 
       <p>모니터의 모든 색은 <strong>RGB</strong> — 빨강(R), 초록(G), 파랑(B) 세 빛을 섞어 만듭니다.
         각 채널은 0~255. <code>(255,0,0)</code>은 순수 빨강, <code>(255,255,255)</code>는 하양,
@@ -340,7 +345,7 @@
     <section id="mvp">
       <h2>Model → World → View → Projection 변환</h2>
       <p class="lead">3D 점이 화면의 2D 픽셀이 되기까지 거치는 4단계 여행.</p>
-      <a class="impl-link" href="impl/03-opengl3d.html">이 챕터를 C++/OpenGL로 직접 구현하기</a>
+      <a class="impl-link" href="impl/03-opengl3d.html">이 챕터를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>3D 물체 하나가 화면에 그려지려면 네 개의 좌표계를 거칩니다. 이걸 <strong>파이프라인</strong>이라 해요:</p>
       <ul>
@@ -468,7 +473,7 @@
     <section id="gpu-intro">
       <h2>GPU 병렬 처리</h2>
       <p class="lead">CPU는 몇 명의 천재, GPU는 수천 명의 일꾼. 그래픽스는 "수천 명의 일꾼"이 유리합니다.</p>
-      <a class="impl-link" href="impl/04-shaders.html">이 챕터를 C++/OpenGL로 직접 구현하기</a>
+      <a class="impl-link" href="impl/04-shaders.html">이 챕터를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>화면의 픽셀은 수백만 개. 각 픽셀 계산은 <strong>서로 독립적</strong>이라 동시에 처리해도 됩니다.
         <strong>CPU</strong>는 코어가 몇 개뿐이라 순서대로(직렬) 빠르게 처리하고,
@@ -609,7 +614,7 @@ fn main(
     <section id="api-overview">
       <h2>그래픽스 API 지형도</h2>
       <p class="lead">GPU에게 명령을 내리는 통로. "쉽고 자동" ↔ "어렵지만 완전 제어"의 스펙트럼.</p>
-      <a class="impl-link" href="impl/05-api.html">OpenGL 실전 + 타 API 매핑 구현 가이드</a>
+      <a class="impl-link" href="impl/05-api.html">D3D11 실전 + 타 API 매핑 구현 가이드</a>
 
       <p>그래픽스 API는 내 코드와 GPU 드라이버 사이의 <strong>약속(인터페이스)</strong>입니다.
         고수준 API는 많은 걸 알아서 해줘 배우기 쉽지만 세밀한 제어가 어렵고,
@@ -686,7 +691,7 @@ fn main(
     <section id="pbr">
       <h2>Physically Based Rendering (PBR)</h2>
       <p class="lead">"대충 예뻐 보이게"가 아니라 <strong>실제 빛의 물리 법칙</strong>대로 표면을 계산하기.</p>
-      <a class="impl-link" href="impl/06-advanced.html">이 챕터를 C++/OpenGL로 직접 구현하기</a>
+      <a class="impl-link" href="impl/06-advanced.html">이 챕터를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>PBR은 재질을 몇 개의 물리적 파라미터로 표현합니다. 핵심은 두 개:</p>
       <ul>
@@ -851,7 +856,7 @@ fn main(
     <section id="antialiasing">
       <h2>안티앨리어싱 (Antialiasing)</h2>
       <p class="lead">비스듬한 선의 "계단(지글지글)"을 부드럽게. 픽셀 하나를 여러 번 샘플링해 평균 내기.</p>
-      <a class="impl-link" href="impl/07-techniques.html">이 챕터를 C++/OpenGL로 직접 구현하기</a>
+      <a class="impl-link" href="impl/07-techniques.html">이 챕터를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>픽셀은 네모난데 도형의 경계는 매끈합니다. 그래서 경계가 <strong>계단(재기, jaggies)</strong>처럼
         보이죠. 이건 앞서 본 <a href="#raster">래스터라이제이션</a>의 숙명입니다. 해법의 핵심은

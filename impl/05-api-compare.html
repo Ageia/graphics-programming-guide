@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: D3D12 · Vulkan · OpenGL · Metal · WebGPU 개념 매핑 — C++/DirectX 11</title>
+<meta name="description" content="D3D11을 기준점으로 D3D12·Vulkan·OpenGL·Metal·WebGPU의 핵심 개념(버퍼·PSO·커맨드리스트·디스크립터·배리어·프레젠트)을 한 줄 한 줄, 실제 코드와 함께 1:1로 매핑합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./05-api.html">5장. 그래픽스 API</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">D3D12 · Vulkan · OpenGL · Metal · WebGPU 개념 매핑</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 5</span>
+  <h1>D3D12 · Vulkan · OpenGL · Metal · WebGPU 개념 매핑 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    이 페이지는 <strong>"D3D11에서 익힌 개념이 다른 API로 얼마나 그대로 이식되는가"</strong>를 한 항목씩 뜯어봅니다.
+    Vertex Buffer·Pipeline·Command·Descriptor·Barrier·Present — 여섯 개의 축을 잡고, 각 API가 같은 개념을
+    <em>어떤 이름·어떤 코드</em>로 부르는지 1:1로 대응시킵니다. 개념 자체는 이름만 바뀔 뿐 대부분 그대로 이어지므로,
+    D3D11 코드 한 줄을 붙잡고 "이게 D3D12에서는 무슨 줄이 되는가"를 따라가면 저수준 API의 장벽이 훨씬 낮아집니다.
+    규약은 이 책 전체와 동일합니다: <strong>행벡터 <code>v' = v · M</code>(HLSL <code>mul(v, M)</code>), 행 우선 저장,
+    왼손 좌표계, 클립 z 범위 [0,1], 텍스처 V축 위→아래.</strong>
+  </p>
+
+  <!-- ============================================================ -->
+  <section id="big-picture">
+    <h2>0. 큰 그림 — API는 "명시성의 스펙트럼"이다</h2>
+    <p>
+      다섯 개의 API를 외우기 전에, 이들을 <strong>하나의 축 위에 놓는</strong> 감각을 먼저 잡는 게 중요합니다.
+      그 축은 <strong>"드라이버가 얼마나 대신 결정해 주는가 ↔ 개발자가 얼마나 직접 결정하는가"</strong>입니다.
+      왼쪽 끝은 편하지만 느리고 불투명하며, 오른쪽 끝은 빠르고 투명하지만 코드가 폭발합니다.
+    </p>
+    <ol class="steps">
+      <li><strong>OpenGL</strong> — 가장 <em>암묵적</em>. 전역 상태 머신에 플래그를 하나씩 토글하고, 메모리·동기화는 드라이버가 알아서 처리한다. 코드는 가장 짧지만 "지금 어떤 상태인지"가 코드 어디에도 명확히 없다.</li>
+      <li><strong>D3D11</strong> — <em>적당히 명시적</em>. 리소스는 명시적으로 <code>Create*</code>로 만들지만, 상태 전이·메모리·동기화는 여전히 런타임이 대신한다. "무엇을 그리는가"에 집중하게 해 주는 중간 지점.</li>
+      <li><strong>WebGPU</strong> — 저수준 개념(파이프라인·바인드그룹·커맨드 인코더)을 도입하되, 안전장치와 자동 배리어를 남겨 둔 <em>"완만한 명시성"</em>. 저수준 세계로 가는 가장 부드러운 입구.</li>
+      <li><strong>Metal</strong> — Apple 전용. WebGPU와 비슷한 추상화 수준이지만 플랫폼에 밀착돼 있고, 일부 동기화(Resource Hazard Tracking)를 자동으로 해 줄 수도, 끌 수도 있다.</li>
+      <li><strong>D3D12 / Vulkan</strong> — 가장 <em>명시적</em>. 메모리 할당, 리소스 상태 전이(배리어), 큐 동기화(펜스/세마포어), 파이프라인 사전 컴파일(PSO), 디스크립터 힙까지 전부 개발자 몫. 드라이버 오버헤드가 최소라 멀티스레드로 명령을 기록해 최고 성능을 얻는다.</li>
+    </ol>
+    <div class="callout">
+      <span class="tag">핵심</span>
+      D3D11은 이 스펙트럼의 <strong>정중앙</strong>에 있습니다. 그래서 "개념은 D3D11에서 배우고 목적에 맞는 API로 이동"이
+      가장 효율적입니다. 왼쪽(OpenGL)으로 가면 코드가 줄고, 오른쪽(D3D12/Vulkan)으로 가면 D3D11이 대신해 주던
+      결정들이 <strong>하나씩 당신의 코드로 튀어나옵니다.</strong> 이 페이지의 목표는 그 "튀어나오는 것들"을 미리
+      이름표와 함께 보여 주는 것입니다.
+    </div>
+
+    <h3>왜 D3D12·Vulkan은 코드가 폭발하는가 — 수치로 감 잡기</h3>
+    <p>
+      "첫 삼각형까지 D3D11은 ~200줄, Vulkan은 ~1,000줄"이라는 악명은 과장이 아닙니다. 하지만 그 800줄이
+      <strong>새로운 기능</strong>이 아니라 <strong>D3D11 런타임이 몰래 해 주던 일의 청구서</strong>라는 점을 알면
+      덜 무섭습니다. 대략적인 항목별 "추가 청구서"는 이렇습니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>D3D11이 자동으로 하던 일</th><th>저수준에서 직접 해야 하는 코드</th><th>대략 줄 수</th></tr></thead>
+      <tbody>
+        <tr><td>GPU 메모리 할당·타입 선택</td><td>메모리 타입 쿼리 → 힙 생성 → 리소스 바인딩</td><td>+100~200</td></tr>
+        <tr><td>리소스 상태 전이(자동 배리어)</td><td>드로우/복사마다 배리어 수동 삽입</td><td>+50~150</td></tr>
+        <tr><td>CPU-GPU 동기화</td><td>펜스/세마포어 생성·시그널·대기</td><td>+50~100</td></tr>
+        <tr><td>파이프라인 상태 검증·조합</td><td>PSO를 모든 조합마다 사전 컴파일</td><td>+150~300</td></tr>
+        <tr><td>디스크립터(리소스 바인딩) 관리</td><td>디스크립터 힙/셋 할당·기록·바인딩</td><td>+100~200</td></tr>
+      </tbody>
+    </table>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      이 "청구서"는 손해가 아니라 <strong>거래</strong>입니다. 드라이버가 매 드로우마다 하던 검증·상태 추적이 사라지므로,
+      드로우콜당 CPU 비용이 크게 줄고 <strong>여러 스레드가 동시에 커맨드를 기록</strong>할 수 있게 됩니다. 드로우콜이
+      수천~수만 개인 대형 씬에서 이 차이가 프레임타임을 좌우합니다. 반대로 드로우콜이 몇 개뿐인 학습용 예제에서는
+      이득이 거의 없고 코드만 늘어나므로, <strong>학습 단계에서 D3D12/Vulkan으로 직행하는 것은 비추천</strong>입니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="mapping-table">
+    <h2>1. 전체 개념 매핑 표 — 한눈에 보는 대응</h2>
+    <p>
+      먼저 전체 지도를 펼쳐 둡니다. 아래 표의 각 <strong>행(row)</strong>은 "같은 일을 하는 개념"이고,
+      각 <strong>열(column)</strong>은 API입니다. 왼쪽 D3D11 열을 기준점 삼아 오른쪽으로 눈을 옮기면,
+      같은 개념이 API마다 어떤 이름으로 불리는지 보입니다. 이어지는 절들에서 이 표의 각 행을
+      <strong>실제 코드와 함께</strong> 한 줄씩 해부합니다.
+    </p>
+    <table class="impl">
+      <thead>
+        <tr><th>D3D11 (기준)</th><th>D3D12</th><th>Vulkan</th><th>OpenGL</th><th>Metal</th><th>WebGPU</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Vertex Buffer + Input Layout<br><span style="color:var(--text-dim);font-size:.85em">IASetVertexBuffers</span></td>
+          <td>Vertex Buffer + Input Layout(PSO)</td>
+          <td>Vertex Buffer + <code>VertexInputState</code></td>
+          <td>VAO / VBO</td>
+          <td><code>MTLBuffer</code> + Vertex Descriptor</td>
+          <td>Vertex Buffer + <code>vertexBufferLayout</code></td>
+        </tr>
+        <tr>
+          <td>Shader + State object<br><span style="color:var(--text-dim);font-size:.85em">VS/PS/PSSet* + RSSetState 등</span></td>
+          <td>Pipeline State Object (PSO)</td>
+          <td><code>VkPipeline</code></td>
+          <td>Program(<code>glUseProgram</code>) + <code>glEnable</code></td>
+          <td><code>MTLRenderPipelineState</code></td>
+          <td><code>GPURenderPipeline</code></td>
+        </tr>
+        <tr>
+          <td>즉시 컨텍스트<br><span style="color:var(--text-dim);font-size:.85em">ID3D11DeviceContext</span></td>
+          <td>Command List + Command Queue</td>
+          <td>Command Buffer + Queue</td>
+          <td>암묵적 전역 상태 머신</td>
+          <td><code>MTLCommandBuffer</code></td>
+          <td><code>GPUCommandEncoder</code></td>
+        </tr>
+        <tr>
+          <td>Constant Buffer / SRV<br><span style="color:var(--text-dim);font-size:.85em">cbuffer + PSSetShaderResources</span></td>
+          <td>Root Signature + Descriptor Heap</td>
+          <td>Descriptor Set + Pipeline Layout</td>
+          <td>UBO / <code>glUniform</code></td>
+          <td>Argument Buffer / <code>setBuffer</code></td>
+          <td>Bind Group + Bind Group Layout</td>
+        </tr>
+        <tr>
+          <td>암묵적 동기화<br><span style="color:var(--text-dim);font-size:.85em">런타임이 알아서</span></td>
+          <td>Resource Barrier + Fence</td>
+          <td><code>VkBarrier</code> + <code>VkFence</code>/Semaphore</td>
+          <td>암묵적(드라이버가 알아서)</td>
+          <td><code>MTLFence</code> / Resource Hazard</td>
+          <td>암묵적(런타임이 배리어 삽입)</td>
+        </tr>
+        <tr>
+          <td>DXGI Swap Chain <code>Present</code><br><span style="color:var(--text-dim);font-size:.85em">swapChain-&gt;Present</span></td>
+          <td>Swap Chain <code>Present</code></td>
+          <td><code>vkQueuePresentKHR</code></td>
+          <td><code>glfwSwapBuffers</code></td>
+          <td><code>presentDrawable</code></td>
+          <td>Surface Present(자동)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      D3D11의 "지우고-바인딩하고-그리기" 십수 줄이, D3D12·Vulkan에서는 수백 줄로 늘어납니다. 이유는 성능 <em>기능</em>이
+      추가돼서가 아니라, <strong>D3D11 런타임이 대신 해 주던 결정(메모리 할당, 리소스 상태 전이(배리어), 큐 동기화(펜스),
+      파이프라인 사전 컴파일(PSO), 디스크립터 힙 관리)을 전부 직접</strong> 하게 됐기 때문입니다. Vulkan의
+      "첫 삼각형까지 1,000줄"이라는 악명은 정확히 여기서 나옵니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="row-vertex">
+    <h2>2. 1행 — Vertex Buffer + Input Layout</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> "정점 데이터가 담긴 GPU 메모리(Vertex Buffer)"와 "그 바이트 배치를 셰이더 입력에
+      연결하는 규칙(Input Layout)". <strong>왜 필요한가:</strong> GPU는 메모리 안의 바이트 나열만 봅니다. "이 12바이트는
+      position(float3)이고, 다음 8바이트는 texcoord(float2)"라는 <em>해석 규칙</em>을 알려 주지 않으면 정점을 그릴 수
+      없습니다. 이 규칙이 바로 Input Layout입니다.
+    </p>
+
+    <h3>D3D11 원본 — 정점 구조체 · 버퍼 생성 · 입력 레이아웃</h3>
+    <div class="code">
+      <div class="code-head"><span>vertex_setup.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 1) CPU 측 정점 구조체 — 메모리 배치가 곧 GPU가 읽을 바이트 순서
+struct Vertex {
+    DirectX::XMFLOAT3 position; // 12바이트: x, y, z
+    DirectX::XMFLOAT2 uv;       //  8바이트: u, v  (총 stride = 20바이트)
+};
+
+Vertex verts[3] = {
+    { { 0.0f,  0.5f, 0.0f }, { 0.5f, 0.0f } },
+    { { 0.5f, -0.5f, 0.0f }, { 1.0f, 1.0f } },
+    { {-0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } },
+};
+
+// 2) 버퍼 스펙(DESC)을 채워 device로 GPU 메모리를 생성
+D3D11_BUFFER_DESC bd = {};
+bd.Usage          = D3D11_USAGE_IMMUTABLE;      // 생성 후 GPU에서 읽기 전용
+bd.ByteWidth      = sizeof(verts);              // 20 * 3 = 60바이트
+bd.BindFlags      = D3D11_BIND_VERTEX_BUFFER;   // 정점 버퍼로 쓴다고 선언
+D3D11_SUBRESOURCE_DATA init = {};
+init.pSysMem      = verts;                       // 복사해 넣을 CPU 원본
+Microsoft::WRL::ComPtr&lt;ID3D11Buffer&gt; vb;
+device-&gt;CreateBuffer(&amp;bd, &amp;init, &amp;vb);
+
+// 3) 바이트 배치 → 셰이더 입력 시맨틱 매핑 규칙(Input Layout)
+D3D11_INPUT_ELEMENT_DESC layout[] = {
+    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+};
+Microsoft::WRL::ComPtr&lt;ID3D11InputLayout&gt; il;
+device-&gt;CreateInputLayout(layout, 2, vsBytecode, vsByteLen, &amp;il);
+
+// 4) 드로우 직전, 컨텍스트 슬롯에 바인딩
+UINT stride = sizeof(Vertex), offset = 0;
+ctx-&gt;IASetVertexBuffers(0, 1, vb.GetAddressOf(), &amp;stride, &amp;offset);
+ctx-&gt;IASetInputLayout(il.Get());
+ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+</code></pre>
+    </div>
+
+    <h4>줄 단위 해부</h4>
+    <p>
+      <strong>① 정점 구조체 <code>struct Vertex</code>.</strong> C++ 구조체의 멤버는 선언한 순서대로 메모리에
+      쌓입니다. <code>XMFLOAT3 position</code>은 4바이트 float 세 개 = 12바이트, 그 뒤 <code>XMFLOAT2 uv</code>는
+      float 두 개 = 8바이트. 합쳐서 한 정점이 <strong>20바이트</strong>를 차지하고, 이 20이 곧 <em>stride</em>(정점
+      하나에서 다음 정점까지의 간격)입니다. GPU는 "20바이트씩 건너뛰며 읽어라"라는 이 값만 보고 배열을 순회합니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> 정점 버퍼를 <em>표(table)</em>로 상상하세요. 각 행이 정점 하나이고, 행의 폭이 20바이트,
+      한 행 안에서 앞 12칸은 위치, 뒤 8칸은 UV입니다. Input Layout은 "이 표의 몇 번째 바이트부터가 어떤 열인가"를
+      적어 둔 <strong>표 머리글(header)</strong>인 셈입니다.
+    </p>
+    <p>
+      <strong>② <code>D3D11_BUFFER_DESC bd = {}</code>.</strong> <code>= {}</code>는 구조체 전체를 0으로 초기화하는
+      집합 초기화입니다(쓰레기 값 방지). <code>Usage = IMMUTABLE</code>은 "생성 후 절대 안 바꾼다"는 약속이라
+      드라이버가 가장 빠른 GPU 전용 메모리에 놓을 수 있습니다. <code>ByteWidth = sizeof(verts)</code>는 60바이트,
+      <code>BindFlags = D3D11_BIND_VERTEX_BUFFER</code>는 용도 선언입니다. <code>CreateBuffer</code>에 이 스펙과
+      초기 데이터 포인터를 넘기면 GPU 메모리 한 덩어리가 완성돼 <code>ComPtr</code>로 돌아옵니다.
+    </p>
+    <p>
+      <strong>③ <code>D3D11_INPUT_ELEMENT_DESC</code>의 각 필드.</strong> 이 줄이 이 절의 핵심입니다. 한 줄씩 뜯으면:
+    </p>
+    <ul>
+      <li><code>"POSITION"</code> — 셰이더 입력의 <strong>시맨틱 이름</strong>. HLSL의 <code>float3 pos : POSITION</code>과 문자열로 매칭됩니다.</li>
+      <li><code>0</code> — 시맨틱 인덱스(같은 이름이 여러 개일 때 구분). 여기선 0.</li>
+      <li><code>DXGI_FORMAT_R32G32B32_FLOAT</code> — 이 원소가 32비트 float 3개(=float3)라는 포맷.</li>
+      <li><code>0</code> — 입력 슬롯 번호(정점 버퍼를 여러 개 꽂을 때의 슬롯). 여기선 0번 버퍼.</li>
+      <li><code>0</code> / <code>12</code> — <strong>AlignedByteOffset</strong>. POSITION은 정점의 0바이트부터, TEXCOORD는 12바이트부터 시작. 이 12가 위 구조체에서 position이 차지한 12바이트와 정확히 일치해야 합니다.</li>
+      <li><code>D3D11_INPUT_PER_VERTEX_DATA</code> — 정점마다 다른 데이터(인스턴싱용 PER_INSTANCE와 대비).</li>
+    </ul>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>AlignedByteOffset</code>을 실수로 잘못 넣으면(예: TEXCOORD를 8로) 컴파일도 되고 크래시도 안 나지만
+      화면이 <strong>조용히 깨집니다.</strong> UV가 엉뚱한 바이트에서 읽혀 텍스처가 뒤틀립니다. 구조체 멤버 순서를
+      바꿨다면 이 오프셋도 반드시 함께 고쳐야 합니다. <code>D3D11_APPEND_ALIGNED_ELEMENT</code>를 쓰면 오프셋을
+      자동 계산해 이 실수를 막을 수 있습니다.
+    </div>
+
+    <h3>대응하는 HLSL 정점 셰이더 입력</h3>
+    <div class="code">
+      <div class="code-head"><span>triangle.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">struct VSIn {
+    float3 pos : POSITION;   // Input Layout의 "POSITION"과 이름으로 연결
+    float2 uv  : TEXCOORD;   // Input Layout의 "TEXCOORD"와 연결
+};
+
+struct VSOut {
+    float4 pos : SV_Position; // 클립 공간 좌표(필수 시스템 시맨틱)
+    float2 uv  : TEXCOORD;
+};
+
+VSOut VSMain(VSIn v) {
+    VSOut o;
+    o.pos = float4(v.pos, 1.0); // 이 예제는 이미 클립 공간 좌표라 그대로 통과
+    o.uv  = v.uv;
+    return o;
+}
+</code></pre>
+    </div>
+    <p>
+      <strong>연결의 정체:</strong> C++의 <code>D3D11_INPUT_ELEMENT_DESC</code> 문자열 <code>"POSITION"</code>과
+      HLSL의 <code>: POSITION</code>은 <strong>같은 문자열</strong>로 짝지어집니다. <code>CreateInputLayout</code>이
+      정점 셰이더 바이트코드(<code>vsBytecode</code>)를 함께 받는 이유가 이것입니다 — 셰이더가 요구하는 입력 시맨틱과
+      레이아웃이 맞는지 그 자리에서 검증하기 위함입니다. 규약대로 정점→클립 변환이 필요하면 여기서
+      <code>mul(float4(v.pos,1), mvp)</code>로 <strong>행벡터 × 행렬</strong>을 하지만, 이 예제는 입력이 이미 클립
+      공간이라 그대로 통과시켰습니다.
+    </p>
+
+    <h3>다른 API에서는 이 두 개념이 어떻게 나뉘는가</h3>
+    <table class="impl">
+      <thead><tr><th>API</th><th>정점 버퍼</th><th>입력 레이아웃이 사는 곳</th></tr></thead>
+      <tbody>
+        <tr><td><strong>D3D11</strong></td><td><code>ID3D11Buffer</code></td><td>독립 객체 <code>ID3D11InputLayout</code> (드로우 직전 바인딩)</td></tr>
+        <tr><td><strong>D3D12</strong></td><td><code>ID3D12Resource</code> + Vertex Buffer View</td><td><strong>PSO 안에 흡수</strong> (<code>InputLayout</code> 필드)</td></tr>
+        <tr><td><strong>Vulkan</strong></td><td><code>VkBuffer</code></td><td><strong>파이프라인 안</strong> <code>VkPipelineVertexInputStateCreateInfo</code></td></tr>
+        <tr><td><strong>OpenGL</strong></td><td>VBO</td><td>VAO + <code>glVertexAttribPointer</code>(상태에 기록)</td></tr>
+        <tr><td><strong>Metal</strong></td><td><code>MTLBuffer</code></td><td><code>MTLVertexDescriptor</code> (파이프라인에 연결)</td></tr>
+        <tr><td><strong>WebGPU</strong></td><td>Vertex Buffer</td><td><code>vertexBufferLayout</code> (파이프라인 기술자에)</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <span class="tag">핵심</span>
+      가장 중요한 이동 포인트: <strong>D3D11에서 "독립 객체 + 드로우 직전 바인딩"이던 입력 레이아웃이,
+      D3D12/Vulkan에서는 파이프라인(PSO/VkPipeline) 안으로 빨려 들어갑니다.</strong> 이것이 다음 절에서 다룰
+      "PSO가 모든 것을 삼킨다"의 첫 사례입니다. 즉 입력 레이아웃을 바꾸려면 새 PSO를 만들어야 합니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="row-pso">
+    <h2>3. 2행 — Shader + State object → PSO(Pipeline State Object)</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> "무엇을 어떻게 그릴지"를 정하는 파이프라인 상태. <strong>왜 필요한가:</strong>
+      셰이더·래스터·블렌드·뎁스 설정이 서로 호환되는지 GPU가 검증해야 하는데, D3D11은 이 검증을 드로우마다,
+      D3D12/Vulkan은 <em>미리 한 번</em> 하고 굳혀 둡니다. 이 "굳힌 덩어리"가 PSO입니다.
+    </p>
+
+    <h3>D3D11 원본 — 셰이더와 상태 객체를 따로 만들어 따로 바인딩</h3>
+    <div class="code">
+      <div class="code-head"><span>state_setup.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// (A) 셰이더 — 스테이지마다 독립 객체
+Microsoft::WRL::ComPtr&lt;ID3D11VertexShader&gt; vs;
+Microsoft::WRL::ComPtr&lt;ID3D11PixelShader&gt;  ps;
+device-&gt;CreateVertexShader(vsBytecode, vsLen, nullptr, &amp;vs);
+device-&gt;CreatePixelShader (psBytecode, psLen, nullptr, &amp;ps);
+
+// (B) 래스터라이저 상태 — 컬링/채우기 방식을 하나의 불변 객체로
+D3D11_RASTERIZER_DESC rd = {};
+rd.FillMode = D3D11_FILL_SOLID;   // 면 채우기(와이어프레임 아님)
+rd.CullMode = D3D11_CULL_BACK;    // 뒷면 제거
+rd.FrontCounterClockwise = FALSE; // 시계방향(CW)이 앞면 = 왼손 좌표계 관례
+Microsoft::WRL::ComPtr&lt;ID3D11RasterizerState&gt; rs;
+device-&gt;CreateRasterizerState(&amp;rd, &amp;rs);
+
+// (C) 뎁스스텐실 상태 — 깊이 테스트 규칙
+D3D11_DEPTH_STENCIL_DESC dsd = {};
+dsd.DepthEnable    = TRUE;
+dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+dsd.DepthFunc      = D3D11_COMPARISON_LESS; // z가 작을수록 앞(가까움)
+Microsoft::WRL::ComPtr&lt;ID3D11DepthStencilState&gt; dss;
+device-&gt;CreateDepthStencilState(&amp;dsd, &amp;dss);
+
+// (D) 드로우 직전 — 네 조각을 각각 슬롯에 꽂는다
+ctx-&gt;VSSetShader(vs.Get(), nullptr, 0);
+ctx-&gt;PSSetShader(ps.Get(), nullptr, 0);
+ctx-&gt;RSSetState(rs.Get());
+ctx-&gt;OMSetDepthStencilState(dss.Get(), 0);
+ctx-&gt;Draw(3, 0);
+</code></pre>
+    </div>
+
+    <h4>줄 단위 해부</h4>
+    <p>
+      <strong>(A) 셰이더가 스테이지마다 독립 객체.</strong> D3D11은 OpenGL처럼 VS·PS를 하나의 "Program"으로 링크하지
+      않습니다. <code>CreateVertexShader</code>·<code>CreatePixelShader</code>가 각각 별개의 COM 객체를 돌려주고,
+      드로우 때 <code>VSSetShader</code>·<code>PSSetShader</code>로 따로 꽂습니다. 덕분에 VS는 그대로 두고 PS만
+      교체하는 조합이 자유롭습니다.
+    </p>
+    <p>
+      <strong>(B) <code>CullMode = CULL_BACK</code> + <code>FrontCounterClockwise = FALSE</code>.</strong> 이 두 줄이
+      "어느 면이 앞면인가"를 정합니다. 우리 규약은 <strong>왼손 좌표계</strong>이고, 왼손 좌표계에서 화면을 향한 앞면은
+      정점이 <strong>시계방향(CW)</strong>으로 감깁니다. <code>FrontCounterClockwise = FALSE</code>는 "CW가 앞면"이라는
+      뜻이고, <code>CULL_BACK</code>은 그 반대인 뒷면(CCW로 보이는 면)을 버립니다. 삼각형의 뒷면 절반을 그리지 않아
+      성능을 아끼는 것이 컬링입니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      삼각형이 <strong>통째로 사라지면</strong> 십중팔구 컬링 방향이 반대입니다. 오른손 좌표계 튜토리얼을 왼손 규약으로
+      옮길 때 자주 터집니다. 디버깅 요령: 일단 <code>CullMode = D3D11_CULL_NONE</code>으로 바꿔 양면을 다 그려
+      보세요. 그때 보인다면 문제는 지오메트리가 아니라 <strong>와인딩 방향</strong>입니다.
+    </div>
+    <p>
+      <strong>(C) <code>DepthFunc = COMPARISON_LESS</code>.</strong> 새 픽셀의 z가 이미 저장된 z <em>보다 작을 때만</em>
+      통과시켜 덮어씁니다. 우리 규약의 클립 z 범위는 <strong>[0,1]</strong>이고 0이 가장 가까움이므로, "작을수록 앞"인
+      LESS가 맞습니다. (OpenGL 기본은 z 범위 [-1,1]이라 이 감각이 미묘하게 다릅니다.)
+    </p>
+    <p>
+      <strong>(D) 네 조각을 따로 바인딩.</strong> 여기가 D3D11의 정체성입니다. 셰이더 2개 + 래스터 상태 + 뎁스 상태를
+      <strong>각각</strong> 슬롯에 꽂은 다음 <code>Draw</code>를 부르면, 그 순간의 스냅샷으로 GPU가 그립니다.
+      런타임은 이 조합이 유효한지 <em>드로우 시점에</em> 검증합니다 — 이 반복 검증이 바로 D3D12/Vulkan이 없애려는 비용입니다.
+    </p>
+
+    <h3>D3D12에서는 이 네 조각이 하나의 PSO로 합쳐진다</h3>
+    <div class="code">
+      <div class="code-head"><span>pso_d3d12.cpp (개념 스케치)</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// D3D11에서 따로 만들던 것들이 하나의 DESC 안으로 모인다
+D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+pso.pRootSignature = rootSig.Get();               // ← D3D11의 리소스 바인딩 규약
+pso.VS             = { vsBytecode, vsLen };        // ← CreateVertexShader
+pso.PS             = { psBytecode, psLen };        // ← CreatePixelShader
+pso.InputLayout    = { layout, 2 };               // ← CreateInputLayout (2절!)
+pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;        // ← RASTERIZER_DESC
+pso.RasterizerState.FrontCounterClockwise = FALSE;
+pso.DepthStencilState.DepthEnable = TRUE;                   // ← DEPTH_STENCIL_DESC
+pso.DepthStencilState.DepthFunc   = D3D12_COMPARISON_FUNC_LESS;
+pso.BlendState = /* ... */;                                 // ← BLEND_DESC
+pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+pso.NumRenderTargets = 1;
+pso.RTVFormats[0]    = DXGI_FORMAT_R8G8B8A8_UNORM;
+pso.DSVFormat        = DXGI_FORMAT_D32_FLOAT;
+pso.SampleDesc.Count = 1;
+
+Microsoft::WRL::ComPtr&lt;ID3D12PipelineState&gt; pipeline;
+device-&gt;CreateGraphicsPipelineState(&amp;pso, IID_PPV_ARGS(&amp;pipeline));
+
+// 드로우 때는 통째로 하나만 바인딩
+cmdList-&gt;SetPipelineState(pipeline.Get());
+</code></pre>
+    </div>
+    <p>
+      <strong>1:1 대응이 그대로 보입니다.</strong> 오른쪽 주석을 보세요 — <code>pso.VS</code>는 D3D11의
+      <code>CreateVertexShader</code>, <code>pso.InputLayout</code>은 2절의 <code>CreateInputLayout</code>,
+      <code>pso.RasterizerState</code>는 <code>CreateRasterizerState</code>, <code>pso.DepthStencilState</code>는
+      <code>CreateDepthStencilState</code>에 각각 대응합니다. D3D11에서 <strong>네 번 만들고 네 번 바인딩</strong>하던
+      것이, D3D12에서는 <strong>한 번 만들고(초기화 때) 한 번 바인딩</strong>(드로우 때)으로 바뀝니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      PSO는 상태 조합 하나를 통째로 굳힌 객체이므로, <strong>단 하나의 설정만 달라도 별도의 PSO가 필요합니다.</strong>
+      "블렌드 켠 버전 / 끈 버전", "컬 백 / 컬 프론트", "RTV 포맷이 다른 버전"이 전부 다른 PSO입니다. 셰이더 N개 ×
+      블렌드 2가지 × 컬링 2가지 = 4N개처럼 <strong>조합 폭발</strong>이 일어나므로, 실무에서는 필요한 조합만 캐시하고
+      백그라운드에서 미리 컴파일해 프레임 중 컴파일 스톨(끊김)을 피합니다.
+    </div>
+    <table class="impl">
+      <thead><tr><th>API</th><th>파이프라인 객체</th><th>포함되는 것</th></tr></thead>
+      <tbody>
+        <tr><td><strong>D3D11</strong></td><td>없음 (조각별 상태 객체)</td><td>VS/PS/RS/DSS/BS를 따로 바인딩</td></tr>
+        <tr><td><strong>D3D12</strong></td><td><code>ID3D12PipelineState</code></td><td>셰이더+입력레이아웃+RS+DSS+BS+RT포맷</td></tr>
+        <tr><td><strong>Vulkan</strong></td><td><code>VkPipeline</code></td><td>위 전부 + 뷰포트/렌더패스 호환성까지</td></tr>
+        <tr><td><strong>OpenGL</strong></td><td><code>glUseProgram</code> + <code>glEnable</code></td><td>Program은 하나로, 상태는 전역 토글</td></tr>
+        <tr><td><strong>Metal</strong></td><td><code>MTLRenderPipelineState</code></td><td>셰이더+정점기술자+블렌드+RT포맷 (RS/DSS는 별도)</td></tr>
+        <tr><td><strong>WebGPU</strong></td><td><code>GPURenderPipeline</code></td><td>셰이더+레이아웃+RS+DSS+BS를 기술자 하나로</td></tr>
+      </tbody>
+    </table>
+    <div class="callout perf">
+      <span class="tag">TIP</span>
+      D3D11의 상태 객체는 OpenGL의 전역 토글과 D3D12/Vulkan의 PSO 사이의 <strong>훌륭한 학습 다리</strong>입니다.
+      "상태를 미리 불변 객체로 굳혀 둔다"는 감각을 D3D11에서 익히면, PSO는 "그걸 더 크게, 셰이더까지 묶었을 뿐"으로
+      자연스럽게 받아들여집니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="row-command">
+    <h2>4. 3행 — 즉시 컨텍스트 → Command List + Queue</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> GPU에게 시킬 명령의 목록. <strong>왜 필요한가:</strong> D3D11의 즉시
+      컨텍스트는 명령을 부르는 즉시 GPU로 흘려보내는 <em>단일 통로</em>라 멀티스레드로 명령을 쌓기 어렵습니다.
+      D3D12/Vulkan은 명령을 먼저 <strong>목록(리스트/버퍼)에 기록</strong>했다가 나중에 <strong>큐에 제출</strong>하는
+      2단계로 나눠, 여러 스레드가 동시에 목록을 채우게 합니다.
+    </p>
+
+    <h3>D3D11 — 부르는 즉시 실행되는 즉시 컨텍스트</h3>
+    <div class="code">
+      <div class="code-head"><span>render_immediate.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// ctx는 ID3D11DeviceContext (즉시 컨텍스트)
+float clear[4] = { 0.1f, 0.1f, 0.12f, 1.0f };
+ctx-&gt;ClearRenderTargetView(rtv.Get(), clear); // 이 줄에서 바로 큐잉
+ctx-&gt;ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+ctx-&gt;OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());
+ctx-&gt;RSSetViewports(1, &amp;viewport);
+ctx-&gt;Draw(3, 0);                                // 그리기 명령
+swapChain-&gt;Present(1, 0);                        // 화면에 내보내기
+</code></pre>
+    </div>
+    <p>
+      각 <code>ctx-&gt;...</code> 호출은 <strong>부르는 순간</strong> 내부 명령 스트림에 들어갑니다. 개발자 눈에는
+      "즉시 실행"처럼 보이고, 스레드 하나가 순서대로 부르는 단순한 모델입니다. 편하지만, 여러 CPU 코어로 명령
+      기록을 <strong>나눌 수 없다</strong>는 한계가 있습니다.
+    </p>
+
+    <h3>D3D12 — 기록(Command List)과 제출(Queue)을 분리</h3>
+    <div class="code">
+      <div class="code-head"><span>render_d3d12.cpp (개념 스케치)</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 1) 기록 시작 — 할당자를 리셋하고 커맨드 리스트를 연다
+cmdAlloc-&gt;Reset();
+cmdList-&gt;Reset(cmdAlloc.Get(), pipeline.Get());
+
+// 2) 명령을 "기록"한다 (아직 GPU는 아무것도 안 함)
+cmdList-&gt;ClearRenderTargetView(rtvHandle, clear, 0, nullptr);
+cmdList-&gt;OMSetRenderTargets(1, &amp;rtvHandle, FALSE, &amp;dsvHandle);
+cmdList-&gt;RSSetViewports(1, &amp;viewport);
+cmdList-&gt;SetPipelineState(pipeline.Get());
+cmdList-&gt;DrawInstanced(3, 1, 0, 0);
+cmdList-&gt;Close();                                // 기록 종료
+
+// 3) 큐에 "제출"해야 비로소 GPU가 실행한다
+ID3D12CommandList* lists[] = { cmdList.Get() };
+cmdQueue-&gt;ExecuteCommandLists(1, lists);
+swapChain-&gt;Present(1, 0);
+</code></pre>
+    </div>
+    <p>
+      <strong>핵심 차이는 2단계 분리입니다.</strong> D3D11에서 <code>ctx-&gt;Draw</code> 한 줄이 하던 일이, D3D12에서는
+      "<code>cmdList</code>에 <strong>기록</strong> → <code>Close</code> → <code>cmdQueue-&gt;ExecuteCommandLists</code>로
+      <strong>제출</strong>"의 세 단계가 됩니다. <code>Reset</code>은 명령을 담을 버퍼(할당자)를 비우는 것이고,
+      <code>Close</code>는 "이 목록은 다 채웠다"는 봉인입니다. 제출 전까지 GPU는 놀고 있습니다.
+    </p>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      이 분리의 진짜 목적은 <strong>멀티스레드 기록</strong>입니다. 스레드 A가 그림자맵 커맨드 리스트를, 스레드 B가
+      메인 씬 리스트를, 스레드 C가 UI 리스트를 <em>동시에</em> 채운 뒤, 메인 스레드가 큐에 한꺼번에 제출할 수
+      있습니다. 드로우콜이 수천 개인 씬에서 CPU 병목을 코어 수만큼 나눠 없앨 수 있는 것이 D3D12/Vulkan의 최대
+      성능 이점입니다. D3D11에도 "디퍼드 컨텍스트"가 있지만 실효 이득은 제한적이었습니다.
+    </div>
+    <table class="impl">
+      <thead><tr><th>API</th><th>기록</th><th>제출</th></tr></thead>
+      <tbody>
+        <tr><td><strong>D3D11</strong></td><td colspan="2">즉시 컨텍스트 — 부르는 즉시 (분리 없음)</td></tr>
+        <tr><td><strong>D3D12</strong></td><td><code>ID3D12GraphicsCommandList</code></td><td><code>ID3D12CommandQueue::ExecuteCommandLists</code></td></tr>
+        <tr><td><strong>Vulkan</strong></td><td><code>VkCommandBuffer</code></td><td><code>vkQueueSubmit</code></td></tr>
+        <tr><td><strong>OpenGL</strong></td><td colspan="2">암묵적 전역 상태 머신 (분리 없음)</td></tr>
+        <tr><td><strong>Metal</strong></td><td><code>MTLCommandBuffer</code> + Encoder</td><td><code>commit</code></td></tr>
+        <tr><td><strong>WebGPU</strong></td><td><code>GPUCommandEncoder</code></td><td><code>queue.submit()</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="row-descriptor">
+    <h2>5. 4행 — Constant Buffer / SRV → Descriptor(디스크립터)</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> "셰이더가 어떤 리소스를 어떤 슬롯에서 읽는가"의 연결. <strong>왜 필요한가:</strong>
+      셰이더 안의 <code>cbuffer</code>나 <code>Texture2D</code>는 이름표일 뿐이고, 실제 GPU 메모리와 연결해 줘야
+      합니다. D3D11은 이 연결을 <code>*Set*</code> 한 줄로 하지만, D3D12/Vulkan은 "디스크립터"라는 명시적
+      기술자를 힙에 만들어 바인딩합니다.
+    </p>
+
+    <h3>D3D11 — cbuffer와 텍스처를 슬롯에 직접 꽂기</h3>
+    <div class="code">
+      <div class="code-head"><span>bind_resources.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 상수 버퍼: 행벡터 규약이므로 CPU에서 transpose 후 업로드
+struct CBData { DirectX::XMFLOAT4X4 mvp; };
+CBData cb;
+DirectX::XMMATRIX m = world * view * proj;          // 행벡터: v' = v*(W*V*P)
+DirectX::XMStoreFloat4x4(&amp;cb.mvp, XMMatrixTranspose(m)); // cbuffer는 열우선 → 전치
+
+ctx-&gt;UpdateSubresource(cbuffer.Get(), 0, nullptr, &amp;cb, 0, 0);
+
+// 슬롯 b0에 상수 버퍼, 슬롯 t0에 텍스처(SRV), s0에 샘플러
+ctx-&gt;VSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());  // register(b0)
+ctx-&gt;PSSetShaderResources (0, 1, srv.GetAddressOf());     // register(t0)
+ctx-&gt;PSSetSamplers        (0, 1, samp.GetAddressOf());    // register(s0)
+</code></pre>
+    </div>
+    <p>
+      <strong>슬롯 번호가 곧 register.</strong> <code>VSSetConstantBuffers(0, ...)</code>의 첫 인자 <code>0</code>은
+      HLSL의 <code>register(b0)</code>과 짝입니다. 마찬가지로 <code>PSSetShaderResources(0, ...)</code>는
+      <code>register(t0)</code>, <code>PSSetSamplers(0, ...)</code>는 <code>register(s0)</code>. D3D11은 이 매핑을
+      <strong>슬롯 번호</strong>만으로 처리하는 아주 단순한 모델입니다.
+    </p>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      <code>XMMatrixTranspose</code>가 왜 필요한지 반드시 짚고 가세요. 우리 규약은 <strong>행벡터
+      <code>v' = v · M</code></strong>이고 DirectXMath도 행벡터 기반이지만, HLSL <code>cbuffer</code>의 <code>float4x4</code>
+      기본 저장은 <strong>열 우선(column-major)</strong>입니다. 그래서 CPU의 행 우선 행렬을 그대로 올리면 셰이더에서
+      뒤집혀 읽힙니다. <code>XMMatrixTranspose</code>로 한 번 전치해 올리고, 셰이더에서는 <code>mul(v, mvp)</code>
+      (행벡터 × 행렬)로 곱하면 규약이 일관됩니다. 이 전치를 빼먹으면 <strong>모델이 뒤틀리거나 화면에서 사라집니다.</strong>
+    </div>
+
+    <h3>대응 HLSL — register 슬롯</h3>
+    <div class="code">
+      <div class="code-head"><span>shade.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">cbuffer Transform : register(b0) { float4x4 mvp; }; // ← 슬롯 b0
+Texture2D    tex  : register(t0);                    // ← 슬롯 t0
+SamplerState samp : register(s0);                    // ← 슬롯 s0
+
+float4 PSMain(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    return tex.Sample(samp, uv); // V축 위→아래 규약: uv.y=0이 텍스처 상단
+}
+</code></pre>
+    </div>
+    <p>
+      <code>register(b0)</code>·<code>(t0)</code>·<code>(s0)</code>이 각각 C++의 슬롯 <code>0</code>과 일대일로
+      묶입니다. 그리고 규약대로 텍스처 V축은 <strong>위→아래</strong>이므로 <code>uv.y = 0</code>이 이미지의 맨 위입니다
+      (OpenGL은 아래→위라 정반대 — 포팅할 때 뒤집힌 텍스처의 단골 원인).
+    </p>
+
+    <h3>D3D12 — Root Signature + Descriptor Heap</h3>
+    <div class="code">
+      <div class="code-head"><span>descriptors_d3d12.cpp (개념 스케치)</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// (A) 무엇이 어느 슬롯에 오는지 "규약(Root Signature)"을 먼저 선언
+//     ≈ D3D11의 register 배치를 명시적 객체로 만든 것
+D3D12_ROOT_PARAMETER params[2] = {};
+params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;      // b0 자리
+params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; // t0(텍스처)
+// ... 시그니처 직렬화 후 CreateRootSignature(...)
+
+// (B) 디스크립터 힙 — 리소스 "핸들"을 담는 배열
+D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+hd.NumDescriptors = 8;
+hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+device-&gt;CreateDescriptorHeap(&amp;hd, IID_PPV_ARGS(&amp;heap));
+
+// (C) 힙 안에 SRV를 "새겨 넣기" — D3D11이 자동으로 하던 일
+device-&gt;CreateShaderResourceView(texture.Get(), &amp;srvDesc, heap-&gt;GetCPUDescriptorHandleForHeapStart());
+
+// (D) 드로우 때 바인딩
+cmdList-&gt;SetGraphicsRootSignature(rootSig.Get());
+cmdList-&gt;SetDescriptorHeaps(1, heap.GetAddressOf());
+cmdList-&gt;SetGraphicsRootConstantBufferView(0, cbuffer-&gt;GetGPUVirtualAddress()); // b0
+cmdList-&gt;SetGraphicsRootDescriptorTable(1, heap-&gt;GetGPUDescriptorHandleForHeapStart()); // t0
+</code></pre>
+    </div>
+    <p>
+      D3D11에서 <code>PSSetShaderResources(0, 1, srv)</code> <strong>한 줄</strong>이 하던 일이 D3D12에서는 (A)~(D)
+      네 단계로 펼쳐집니다. <strong>Root Signature</strong>는 "어떤 슬롯에 무엇이 온다"는 계약(D3D11의 register
+      배치를 객체로 만든 것), <strong>Descriptor Heap</strong>은 리소스 핸들을 담는 GPU 가시 배열,
+      <strong>CreateShaderResourceView</strong>는 D3D11이 내부적으로 하던 SRV 생성을 힙의 특정 칸에 직접 새기는
+      일입니다. 결국 <em>같은 매핑</em>을 하지만, D3D11이 숨겨 두던 각 단계를 전부 손으로 조립하는 것입니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>API</th><th>바인딩 계약</th><th>실제 바인딩 단위</th></tr></thead>
+      <tbody>
+        <tr><td><strong>D3D11</strong></td><td>register 슬롯 번호(암묵)</td><td><code>*Set*</code> 한 줄</td></tr>
+        <tr><td><strong>D3D12</strong></td><td>Root Signature</td><td>Descriptor Heap + Table</td></tr>
+        <tr><td><strong>Vulkan</strong></td><td><code>VkPipelineLayout</code></td><td><code>VkDescriptorSet</code></td></tr>
+        <tr><td><strong>OpenGL</strong></td><td>uniform location(암묵)</td><td>UBO / <code>glUniform*</code></td></tr>
+        <tr><td><strong>Metal</strong></td><td>함수 인자 인덱스</td><td>Argument Buffer / <code>setBuffer</code></td></tr>
+        <tr><td><strong>WebGPU</strong></td><td>Bind Group Layout</td><td>Bind Group</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="row-sync">
+    <h2>6. 5행 — 암묵적 동기화 → Barrier + Fence</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> "GPU가 서로 밟지 않게 하는 순서 보장". <strong>왜 필요한가:</strong> GPU는
+      명령을 병렬·비동기로 실행합니다. 방금 렌더 타깃으로 쓴 텍스처를 곧바로 셰이더 입력으로 읽으면, 쓰기가 끝나기
+      전에 읽어 <strong>깨진 결과</strong>가 나올 수 있습니다. 이 위험(hazard)을 막는 것이 배리어와 펜스입니다.
+      D3D11은 이걸 전부 런타임이 자동으로 해 주지만, D3D12/Vulkan은 개발자가 명시합니다.
+    </p>
+
+    <h3>D3D11 — 아무것도 안 해도 된다</h3>
+    <div class="code">
+      <div class="code-head"><span>sync_d3d11.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 1) 오프스크린 RT에 그린다
+ctx-&gt;OMSetRenderTargets(1, offscreenRTV.GetAddressOf(), nullptr);
+ctx-&gt;Draw(/* 씬 */ 36, 0);
+
+// 2) 방금 그린 텍스처를 곧바로 셰이더에서 읽는다 — 배리어? 펜스? 필요 없음
+ctx-&gt;OMSetRenderTargets(1, backRTV.GetAddressOf(), nullptr);
+ctx-&gt;PSSetShaderResources(0, 1, offscreenSRV.GetAddressOf()); // 런타임이 알아서 순서 보장
+ctx-&gt;Draw(3, 0);
+</code></pre>
+    </div>
+    <p>
+      D3D11 런타임은 "이 텍스처가 방금 렌더 타깃이었고 이제 셰이더 입력이 된다"는 <strong>상태 전이를 스스로 감지</strong>해
+      필요한 동기화를 삽입합니다. 개발자는 순서만 맞게 쓰면 되고 배리어 코드가 전혀 없습니다. 편하지만, 런타임이
+      보수적으로 동기화를 넣어 <strong>불필요한 대기</strong>가 생길 수 있다는 대가가 있습니다.
+    </p>
+
+    <h3>D3D12 — 상태 전이를 손으로 선언(Barrier), CPU-GPU 대기를 손으로(Fence)</h3>
+    <div class="code">
+      <div class="code-head"><span>sync_d3d12.cpp (개념 스케치)</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// (A) 리소스 배리어: "RENDER_TARGET 상태 → PIXEL_SHADER_RESOURCE 상태"로 전이 선언
+D3D12_RESOURCE_BARRIER b = {};
+b.Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+b.Transition.pResource   = offscreenTex.Get();
+b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;    // 방금까지 RT였다
+b.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; // 이제 읽을 것
+b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+cmdList-&gt;ResourceBarrier(1, &amp;b);   // ← D3D11이 자동으로 하던 딱 이 줄
+
+// (B) 펜스: 이 프레임의 GPU 작업이 끝날 때까지 CPU가 기다리게 하기
+const UINT64 target = ++fenceValue;
+cmdQueue-&gt;Signal(fence.Get(), target);     // GPU가 여기 도달하면 fence를 target으로 올림
+if (fence-&gt;GetCompletedValue() &lt; target) { // 아직 안 끝났으면
+    fence-&gt;SetEventOnCompletion(target, fenceEvent);
+    WaitForSingleObject(fenceEvent, INFINITE); // GPU가 따라올 때까지 CPU 대기
+}
+</code></pre>
+    </div>
+    <p>
+      <strong>(A) 배리어 = 상태 전이 선언.</strong> <code>StateBefore</code>와 <code>StateAfter</code>를 명시해
+      "이 리소스는 방금까지 렌더 타깃(<code>RENDER_TARGET</code>)이었고 이제 픽셀 셰이더가 읽는 리소스
+      (<code>PIXEL_SHADER_RESOURCE</code>)가 된다"고 GPU에게 알립니다. GPU는 이 지점에서 앞선 쓰기가 끝나기를
+      보장한 뒤 다음 읽기를 진행합니다. D3D11 런타임이 자동으로 넣어 주던 것이 바로 이 한 줄입니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>StateBefore</code>를 틀리게 쓰면 (예: 실제로는 RT였는데 COMMON이라고 적으면) 디버그 레이어가 경고를
+      쏟아내고, 릴리즈에서는 <strong>드라이버·GPU마다 다른 미정의 동작</strong>이 됩니다. 화면이 어떤 GPU에서는
+      멀쩡하고 다른 GPU에서는 깨진다면 배리어 상태 불일치를 가장 먼저 의심하세요. D3D12/Vulkan에서 초보가 가장
+      많이 삽질하는 지점입니다.
+    </div>
+    <p>
+      <strong>(B) 펜스 = CPU-GPU 시간 맞추기.</strong> <code>Signal(fence, target)</code>은 "GPU가 지금까지의 명령을
+      다 처리하면 fence 값을 <code>target</code>으로 올려라"는 예약입니다. CPU는 <code>GetCompletedValue()</code>로
+      현재 값을 확인하고, 아직 목표에 못 미치면 이벤트로 잠들었다가 GPU가 따라오면 깨어납니다. 이 장치가 없으면
+      CPU가 GPU보다 너무 앞서가 <strong>아직 GPU가 쓰는 중인 버퍼를 CPU가 덮어써</strong> 화면이 찢어집니다.
+      D3D11은 이 프레임 페이싱도 런타임이 대신 해 줬습니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>API</th><th>GPU 내부 순서(Barrier)</th><th>CPU-GPU 동기(Fence)</th></tr></thead>
+      <tbody>
+        <tr><td><strong>D3D11</strong></td><td>자동</td><td>자동</td></tr>
+        <tr><td><strong>D3D12</strong></td><td><code>ResourceBarrier</code></td><td><code>ID3D12Fence</code></td></tr>
+        <tr><td><strong>Vulkan</strong></td><td><code>vkCmdPipelineBarrier</code></td><td><code>VkFence</code>/Semaphore</td></tr>
+        <tr><td><strong>OpenGL</strong></td><td>자동(드라이버)</td><td><code>glFenceSync</code>(선택)</td></tr>
+        <tr><td><strong>Metal</strong></td><td><code>MTLFence</code>/자동 hazard</td><td>completion handler</td></tr>
+        <tr><td><strong>WebGPU</strong></td><td>자동(런타임이 배리어 삽입)</td><td><code>onSubmittedWorkDone</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="row-present">
+    <h2>7. 6행 — Swap Chain Present</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> "다 그린 뒷면(back buffer)을 화면에 내보내기". <strong>왜 필요한가:</strong>
+      화면에 직접 그리면 그리는 도중이 보여 깜빡입니다. 그래서 <strong>보이지 않는 뒷버퍼</strong>에 완성한 뒤,
+      한 번에 앞으로 교체(swap)합니다. 이 교체가 Present이고, 개념은 모든 API에서 거의 동일합니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>present_d3d11.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// swapChain은 IDXGISwapChain
+swapChain-&gt;Present(1, 0);
+//                 ^  ^
+//                 |  └ Flags (0 = 일반)
+//                 └ SyncInterval: 1 = VSync 켬(수직동기), 0 = 끔(테어링 허용)
+</code></pre>
+    </div>
+    <p>
+      <strong>첫 인자 <code>SyncInterval</code>이 곧 VSync.</strong> <code>1</code>은 모니터 주사율에 맞춰 교체해
+      화면 찢김(테어링)을 없애지만 프레임레이트가 주사율(예: 60Hz)에 묶입니다. <code>0</code>은 즉시 교체해 최고
+      FPS를 뽑지만 테어링이 생길 수 있습니다. 이 한 숫자의 의미는 다른 API에서도 이름만 바뀌어 그대로 있습니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>API</th><th>Present 호출</th><th>VSync 제어</th></tr></thead>
+      <tbody>
+        <tr><td><strong>D3D11 / D3D12</strong></td><td><code>swapChain-&gt;Present(sync, 0)</code></td><td>첫 인자 SyncInterval</td></tr>
+        <tr><td><strong>Vulkan</strong></td><td><code>vkQueuePresentKHR</code></td><td>Present Mode(FIFO/MAILBOX/IMMEDIATE)</td></tr>
+        <tr><td><strong>OpenGL</strong></td><td><code>glfwSwapBuffers</code></td><td><code>glfwSwapInterval(1)</code></td></tr>
+        <tr><td><strong>Metal</strong></td><td><code>presentDrawable</code></td><td>Display Link / 자동</td></tr>
+        <tr><td><strong>WebGPU</strong></td><td>자동(프레임 끝에)</td><td>브라우저 vsync에 맞춤</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <span class="tag">핵심</span>
+      Present는 이 표에서 유일하게 <strong>API 세대와 무관하게 개념이 거의 같은</strong> 항목입니다. 나머지 다섯 행이
+      "D3D11이 숨겨 주던 일을 저수준에서 손으로 한다"는 이야기였다면, 이 행은 "그 일은 원래부터 명시적이었다"는
+      확인입니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="learning-path">
+    <h2>8. 학습 경로 — D3D11로 개념, 그다음 목적별로</h2>
+    <p>
+      여섯 개 행을 다 훑었으니 결론이 자연스럽게 나옵니다. <strong>개념은 D3D11에서 익히고, 목적에 맞는 API로
+      옮겨가는 것</strong>이 가장 빠릅니다. MVP·래스터화·깊이·조명·텍스처·오프스크린 렌더 타깃 같은 렌더링의
+      <em>본질</em>은 어느 API에서나 같고, 위에서 봤듯 각 개념이 이름만 바뀌어 그대로 이어집니다. D3D11이 그 개념들을
+      비교적 적은 코드로, 그러면서도 "명시적 리소스 생성"이라는 현대적 감각과 함께 실험하게 해 줍니다.
+    </p>
+    <table class="impl">
+      <thead><tr><th>목표</th><th>추천 API</th><th>이유</th></tr></thead>
+      <tbody>
+        <tr><td>Windows 게임 · AAA · 최신 기능</td><td><strong>D3D12</strong></td><td>윈도우·Xbox 1급 지원, 풍부한 툴(PIX), 콘솔과의 접점. D3D11 개념이 거의 그대로 이어짐.</td></tr>
+        <tr><td>크로스플랫폼 고성능</td><td><strong>Vulkan</strong></td><td>가장 낮은 오버헤드·가장 명시적. 데스크톱·모바일·리눅스 전부 커버하지만 진입 장벽이 가장 높음.</td></tr>
+        <tr><td>웹 / 크로스플랫폼</td><td><strong>WebGPU</strong></td><td>저수준 개념(파이프라인·바인드그룹)을 현대적·안전한 형태로 도입. Vulkan보다 훨씬 완만.</td></tr>
+        <tr><td>Apple 생태계(macOS/iOS)</td><td><strong>Metal</strong></td><td>Apple 플랫폼의 유일한 1급 API. Objective-C/Swift와 밀착, 툴링 우수.</td></tr>
+        <tr><td>크로스플랫폼 · 학습</td><td><strong>OpenGL</strong></td><td>가장 적은 코드로 렌더링 본질만 실험. 단 D3D11보다 더 암묵적이라 대규모 앱에선 디버깅이 어렵다.</td></tr>
+      </tbody>
+    </table>
+    <div class="callout perf">
+      <span class="tag">TIP</span>
+      곧장 D3D12/Vulkan으로 뛰어들다 지치는 경우가 많습니다. 권장 순서는 <strong>D3D11(개념 + 명시적 리소스)
+      → D3D12/Vulkan(완전한 명시성) 또는 WebGPU(명시성의 완만한 도입)</strong>입니다. 이 페이지에서 본
+      "상수 버퍼(4행)", "상태 객체·PSO(2행)", "입력 레이아웃(1행)", "SRV/RTV/DSV(4·5행)" 같은 개념을 D3D11에서
+      미리 체득하면, 이후 API 전환의 인지 부하가 크게 줄어듭니다.
+    </div>
+    <p>
+      한 문장으로: <strong>D3D11은 "무엇을 그리는가"에 집중하게 해 주면서도 리소스를 명시적으로 만드는 감각을
+      심어 주고, D3D12·Vulkan은 "언제 어떤 메모리에 어떻게 동기화하며 그리는가"까지 당신에게 맡깁니다.</strong>
+      전자를 확실히 이해한 사람만이 후자의 명시성을 감당할 수 있습니다. 이 페이지의 여섯 개 매핑이 그 다리가 되기를
+      바랍니다.
+    </p>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./05-resources.html">← 리소스 관리와 상태 팁</a>
+    <a href="./06-advanced.html">6장. 고급 렌더링 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 조명과 그림자 (퐁 셰이딩) — C++/DirectX 11</title>
+<meta name="description" content="퐁/블린-퐁 조명 모델을 HLSL 셰이더와 C++ 상수 버퍼로 한 줄 한 줄 구현합니다. ambient·diffuse·specular의 수식과 기하 직관, 법선 행렬(transpose(inverse(model)))의 이유, cbuffer 16바이트 패킹, DirectXMath 대응까지 성분 하나까지 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./03-opengl3d.html">3장. 3D 그래픽스</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">조명과 그림자 (퐁 셰이딩)</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 3</span>
+  <h1>조명과 그림자 (퐁 셰이딩) — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    3D 물체가 "입체로 보이는" 이유는 표면마다 밝기가 다르기 때문입니다. 그 밝기를 계산하는 가장 고전적인 방법이
+    <strong>퐁(Phong) 조명 모델</strong>입니다. 이 페이지는 퐁의 세 성분 —
+    <strong>ambient(주변광)</strong>, <strong>diffuse(난반사)</strong>, <strong>specular(정반사)</strong> — 을
+    HLSL 픽셀 셰이더에서 한 줄씩 만들고, 각 줄의 <strong>벡터 연산이 기하학적으로 무엇을 뜻하는지</strong>를
+    화살표 그림글로 풀어냅니다. 또한 초보자가 가장 많이 틀리는 <strong>법선 변환(법선 행렬)</strong>과
+    <strong>cbuffer 16바이트 패킹</strong>을 성분 하나까지 짚고, C++/DirectXMath로 상수 버퍼를 채워 GPU에 올리는
+    과정을 대응시킵니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 시리즈는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    <strong>행 우선 저장</strong>, <strong>왼손 좌표계</strong>, 클립 공간 z 범위 <strong>[0, 1]</strong>, 텍스처 V축 위→아래.
+    DirectXMath도 행벡터라서 cbuffer로 올리기 전에 <strong>전치(transpose)</strong>가 필요합니다(뒤에서 설명).
+    조명 계산 자체는 좌표계 손잡이(handedness)와 무관한 순수 벡터 연산이지만, <strong>법선의 방향</strong>과
+    <strong>앞면/뒷면</strong> 판정은 규약에 따라 달라지니 다른 자료의 부호를 그대로 옮기지 마세요.
+  </div>
+
+  <div class="callout">
+    <span class="tag">전제</span>
+    이 페이지는 <a href="./03-opengl3d.html">3장 3D 그래픽스</a>의 MVP 변환·상수 버퍼·정점 레이아웃을 이미 세팅했다고
+    가정합니다. 여기서 새로 추가하는 것은 <strong>조명용 상수 버퍼(b1)</strong>와, 정점 셰이더가 픽셀 셰이더로
+    넘겨주는 <strong>월드 공간 위치·법선</strong>, 그리고 픽셀 셰이더의 <strong>퐁 계산</strong>입니다.
+  </div>
+
+  <ol class="steps">
+    <li>정점 셰이더에서 <strong>월드 공간 위치</strong>와 <strong>법선 행렬로 변환한 법선</strong>을 픽셀 셰이더로 넘긴다.</li>
+    <li>픽셀 셰이더에서 <strong>ambient + diffuse + specular</strong>를 합산해 최종 색을 만든다.</li>
+    <li>C++에서 <strong>광원 위치/색, 카메라 위치, 물체 색</strong>을 상수 버퍼로 채워 셰이더에 바인딩한다.</li>
+  </ol>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:44px;">먼저: 퐁 모델의 세 성분, 한 문장씩 직관</h2>
+  <p>
+    코드를 보기 전에, 퐁이 왜 이 세 가지를 더하는지 그림으로 잡고 갑니다. 현실의 빛은 무한히 튕기고 흩어지지만,
+    실시간 렌더링은 그걸 그대로 계산할 수 없어서 <strong>세 개의 근사</strong>로 나눕니다.
+  </p>
+  <h3>ambient(주변광) — "빛이 아예 안 닿는 곳도 새까맣진 않다"</h3>
+  <p>
+    현실에서는 빛이 벽·바닥·천장에 튕겨 그늘진 곳도 어느 정도 밝습니다. 이 튕김을 일일이 계산하는 대신,
+    <strong>모든 픽셀에 최소 밝기를 일정하게 더하는</strong> 아주 거친 근사가 ambient입니다. 방향도 각도도 없이
+    그냥 상수를 더할 뿐이라, 물체 전체가 살짝 들뜬 바탕색을 갖게 됩니다. 없으면 빛을 등진 면이 완전히
+    새까맣게(RGB 0,0,0) 나와 형체를 알 수 없습니다.
+  </p>
+  <h3>diffuse(난반사) — "표면이 빛을 정면으로 받을수록 밝다"</h3>
+  <p>
+    거친(매트한) 표면은 들어온 빛을 사방으로 고르게 흩뿌립니다. 그래서 보는 방향과 무관하게, 오직
+    <strong>표면이 빛을 얼마나 정면으로 받는가</strong>만으로 밝기가 정해집니다. 이 "정면으로 받는 정도"가 바로
+    표면 법선 <code>N</code>과 빛 방향 <code>L</code>의 <strong>내적</strong> <code>dot(N, L)</code>입니다. 정면(N과 L이 같은
+    방향)이면 1, 90°로 스치면 0, 등지면 음수(→ 0으로 잘라냄)가 됩니다. 이게 물체의 "명암"을 만드는 핵심입니다.
+  </p>
+  <h3>specular(정반사) — "매끈한 표면의 반짝이는 하이라이트"</h3>
+  <p>
+    금속·플라스틱·물처럼 매끈한 표면은 빛을 거울처럼 한 방향으로 튕겨냅니다. 그래서 <strong>내 눈이 그 반사
+    방향에 정확히 놓였을 때만</strong> 강한 하이라이트가 보입니다. diffuse와 달리 specular는 <strong>보는
+    방향(V)에 의존</strong>합니다. 반사가 얼마나 눈 쪽을 향하는지를 각도로 재고, 거기에 큰 지수(광택,
+    shininess)를 걸어 "정확히 맞을 때만 확 밝아지는" 좁고 날카로운 점을 만듭니다.
+  </p>
+  <p>
+    최종 색은 <code>(ambient + diffuse + specular) * objectColor</code>입니다. 세 밝기 성분을 더한 뒤 물체 고유색을
+    곱하는 구조인데, 이 곱셈이 왜 이렇게 되는지도 뒤에서 성분별로 뜯어봅니다.
+  </p>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:44px;">1) HLSL 셰이더 — 퐁 라이팅 전체</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> GPU에서 픽셀마다 색을 계산하는 정점/픽셀 셰이더 한 쌍입니다.
+    정점 셰이더는 조명 계산에 필요한 재료(월드 위치·법선)를 준비해 넘기고, 픽셀 셰이더가 실제 퐁 공식을 돌립니다.
+    <strong>왜 필요한가:</strong> 조명은 픽셀 단위로 부드럽게 변해야 자연스럽기 때문에, 정점에서 미리 계산해
+    보간(補間)하기보다 <strong>픽셀마다 다시 계산</strong>하는 것이 훨씬 매끈합니다(이를 픽셀 단위 라이팅이라 부릅니다).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>셰이더 — 퐁 라이팅</span><span class="lang">HLSL</span></div>
+    <pre><code class="language-hlsl">// ── 상수 버퍼 (b0: 변환, b1: 조명) ──
+cbuffer Transforms : register(b0)
+{
+    float4x4 mvp;          // model*view*proj (transpose 해 넘김)
+    float4x4 model;        // 월드 변환
+    float4x4 normalMatrix; // = transpose(inverse(model))의 3x3 (float4x4로 패딩)
+};
+
+cbuffer Lighting : register(b1)
+{
+    float3 lightPos;    float _pad0;
+    float3 lightColor;  float _pad1;
+    float3 viewPos;     float _pad2;   // 카메라 위치
+    float3 objectColor; float _pad3;
+};
+
+// ── 정점 셰이더 (VSMain) ──
+struct VSIn  { float3 pos : POSITION; float3 normal : NORMAL; };
+struct VSOut {
+    float4 pos     : SV_Position;
+    float3 fragPos : POSITION0;   // 월드 공간 위치
+    float3 normal  : NORMAL0;     // 월드 공간 법선
+};
+
+VSOut VSMain(VSIn input)
+{
+    VSOut o;
+    float4 world = mul(model, float4(input.pos, 1.0));
+    o.fragPos = world.xyz;
+    // 법선은 normalMatrix의 3x3 부분으로 변환
+    o.normal  = normalize(mul((float3x3)normalMatrix, input.normal));
+    o.pos     = mul(mvp, float4(input.pos, 1.0));
+    return o;
+}
+
+// ── 픽셀 셰이더 (PSMain) ──
+float4 PSMain(VSOut input) : SV_Target
+{
+    // 1) ambient — 항상 존재하는 최소 밝기
+    float3 ambient = 0.12 * lightColor;
+
+    // 2) diffuse — 표면과 빛 방향의 각도
+    float3 N = normalize(input.normal);
+    float3 L = normalize(lightPos - input.fragPos);
+    float diff = max(dot(N, L), 0.0);
+    float3 diffuse = diff * lightColor;
+
+    // 3) specular — 하프웨이 벡터 방식(블린-퐁)
+    float3 V = normalize(viewPos - input.fragPos);
+    float3 H = normalize(L + V);
+    float spec = pow(max(dot(N, H), 0.0), 64.0);   // 64 = 광택
+    float3 specular = 0.5 * spec * lightColor;
+
+    // (전통 퐁이라면 reflect 사용:)
+    // float3 R = reflect(-L, N);
+    // float spec = pow(max(dot(V, R), 0.0), 32.0);
+
+    float3 result = (ambient + diffuse + specular) * objectColor;
+    return float4(result, 1.0);
+}</code></pre>
+  </div>
+
+  <!-- ── 상수 버퍼 해부 ── -->
+  <h3 style="margin-top:34px;">상수 버퍼 <code>b0</code>·<code>b1</code> — 셰이더가 매 프레임 받는 상수들</h3>
+  <p>
+    <code>cbuffer</code>(constant buffer, 상수 버퍼)는 CPU가 매 프레임 계산해 GPU에 <strong>통째로 올려주는 작은
+    상수 묶음</strong>입니다. 셰이더는 이 값들을 읽기만 합니다. <code>register(b0)</code>·<code>register(b1)</code>의
+    <code>b</code>는 buffer의 b, 숫자는 <strong>슬롯 번호</strong>입니다. 나중에 C++에서
+    <code>PSSetConstantBuffers(1, ...)</code>로 올린 버퍼가 셰이더의 <code>register(b1)</code>과 짝이 됩니다 —
+    <strong>이 번호가 어긋나면 셰이더가 엉뚱한 값을 읽습니다.</strong>
+  </p>
+  <ul>
+    <li><code>float4x4 mvp</code> — model·view·proj를 하나로 합친 변환 행렬. 정점을 최종 클립 공간으로 보냅니다.</li>
+    <li><code>float4x4 model</code> — 정점을 로컬 공간에서 <strong>월드 공간</strong>으로 옮기는 변환. 조명은 월드 공간에서 계산하므로 필요합니다.</li>
+    <li><code>float4x4 normalMatrix</code> — 법선 전용 변환 행렬. 실제로는 3×3이지만 cbuffer 정렬을 위해 4×4로 패딩해 넣습니다(뒤에서 상세히).</li>
+  </ul>
+  <p>
+    조명 버퍼 <code>b1</code>은 <code>float3</code> 네 개(광원 위치·광원 색·카메라 위치·물체 색)와, 그 뒤마다 붙은
+    <code>float _pad0..3</code>로 이뤄집니다. 이 <code>_pad</code>는 <strong>사람이 읽으라고 쓴 값이 아니라, 메모리
+    레이아웃을 맞추기 위한 빈칸</strong>입니다. 왜 이 빈칸이 필요한지는 아래 함정 callout에서 성분 단위로 설명합니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    HLSL <code>cbuffer</code>는 <strong>16바이트(float 4개, 즉 float4 하나) 경계</strong>로 값을 배치합니다. 규칙은
+    "<strong>하나의 원소가 16바이트 경계를 넘어 걸치면 안 된다</strong>"입니다. <code>float3</code>는 12바이트라,
+    <code>float3</code> 두 개를 연속으로 두면 두 번째가 12~24바이트에 걸쳐 경계(16)를 넘어버립니다. 그러면
+    컴파일러가 두 번째 <code>float3</code>를 다음 16바이트 칸으로 밀어내고, 그 사이 4바이트가 <strong>보이지 않는
+    패딩</strong>으로 생깁니다. CPU 쪽 구조체는 그런 규칙이 없으니, 명시적 <code>float _pad</code>로 그 4바이트를
+    직접 채워 넣어야 CPU·GPU 레이아웃이 정확히 일치합니다. 안 맞추면 <code>lightColor</code> 자리에
+    <code>lightPos</code>의 일부가 섞여 들어오는 등 조명이 미묘하게(혹은 완전히) 깨집니다.
+  </div>
+
+  <!-- ── 정점 셰이더 해부 ── -->
+  <h3 style="margin-top:34px;">정점 셰이더 <code>VSMain</code> — 조명 재료를 준비해 넘기기</h3>
+  <p>
+    <code>VSIn</code>은 정점 버퍼에서 들어오는 입력입니다. <code>float3 pos : POSITION</code>과
+    <code>float3 normal : NORMAL</code> — 뒤의 <code>: POSITION</code>, <code>: NORMAL</code>은
+    <strong>시맨틱(semantic)</strong>이라 부르는 이름표로, "이 필드가 정점 레이아웃의 어느 슬롯과 연결되는가"를
+    GPU에 알려줍니다. C++의 <code>D3D11_INPUT_ELEMENT_DESC</code>에서 지정한 <code>"POSITION"</code>,
+    <code>"NORMAL"</code> 문자열과 <strong>철자까지 정확히 일치</strong>해야 연결됩니다.
+  </p>
+  <p>
+    <code>VSOut</code>은 픽셀 셰이더로 넘어갈 출력입니다. <code>float4 pos : SV_Position</code>의
+    <strong><code>SV_</code></strong>는 System Value의 약자로, 이 필드가 <strong>래스터라이저가 화면 좌표로 쓸
+    최종 위치</strong>라는 특별한 의미를 갖습니다(반드시 있어야 합니다). 나머지 <code>fragPos</code>,
+    <code>normal</code>은 우리가 조명 계산에 쓰려고 얹어 보내는 값이고, <code>: POSITION0</code>,
+    <code>: NORMAL0</code>처럼 뒤에 번호를 붙여 서로 구분합니다.
+  </p>
+  <p>이제 함수 본문을 한 줄씩 봅니다.</p>
+
+  <h4 style="margin-top:24px;"><code>float4 world = mul(model, float4(input.pos, 1.0));</code></h4>
+  <p>
+    <strong>수학:</strong> 정점 위치를 로컬 공간에서 월드 공간으로 옮깁니다. <code>float4(input.pos, 1.0)</code>는
+    3차원 위치 <code>(x, y, z)</code>에 <strong>w=1</strong>을 붙여 4차원 <strong>동차좌표</strong>로 만드는 것입니다.
+    w=1을 붙이는 이유는, 행렬의 네 번째 행(또는 열)에 든 <strong>평행이동</strong> 성분이 이 w와 곱해져 위치에
+    더해지기 때문입니다. 만약 w=0이면 평행이동이 무시되어 "방향 벡터"처럼 취급됩니다(법선을 옮길 때 이 성질을 씁니다).
+  </p>
+  <p>
+    <strong>기하 직관:</strong> 로컬 원점에 놓인 모형을, 월드의 어느 위치에·어느 방향으로·어느 크기로 놓을지
+    <code>model</code> 행렬이 정해줍니다. 이 곱셈 한 번으로 정점이 "무대 위 제자리"로 이동합니다.
+  </p>
+  <p>
+    <strong>코드 매핑:</strong> <code>mul(model, v)</code>의 인자 순서에 주의하세요. 이 시리즈의 규약은 행벡터
+    <code>v' = v * M</code>이고, C++에서 <code>model</code>을 cbuffer에 올릴 때 이미 <strong>전치</strong>해서
+    넣습니다. 전치된 행렬을 <code>mul(M, v)</code> 형태로 곱하면 결과가 행벡터 규약과 동일해집니다. 즉
+    "C++에서 전치 + HLSL에서 <code>mul(행렬, 벡터)</code>" 조합이 한 세트입니다(뒤 C++ 코드에서 다시 확인).
+  </p>
+
+  <h4 style="margin-top:24px;"><code>o.fragPos = world.xyz;</code></h4>
+  <p>
+    방금 구한 월드 위치의 <code>xyz</code>만 떼어 픽셀 셰이더로 넘깁니다. 픽셀 셰이더는 이 위치에서
+    "빛까지의 방향(<code>L</code>)"과 "카메라까지의 방향(<code>V</code>)"을 계산해야 하므로, <strong>월드 공간
+    위치</strong>가 꼭 필요합니다. 클립 공간 위치(<code>o.pos</code>)로는 방향을 제대로 못 구합니다 — 원근 나눗셈으로
+    비선형 왜곡이 들어가기 때문입니다.
+  </p>
+
+  <h4 style="margin-top:24px;"><code>o.normal = normalize(mul((float3x3)normalMatrix, input.normal));</code></h4>
+  <p>
+    <strong>수학:</strong> 법선도 월드 공간으로 옮겨야 하는데, <em>위치처럼 <code>model</code>로 곱하면 안 됩니다.</em>
+    법선은 "표면에 수직인 방향"이라는 성질이 핵심인데, 물체를 <strong>비균등하게(축마다 다르게) 스케일</strong>하면
+    그 수직 관계가 깨집니다. 예를 들어 x축으로만 2배 늘리면, 45° 기울어졌던 표면 법선이 더 이상 표면에 수직이
+    아니게 틀어집니다.
+  </p>
+  <p>
+    <strong>기하 직관:</strong> 종이에 수직으로 꽂힌 압정을 상상하세요. 종이를 가로로 쭉 늘이면 종이 면은 눕는데,
+    법선을 같은 방식으로 늘이면 압정이 종이를 향해 기울어져 더는 수직이 아닙니다. 올바른 새 법선은 "늘어난
+    종이에 다시 수직"이 되도록 <strong>반대로 보정</strong>해야 합니다. 그 보정이 바로 <strong>역행렬의 전치
+    <code>transpose(inverse(model))</code></strong>입니다.
+  </p>
+  <p>
+    <strong>코드 매핑:</strong> <code>(float3x3)normalMatrix</code>는 4×4로 패딩해 넣은 법선 행렬에서
+    <strong>왼쪽 위 3×3</strong>만 꺼내는 캐스팅입니다. 법선은 방향이므로 평행이동(4번째 행/열)이 필요 없어 3×3이면
+    충분합니다. <code>normalize(...)</code>로 마지막에 길이를 1로 되돌리는 이유는, 변환 과정에서 법선의 길이가
+    1이 아니게 될 수 있는데 조명 공식의 내적은 <strong>단위 벡터</strong>를 전제하기 때문입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    법선을 <code>model</code>로 그냥 곱하면, 물체를 비균등하게 스케일했을 때 법선이 표면에 수직이 아니게 틀어져
+    조명이 이상해집니다(늘어난 방향으로 밝기가 쏠려 보임). 반드시
+    <strong><code>transpose(inverse(model))</code></strong>을 쓰세요. <strong>균등 스케일</strong>(모든 축 같은
+    배율)이나 <strong>회전·이동만</strong> 하는 경우엔 <code>model</code>의 3×3 부분으로도 결과가 같지만, 언제
+    비균등 스케일이 섞일지 모르니 습관적으로 법선 행렬을 쓰는 게 안전합니다.
+  </div>
+
+  <h4 style="margin-top:24px;"><code>o.pos = mul(mvp, float4(input.pos, 1.0));</code></h4>
+  <p>
+    화면에 그리기 위한 최종 클립 공간 위치입니다. <code>mvp</code>는 model·view·proj를 미리 곱해 하나로 합친
+    행렬이라, 정점을 한 번에 클립 공간까지 보냅니다. 이 값이 <code>SV_Position</code>으로 나가면 GPU가
+    자동으로 원근 나눗셈·뷰포트 변환을 거쳐 화면 픽셀 위치로 바꿉니다. 조명 계산에는 <code>o.pos</code>가 아니라
+    <code>o.fragPos</code>(월드 위치)를 쓴다는 점을 다시 강조합니다.
+  </p>
+
+  <!-- ── 픽셀 셰이더 해부 ── -->
+  <h3 style="margin-top:34px;">픽셀 셰이더 <code>PSMain</code> — 퐁 공식을 픽셀마다 계산</h3>
+  <p>
+    <code>: SV_Target</code>은 이 함수의 반환값 <code>float4</code>가 <strong>렌더 타깃(화면 버퍼)에 쓸 최종
+    색</strong>이라는 시맨틱입니다. 반환은 <code>(R, G, B, A)</code> 네 값이고, 각 채널은 보통 0~1 범위입니다
+    (1을 넘으면 화면에서는 흰색으로 포화됩니다). 이제 세 성분을 차례로 만듭니다.
+  </p>
+
+  <h4 style="margin-top:24px;">1) ambient — <code>float3 ambient = 0.12 * lightColor;</code></h4>
+  <p>
+    <strong>수학·직관:</strong> 광원 색에 작은 상수 <code>0.12</code>를 곱한 것이 전부입니다. 방향도 각도도 없이,
+    모든 픽셀에 동일하게 더해질 "바닥 밝기"입니다. <code>0.12</code>는 12%라는 뜻으로, 빛을 등진 면조차 광원 색의
+    12% 밝기는 유지하게 합니다. 이 값을 0으로 하면 그늘이 완전히 새까매지고, 너무 키우면 명암 대비가 사라져
+    물체가 납작해 보입니다.
+  </p>
+  <p>
+    <strong>성분 계산 예:</strong> <code>lightColor = (1, 1, 1)</code>(흰빛)이면
+    <code>ambient = (0.12, 0.12, 0.12)</code>가 됩니다. 즉 RGB 세 채널 각각에 0.12씩 들어갑니다.
+  </p>
+
+  <h4 style="margin-top:24px;">2) diffuse — 표면과 빛의 각도</h4>
+  <pre style="background:transparent;padding:0;"><code class="language-hlsl">float3 N = normalize(input.normal);
+float3 L = normalize(lightPos - input.fragPos);
+float diff = max(dot(N, L), 0.0);
+float3 diffuse = diff * lightColor;</code></pre>
+  <p>
+    <strong><code>float3 N = normalize(input.normal);</code></strong> — 정점 셰이더에서 넘어온 법선을 다시
+    정규화합니다. "정점 셰이더에서 이미 normalize 했는데 왜 또?"라고 물을 수 있는데, 정점→픽셀로 넘어오며 값이
+    <strong>보간(선형 평균)</strong>되기 때문입니다. 길이 1인 두 벡터의 평균은 길이가 1보다 짧아지므로, 픽셀
+    셰이더에서 한 번 더 정규화해야 정확합니다.
+  </p>
+  <p>
+    <strong><code>float3 L = normalize(lightPos - input.fragPos);</code></strong> — 표면 점에서 광원을 향하는
+    <strong>단위 방향 벡터</strong>입니다. "광원 위치 − 표면 위치"는 표면에서 광원으로 향하는 화살표이고,
+    <code>normalize</code>로 길이를 1로 맞춥니다. <strong>순서에 주의</strong>: <code>lightPos - fragPos</code>여야
+    표면→광원 방향입니다. 뒤집으면 광원→표면이 되어 조명이 반대로 뒤집힙니다.
+  </p>
+  <p>
+    <strong><code>float diff = max(dot(N, L), 0.0);</code></strong> — 이 시리즈의 심장입니다.
+    <code>dot(N, L)</code>는 표면 법선과 빛 방향이 <strong>얼마나 같은 방향인가</strong>를 −1~1 사이 숫자로 냅니다.
+    수학적으로 <code>N·L = |N||L|cosθ = cosθ</code>(둘 다 단위 벡터이므로)이고, <code>θ</code>는 법선과 빛 방향의
+    사잇각입니다. 빛을 정면으로 받으면(θ=0°) 1, 90°로 스치면 0, 등지면(θ&gt;90°) 음수입니다.
+    <code>max(..., 0.0)</code>는 그 음수를 0으로 잘라냅니다 — 빛을 등진 뒷면은 "빛이 안 든다"는 뜻이지
+    "음의 빛"이 있을 순 없으니까요.
+  </p>
+  <div class="callout">
+    <span class="tag warn">손계산</span>
+    법선 <code>N = (0, 1, 0)</code>(위를 향한 바닥), 빛 방향 <code>L = (0, 1, 0)</code>(정수리에서 내리쬠)이면
+    <code>dot(N, L) = 0·0 + 1·1 + 0·0 = 1</code> → 최대 밝기. 만약 빛이 45° 기울어
+    <code>L = (0.707, 0.707, 0)</code>이면 <code>dot = 1·0.707 = 0.707</code> → 약 71% 밝기. 빛이 옆에서
+    수평으로 오면 <code>L = (1, 0, 0)</code> → <code>dot = 0</code> → 완전히 어두움. 각도가 벌어질수록 밝기가
+    <code>cos</code> 곡선을 따라 부드럽게 떨어지는 게 그대로 보입니다.
+  </div>
+  <p>
+    <strong><code>float3 diffuse = diff * lightColor;</code></strong> — 각도로 구한 밝기 계수(<code>diff</code>,
+    스칼라)를 광원 색에 곱합니다. 스칼라 하나를 <code>float3</code>에 곱하면 <strong>세 채널 모두에 같은
+    비율</strong>로 곱해집니다. 붉은 빛(<code>lightColor = (1, 0, 0)</code>)에 <code>diff = 0.5</code>면
+    <code>diffuse = (0.5, 0, 0)</code>가 됩니다.
+  </p>
+
+  <h4 style="margin-top:24px;">3) specular — 하프웨이 벡터(블린-퐁)</h4>
+  <pre style="background:transparent;padding:0;"><code class="language-hlsl">float3 V = normalize(viewPos - input.fragPos);
+float3 H = normalize(L + V);
+float spec = pow(max(dot(N, H), 0.0), 64.0);   // 64 = 광택
+float3 specular = 0.5 * spec * lightColor;</code></pre>
+  <p>
+    <strong><code>float3 V = normalize(viewPos - input.fragPos);</code></strong> — 표면 점에서 <strong>카메라를
+    향하는</strong> 단위 방향입니다. specular는 "반사가 눈 쪽을 향하는가"를 따지므로 시선 방향 <code>V</code>가
+    필요합니다. diffuse는 이 <code>V</code>가 없었다는 점(보는 방향과 무관)과 대비됩니다.
+  </p>
+  <p>
+    <strong><code>float3 H = normalize(L + V);</code></strong> — <strong>하프웨이 벡터</strong>입니다. 빛 방향
+    <code>L</code>과 시선 방향 <code>V</code>를 더한 뒤 정규화하면, 두 벡터의 <strong>정확히 가운데를 가리키는</strong>
+    방향이 나옵니다. 기하 직관: 만약 표면 법선 <code>N</code>이 이 가운데 방향 <code>H</code>와 정확히 일치하면,
+    표면은 빛을 시선 쪽으로 완벽히 반사하는 각도입니다 — 즉 가장 강한 하이라이트가 생깁니다.
+  </p>
+  <p>
+    <strong><code>float spec = pow(max(dot(N, H), 0.0), 64.0);</code></strong> — <code>dot(N, H)</code>는 법선이
+    하프웨이 방향과 얼마나 일치하는지(0~1)이고, 여기에 <code>pow(..., 64)</code>로 <strong>64제곱</strong>을 겁니다.
+    이 큰 지수가 곡선을 극단적으로 뾰족하게 만듭니다: 예컨대 <code>0.99^64 ≈ 0.53</code>, <code>0.9^64 ≈ 0.0012</code>,
+    <code>0.8^64 ≈ 0.00000006</code>. 즉 <strong>거의 완벽히 정렬됐을 때만</strong> 값이 살아남고 조금만 벗어나도
+    순식간에 0으로 꺼집니다. 그래서 좁고 날카로운 하이라이트 점이 만들어집니다. 지수를 키우면 하이라이트가
+    작고 날카로워지고(더 매끈한 재질), 줄이면 넓고 흐릿해집니다(더 거친 재질).
+  </p>
+  <p>
+    <strong><code>float3 specular = 0.5 * spec * lightColor;</code></strong> — 하이라이트 세기(<code>spec</code>)에
+    강도 <code>0.5</code>를 곱하고 광원 색을 입힙니다. <code>0.5</code>는 하이라이트의 최대 밝기를 절반으로 눌러
+    과하게 하얗게 타지 않게 조절하는 값입니다.
+  </p>
+  <div class="callout">
+    <span class="tag">참고</span>
+    주석의 <code>reflect</code> 버전은 <strong>전통 퐁</strong>입니다: 빛의 반사 벡터
+    <code>R = reflect(-L, N)</code>를 실제로 구하고 <code>dot(V, R)</code>로 시선과의 각도를 잽니다. 결과는
+    비슷하지만 반사 벡터를 계산하는 만큼 조금 더 무겁고, 시선과 빛이 표면 반대편으로 갈 때 하이라이트가 부자연스럽게
+    끊기는 경우가 있습니다. <strong>블린-퐁(하프웨이)</strong>이 더 싸고 더 부드러워서 실무 기본값입니다.
+    같은 광택이라도 지수 스케일이 달라(퐁 32 ↔ 블린 64 정도) 위 코드가 두 버전에서 다른 숫자를 쓰는 이유입니다.
+  </div>
+
+  <h4 style="margin-top:24px;">최종 합성 — <code>float3 result = (ambient + diffuse + specular) * objectColor;</code></h4>
+  <p>
+    <strong>수학:</strong> 세 밝기 성분을 <strong>더한</strong> 뒤, 물체 고유색을 <strong>곱합니다</strong>.
+    더하기는 "여러 빛 기여가 누적된다"는 뜻이고, 곱하기는 "물체가 각 색 채널을 얼마나 반사하는가"라는 뜻입니다.
+    예를 들어 <code>objectColor = (0.85, 0.55, 0.25)</code>(주황 계열)라면, 흰빛이 와도 파란 채널(0.25)은 많이
+    흡수되어 어두워지고 빨강(0.85)은 잘 반사되어 물체가 주황으로 보입니다.
+  </p>
+  <p>
+    <strong>성분 계산 예:</strong> 어떤 픽셀에서 <code>ambient=(0.12,0.12,0.12)</code>,
+    <code>diffuse=(0.7,0.7,0.7)</code>, <code>specular=(0.3,0.3,0.3)</code>라면 합은
+    <code>(1.12, 1.12, 1.12)</code>. 여기에 <code>objectColor=(0.85,0.55,0.25)</code>를 채널별로 곱하면
+    <code>(0.95, 0.62, 0.28)</code> — 밝고 살짝 하얗게 뜬 주황이 됩니다(하이라이트 부분).
+  </p>
+  <p>
+    <strong><code>return float4(result, 1.0);</code></strong> — RGB 세 채널에 알파(A) 1.0(완전 불투명)을 붙여
+    최종 색으로 내보냅니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    조명 계산은 <strong>픽셀마다</strong> 돌기 때문에 화면 픽셀 수만큼(수백만 번) 반복됩니다. 그래서
+    <code>normalize</code>(제곱근 포함)·<code>pow</code> 같은 연산의 개수가 프레임 비용에 직접 영향을 줍니다.
+    광원이 여러 개면 이 계산이 광원 수만큼 배로 늘어나므로, 실무에서는 화면에 영향 주는 광원만 추리거나
+    (컬링), 조명을 미리 텍스처에 굽거나(라이트맵), 디퍼드 셰이딩으로 픽셀당 한 번만 계산하는 식으로 최적화합니다.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:44px;">2) C++ — 조명 상수 버퍼 설정</h2>
+  <p>
+    <strong>무엇을 만드나:</strong> 셰이더의 <code>cbuffer</code>에 대응하는 C++ 구조체를 정의하고, 값을 채워
+    GPU에 올린 뒤 셰이더 슬롯에 바인딩합니다. <strong>왜 필요한가:</strong> 셰이더의 <code>lightPos</code>,
+    <code>objectColor</code> 같은 값은 CPU가 매 프레임 여기서 채워 넣어야 셰이더가 읽을 수 있습니다.
+    이 코드가 곧 "셰이더에 데이터를 공급하는 파이프"입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>src/main.cpp — 조명 상수 버퍼 설정</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 상수 버퍼 구조체 (HLSL cbuffer와 레이아웃 일치, 16바이트 정렬)
+struct CBLighting {
+    XMFLOAT3 lightPos;    float _pad0;
+    XMFLOAT3 lightColor;  float _pad1;
+    XMFLOAT3 viewPos;     float _pad2;
+    XMFLOAT3 objectColor; float _pad3;
+};
+
+// 법선 행렬: 비균등 스케일에서도 법선을 올바르게 변환
+XMMATRIX normalMat = XMMatrixTranspose(XMMatrixInverse(nullptr, model));
+
+// 변환 상수 버퍼 채우기 (mvp, model, normalMatrix 모두 transpose 해 넘김)
+CBTransforms cbT;
+XMStoreFloat4x4(&amp;cbT.mvp,          XMMatrixTranspose(model * view * proj));
+XMStoreFloat4x4(&amp;cbT.model,        XMMatrixTranspose(model));
+XMStoreFloat4x4(&amp;cbT.normalMatrix, normalMat);  // 위에서 이미 transpose 됨
+// context-&gt;UpdateSubresource(cbTransforms.Get(), 0, nullptr, &amp;cbT, 0, 0);
+
+// 조명 상수 버퍼 채우기
+CBLighting cbL{};
+cbL.lightPos    = { 1.2f, 1.5f, 2.0f };
+cbL.lightColor  = { 1.0f, 1.0f, 1.0f };
+XMStoreFloat3(&amp;cbL.viewPos, XMLoadFloat3(&amp;gCam.position));
+cbL.objectColor = { 0.85f, 0.55f, 0.25f };
+// context-&gt;UpdateSubresource(cbLighting.Get(), 0, nullptr, &amp;cbL, 0, 0);
+
+// 셰이더 스테이지에 바인딩
+context-&gt;VSSetConstantBuffers(0, 1, cbTransforms.GetAddressOf());
+context-&gt;PSSetConstantBuffers(0, 1, cbTransforms.GetAddressOf());
+context-&gt;PSSetConstantBuffers(1, 1, cbLighting.GetAddressOf());</code></pre>
+  </div>
+
+  <h3 style="margin-top:34px;">CPU 구조체 <code>CBLighting</code> — HLSL과 바이트 단위로 일치시키기</h3>
+  <p>
+    <code>XMFLOAT3</code>는 <code>{ float x, y, z; }</code>일 뿐인 12바이트 구조체입니다(HLSL의 <code>float3</code>에
+    대응). 각 <code>XMFLOAT3</code> 뒤의 <code>float _pad</code>가 앞서 설명한 <strong>16바이트 정렬용 4바이트</strong>를
+    채웁니다. 그래서 이 구조체는 <code>(12+4) × 4 = 64바이트</code>이고, 셰이더의 <code>cbuffer Lighting</code>과
+    <strong>바이트 하나까지 동일한 배치</strong>가 됩니다. 필드 순서·타입·패딩 중 하나라도 어긋나면 값이 밀려
+    엉뚱한 자리로 들어갑니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>_pad</code>를 빼먹고 <code>XMFLOAT3</code> 세 개를 붙여 쓰면 CPU 구조체는 12·12·12로 촘촘히 놓이는데
+    GPU는 0·16·32로 띄워 읽습니다. 그 결과 <code>lightColor</code> 자리에 <code>lightPos</code>의 뒷부분과
+    <code>lightColor</code>의 앞부분이 섞여 들어가, 빛 색이 이상해지거나 물체가 안 보이는 식으로 조용히 깨집니다.
+    컴파일 에러가 안 나는 종류의 버그라 특히 잡기 어렵습니다.
+  </div>
+
+  <h3 style="margin-top:34px;">법선 행렬 — <code>XMMatrixTranspose(XMMatrixInverse(nullptr, model))</code></h3>
+  <p>
+    셰이더에서 필요한 법선 행렬 <code>transpose(inverse(model))</code>을 CPU에서 미리 계산합니다. 안에서 바깥으로 읽으면:
+  </p>
+  <ul>
+    <li><code>XMMatrixInverse(nullptr, model)</code> — <code>model</code>의 <strong>역행렬</strong>을 구합니다.
+      첫 인자 <code>nullptr</code>은 행렬식(determinant)을 따로 받지 않겠다는 뜻입니다(안 쓰니 버림).</li>
+    <li><code>XMMatrixTranspose(...)</code> — 그 역행렬을 <strong>전치</strong>합니다. 이 둘의 조합이 바로
+      "비균등 스케일에서도 법선을 표면에 수직으로 유지"시키는 보정 행렬입니다.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    여기서의 전치는 <strong>법선 보정용 수학적 전치</strong>입니다. 반면 아래 <code>cbT.mvp</code>·<code>cbT.model</code>에
+    쓰는 전치는 <strong>DirectXMath(행벡터)를 HLSL로 올릴 때의 규약 전치</strong>로, 목적이 다릅니다.
+    <code>normalMat</code>은 이미 수학적 전치가 끝났으니 cbuffer에 넣을 때 <strong>다시 전치하지 않습니다</strong>
+    (코드에서 <code>cbT.normalMatrix</code>만 <code>XMMatrixTranspose</code>로 감싸지 않은 이유). 여기서
+    한 번 더 전치하면 보정이 원위치로 돌아가 법선이 다시 틀어집니다.
+  </div>
+
+  <h3 style="margin-top:34px;">변환 버퍼 채우기 — <code>XMStoreFloat4x4</code>와 규약 전치</h3>
+  <p>
+    <code>XMStoreFloat4x4(&amp;dst, mat)</code>는 SIMD 연산용 <code>XMMATRIX</code>를, 메모리에 저장 가능한
+    <code>XMFLOAT4X4</code>(cbuffer에 올릴 형태)로 <strong>내려 씁니다</strong>. 반대로 계산할 때 불러오는 함수는
+    <code>XMLoadFloat4x4</code>입니다("Load=SIMD로 올리기, Store=메모리로 내리기"로 기억하면 편합니다).
+  </p>
+  <p>
+    <code>XMMatrixTranspose(model * view * proj)</code>에서 전치를 하는 이유가 규약의 핵심입니다. DirectXMath는
+    행벡터(<code>v' = v * M</code>) 규약이라 CPU에서는 <code>model * view * proj</code> 순서로 곱합니다. 그런데
+    HLSL 셰이더 코드는 <code>mul(mvp, v)</code>처럼 <strong>행렬을 앞에</strong> 두고 곱하도록 짜여 있어서, cbuffer로
+    올리기 전에 한 번 <strong>전치</strong>해두면 셰이더 안에서의 곱이 CPU 규약과 정확히 같은 결과를 냅니다.
+    <code>model</code>도 같은 이유로 전치합니다.
+  </p>
+
+  <h3 style="margin-top:34px;">조명 값 채우기</h3>
+  <p>
+    <code>cbL.lightPos = { 1.2f, 1.5f, 2.0f };</code>처럼 중괄호 초기화로 <code>XMFLOAT3</code>의 x·y·z를 한 번에
+    채웁니다. <code>lightColor = {1,1,1}</code>은 흰빛, <code>objectColor = {0.85, 0.55, 0.25}</code>는 주황 계열
+    물체 색입니다.
+  </p>
+  <p>
+    <code>XMStoreFloat3(&amp;cbL.viewPos, XMLoadFloat3(&amp;gCam.position));</code>는 카메라 위치를 뷰 위치로 복사하는
+    코드입니다. <code>XMLoadFloat3</code>로 카메라 위치(<code>XMFLOAT3</code>)를 SIMD 레지스터(<code>XMVECTOR</code>)로
+    올렸다가 <code>XMStoreFloat3</code>로 다시 내려 <code>cbL.viewPos</code>에 씁니다. 여기서는 단순 복사라 직접
+    대입해도 되지만, 중간에 벡터 연산을 넣기 좋게 Load/Store 관용구를 쓴 형태입니다. 이
+    <code>viewPos</code>가 셰이더에서 시선 방향 <code>V</code>를 만드는 데 쓰입니다.
+  </p>
+
+  <h3 style="margin-top:34px;">바인딩 — <code>VSSetConstantBuffers</code> / <code>PSSetConstantBuffers</code></h3>
+  <p>
+    채운 버퍼를 셰이더 슬롯에 연결합니다. 함수 인자는 <code>(시작슬롯, 개수, 버퍼배열)</code>입니다.
+  </p>
+  <ul>
+    <li><code>VSSetConstantBuffers(0, 1, cbTransforms...)</code> — <strong>정점 셰이더</strong>의 슬롯 0(=<code>register(b0)</code>)에 변환 버퍼를 연결. 정점 셰이더가 <code>mvp</code>·<code>model</code>·<code>normalMatrix</code>를 씁니다.</li>
+    <li><code>PSSetConstantBuffers(0, 1, cbTransforms...)</code> — <strong>픽셀 셰이더</strong>의 슬롯 0에도 같은 변환 버퍼를 연결. (이 예제 픽셀 셰이더는 변환 버퍼를 직접 안 쓰지만, 슬롯을 맞춰 두면 확장 시 편합니다.)</li>
+    <li><code>PSSetConstantBuffers(1, 1, cbLighting...)</code> — 픽셀 셰이더의 슬롯 1(=<code>register(b1)</code>)에 조명 버퍼를 연결. 이 번호가 셰이더의 <code>register(b1)</code>과 일치해야 조명 값이 제대로 들어갑니다.</li>
+  </ul>
+  <p>
+    <code>GetAddressOf()</code>는 <code>ComPtr</code>가 감싼 원시 포인터의 <strong>주소</strong>(<code>ID3D11Buffer**</code>)를
+    돌려줍니다. D3D API가 "버퍼 포인터들의 배열"을 요구하기 때문에, 하나만 넘길 때도 그 하나의 주소를 배열처럼 넘깁니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>UpdateSubresource</code>는 매 프레임 자주 바뀌는 작은 버퍼에는 무난하지만, 아주 빈번한 갱신에는
+    <code>D3D11_USAGE_DYNAMIC</code> 버퍼 + <code>Map</code>/<code>Unmap</code>(<code>WRITE_DISCARD</code>)이 더
+    효율적일 수 있습니다. 또 변하지 않는 값(예: <code>objectColor</code>)까지 매 프레임 다시 올릴 필요는 없으니,
+    자주 바뀌는 값과 고정 값을 <strong>별도 cbuffer</strong>로 쪼개면 업로드 트래픽을 줄일 수 있습니다.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <h2 style="margin-top:44px;">DirectXMath / D3D API 대응 한눈에</h2>
+  <table class="impl">
+    <thead>
+      <tr><th>개념 / 원본 표현</th><th>DirectXMath · D3D11 대응</th><th>역할</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>transpose(inverse(model))</code> (법선 행렬)</td><td><code>XMMatrixTranspose(XMMatrixInverse(nullptr, model))</code></td><td>비균등 스케일에서 법선 유지</td></tr>
+      <tr><td><code>model * view * proj</code> 전치</td><td><code>XMMatrixTranspose(model * view * proj)</code></td><td>행벡터 규약 → HLSL <code>mul</code>로 올리기</td></tr>
+      <tr><td><code>float3 → XMFLOAT4X4</code> 저장</td><td><code>XMStoreFloat4x4(&amp;dst, mat)</code></td><td>SIMD 행렬을 cbuffer 형태로 내려쓰기</td></tr>
+      <tr><td>카메라 위치 로드</td><td><code>XMLoadFloat3(&amp;gCam.position)</code></td><td><code>XMFLOAT3</code> → <code>XMVECTOR</code></td></tr>
+      <tr><td><code>float3 dot(N, L)</code></td><td>HLSL <code>dot</code> (CPU라면 <code>XMVector3Dot</code>)</td><td>표면·빛 각도(diffuse)</td></tr>
+      <tr><td><code>normalize(v)</code></td><td>HLSL <code>normalize</code> (CPU라면 <code>XMVector3Normalize</code>)</td><td>단위 벡터화</td></tr>
+      <tr><td><code>reflect(-L, N)</code> (전통 퐁)</td><td>HLSL <code>reflect</code> (CPU라면 <code>XMVector3Reflect</code>)</td><td>반사 벡터(specular)</td></tr>
+      <tr><td><code>cbuffer : register(bN)</code></td><td><code>VSSetConstantBuffers</code> / <code>PSSetConstantBuffers(N, ...)</code></td><td>상수 버퍼 슬롯 바인딩</td></tr>
+      <tr><td>버퍼 데이터 갱신</td><td><code>ID3D11DeviceContext::UpdateSubresource</code></td><td>CPU→GPU 값 업로드</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="tag warn">주의</span>
+    여기서 계산하는 것은 <strong>직접 조명뿐이고 그림자는 없습니다.</strong> 빛을 등진 면은 어두워지지만, 한 물체가
+    다른 물체(또는 자기 자신)에 드리우는 <strong>그림자</strong>는 이 셰이더만으로는 생기지 않습니다. 실제 그림자는
+    광원 시점에서 깊이 텍스처를 렌더하는 <strong>섀도우 맵</strong> 별도 패스가 필요합니다 →
+    <a href="./06-advanced.html#shadowmap" style="color:var(--accent)">6장 섀도우 맵</a>.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./03-zbuffer.html">← 깊이 버퍼 (Z-Buffer)</a>
+    <a href="./03-texmap.html">텍스처 매핑 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

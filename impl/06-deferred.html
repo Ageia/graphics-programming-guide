@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 디퍼드 렌더링 (Deferred Rendering) — C++/DirectX 11</title>
+<meta name="description" content="G-buffer(MRT)로 지오메트리 속성을 한 번에 기록하고, 풀스크린 라이팅 패스에서 보이는 픽셀만 셰이딩하는 디퍼드 렌더링을 C++/HLSL로 한 줄 한 줄 해부하고 DirectXMath/D3D11 API에 1:1로 매핑합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">디퍼드 렌더링 (Deferred Rendering)</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6</span>
+  <h1>디퍼드 렌더링 (Deferred Rendering) — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    화면에 광원이 수십·수백 개 있는 장면을 생각해 봅시다. 보통(포워드) 렌더링은
+    <strong>메시를 그릴 때마다, 픽셀마다, 모든 광원을 계산</strong>합니다. 그런데 그 픽셀이 나중에 다른 물체에
+    가려져 버려질 픽셀이라면 그 조명 계산은 전부 낭비입니다. <strong>디퍼드(deferred, "미룬")</strong> 렌더링은
+    조명 계산을 뒤로 <em>미뤄</em> 두 단계로 나눕니다: 먼저 (1) <strong>지오메트리 패스</strong>에서 화면 각 픽셀의
+    위치·법선·색을 <strong>여러 장의 텍스처(G-buffer)</strong>에 한 번에 기록하고, 그다음 (2) <strong>라이팅 패스</strong>에서
+    <em>실제로 보이는 픽셀에 대해서만</em> 그 텍스처들을 읽어 조명을 계산합니다. 이 페이지에서는 G-buffer를 만드는
+    C++ 코드, 그 G-buffer에 동시에 기록하는 HLSL(MRT) 픽셀 셰이더, 그리고 풀스크린 라이팅 패스 셰이더를
+    <strong>코드 한 줄, 성분 하나까지</strong> 해부한 뒤, D3D11 API와 DirectXMath로 하나하나 짚습니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    <strong>행 우선 저장</strong>, <strong>왼손 좌표계</strong>, 클립 공간 <code>z ∈ [0,1]</code>, 텍스처 V축은
+    위→아래입니다. 이 페이지의 조명 계산은 모두 <strong>뷰 공간(view space)</strong>에서 이뤄집니다 — 좌표계가 무엇이든
+    "카메라를 원점에 둔 공간"이라는 점만 일관되면 조명 공식 자체는 동일합니다. 실무에서는 직접 구현보다
+    <strong>DirectXMath</strong>와 검증된 라이브러리를 권장하지만, 여기서는 원리를 이해하려고 손으로 풀어 봅니다.
+  </div>
+
+  <!-- =========================================================
+       0. 무엇을, 왜 만드나
+       ========================================================= -->
+  <h2 style="margin-top:40px;">0. 무엇을, 왜 만드나</h2>
+  <p>
+    <strong>포워드 렌더링(forward rendering)</strong>은 우리가 지금까지 해 온 평범한 방식입니다. 물체를 하나씩 그리고,
+    각 물체의 픽셀 셰이더 안에서 "이 픽셀에 닿는 모든 광원"을 반복문으로 돌며 색을 더합니다. 문제는 두 가지입니다.
+  </p>
+  <ul>
+    <li>
+      <strong>오버드로우(overdraw) 낭비</strong>: 앞뒤로 겹친 물체가 많으면, 뒤에 있는 픽셀도 일단 조명을 다 계산한 뒤
+      나중에 앞 물체가 덮어써 버립니다. 계산해 놓고 버리는 것이죠. 광원이 많을수록 이 낭비는 눈덩이처럼 커집니다.
+    </li>
+    <li>
+      <strong>비용 폭발</strong>: 포워드의 조명 비용은 대략 <code>그린 픽셀 수 × 광원 수</code>입니다. "그린 픽셀 수"에는
+      가려져 버려질 픽셀까지 포함됩니다. 광원 64개짜리 장면이면 픽셀 하나에 64번의 조명 계산이 들어갑니다.
+    </li>
+  </ul>
+  <p>
+    <strong>디퍼드 렌더링</strong>의 핵심 아이디어는 "조명 계산에 필요한 재료를 먼저 화면 크기 텍스처에 다 적어 두고,
+    조명은 화면의 <em>최종적으로 보이는</em> 픽셀에 대해 딱 한 번만 하자"는 것입니다. 그러면 조명 비용이
+    <code>화면 픽셀 수 × 광원 수</code>로 <strong>고정</strong>됩니다 — 물체가 아무리 겹쳐 있어도 화면 픽셀 수는 일정하니까요.
+  </p>
+
+  <ol class="steps">
+    <li>
+      <strong>G-buffer를 만든다</strong>: 위치·법선·(알베도+스페큘러) 세 장의 렌더 타깃 텍스처를 만들고,
+      각각 쓰기용 <code>RTV</code>와 읽기용 <code>SRV</code>를 붙입니다.
+    </li>
+    <li>
+      <strong>지오메트리 패스</strong>: 세 렌더 타깃을 <code>OMSetRenderTargets</code>에 <strong>배열로 한꺼번에</strong> 묶어
+      (MRT, Multiple Render Targets) 설정하고, 픽셀 셰이더가 각 픽셀의 속성을 세 타깃에 동시에 기록합니다.
+    </li>
+    <li>
+      <strong>라이팅 패스</strong>: 화면을 덮는 풀스크린 삼각형 하나를 그리면서, G-buffer 세 장을 <code>SRV</code>로 샘플해
+      픽셀 속성을 <em>복원</em>하고, 광원 루프를 돌며 최종 색을 계산합니다.
+    </li>
+  </ol>
+
+  <div class="callout">
+    <span class="tag warn">G-buffer란?</span>
+    <strong>G-buffer(Geometry buffer)</strong>는 "기하 정보를 담아 두는 버퍼(텍스처) 묶음"입니다. 화면과 같은 해상도의
+    텍스처 여러 장에, 픽셀마다 <em>그 자리에 보이는 표면</em>의 위치·법선·색을 저장합니다. 조명 계산에 필요한 재료를
+    미리 화면에 "인화"해 둔 사진 여러 장이라고 생각하면 됩니다.
+  </div>
+
+  <!-- =========================================================
+       1. G-buffer 생성 (C++ / D3D11)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">1. G-buffer 만들기 — 텍스처·RTV·SRV (C++)</h2>
+  <p>
+    먼저 G-buffer로 쓸 텍스처들을 만들어야 합니다. 각 타깃은 <strong>세 개의 D3D11 객체</strong>가 한 세트입니다:
+    실제 픽셀 데이터를 담는 <strong>텍스처(<code>ID3D11Texture2D</code>)</strong>, 지오메트리 패스에서 <em>여기에 그려라</em>라고
+    지정하는 <strong>렌더 타깃 뷰(<code>RTV</code>)</strong>, 그리고 라이팅 패스에서 <em>이 텍스처를 읽어라</em>라고 지정하는
+    <strong>셰이더 리소스 뷰(<code>SRV</code>)</strong>입니다. 같은 텍스처를 "쓸 때는 RTV로, 읽을 때는 SRV로" 두 얼굴로
+    쓰는 것이 핵심입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>gbuffer.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">using Microsoft::WRL::ComPtr;
+// 각 G-buffer 타깃: 텍스처 + RTV(쓰기) + SRV(라이팅 패스에서 읽기)
+struct GTarget {
+    ComPtr&lt;ID3D11Texture2D&gt;           tex;
+    ComPtr&lt;ID3D11RenderTargetView&gt;   rtv;
+    ComPtr&lt;ID3D11ShaderResourceView&gt; srv;
+};
+GTarget gPosition, gNormal, gAlbedoSpec;
+
+auto makeTarget = [&amp;](GTarget&amp; g, DXGI_FORMAT fmt){
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = fmt; td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    device->CreateTexture2D(&amp;td, nullptr, &amp;g.tex);
+    device->CreateRenderTargetView(g.tex.Get(), nullptr, &amp;g.rtv);
+    device->CreateShaderResourceView(g.tex.Get(), nullptr, &amp;g.srv);
+};
+makeTarget(gPosition,   DXGI_FORMAT_R16G16B16A16_FLOAT); // 뷰공간 위치
+makeTarget(gNormal,     DXGI_FORMAT_R16G16B16A16_FLOAT); // 뷰공간 법선
+makeTarget(gAlbedoSpec, DXGI_FORMAT_R8G8B8A8_UNORM);     // rgb=albedo, a=spec
+
+// 깊이 스텐실 뷰(gDSV)는 별도로 생성 (지오메트리 패스 깊이 테스트용)
+
+// --- 지오메트리 패스: 이 3개에 동시에 출력 (MRT) ---
+ID3D11RenderTargetView* rtvs[3] = {
+    gPosition.rtv.Get(), gNormal.rtv.Get(), gAlbedoSpec.rtv.Get()
+};
+float clear[4] = { 0, 0, 0, 0 };
+for (auto* r : rtvs) ctx->ClearRenderTargetView(r, clear);
+ctx->ClearDepthStencilView(gDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+ctx->OMSetRenderTargets(3, rtvs, gDSV.Get());
+renderGeometryPass();</code></pre>
+  </div>
+
+  <h3 style="margin-top:30px;">1-1. <code>GTarget</code> 구조체 — 왜 세 얼굴이 필요한가</h3>
+  <p>
+    <code>struct GTarget</code>는 한 장의 G-buffer 타깃을 이루는 세 객체를 하나로 묶은 것입니다. 각 줄을 봅시다.
+  </p>
+  <ul>
+    <li>
+      <code>ComPtr&lt;ID3D11Texture2D&gt; tex;</code> — 실제 픽셀 값이 저장되는 GPU 메모리 블록입니다.
+      화면과 같은 <code>W × H</code> 크기의 2D 이미지죠.
+    </li>
+    <li>
+      <code>ComPtr&lt;ID3D11RenderTargetView&gt; rtv;</code> — "이 텍스처에 <em>그려 넣어라</em>"라고 파이프라인의
+      출력 병합(OM) 단계에 알려 주는 뷰입니다. 지오메트리 패스가 이걸 통해 텍스처에 씁니다.
+    </li>
+    <li>
+      <code>ComPtr&lt;ID3D11ShaderResourceView&gt; srv;</code> — "이 텍스처를 셰이더에서 <em>읽어라(샘플하라)</em>"라고
+      알려 주는 뷰입니다. 라이팅 패스가 이걸 통해 텍스처를 읽습니다.
+    </li>
+  </ul>
+  <p>
+    <strong>왜 뷰가 두 개나 필요할까요?</strong> D3D11에서 텍스처는 "데이터 덩어리"일 뿐이고, GPU 파이프라인에 어떤
+    <em>용도로</em> 연결할지는 <strong>뷰(view)</strong>가 결정합니다. RTV는 "출력 슬롯에 꽂는 어댑터", SRV는 "입력
+    슬롯에 꽂는 어댑터"입니다. 같은 텍스처라도 쓸 때와 읽을 때 다른 어댑터가 필요하기 때문에 둘 다 만들어 둡니다.
+    <code>ComPtr</code>은 스마트 포인터로, 참조 카운트를 자동 관리해 <code>Release()</code>를 잊어도 누수가 없게 해 줍니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    같은 텍스처를 <strong>같은 프레임 안에서 RTV로 바인딩한 채 SRV로도 읽으려 하면</strong> D3D11이 자동으로 SRV를
+    언바인드하고 디버그 레이어가 경고를 냅니다("resource is bound as both input and output"). 디퍼드에서는
+    <em>먼저 지오메트리 패스에서 RTV로 쓰고</em>, 그 패스가 끝난 뒤 <em>RTV를 풀고 나서</em> 라이팅 패스에서 SRV로 읽기
+    때문에 충돌이 없습니다. 순서가 곧 규칙입니다.
+  </div>
+
+  <h3 style="margin-top:30px;">1-2. <code>makeTarget</code> 람다 — 텍스처 서술자 채우기</h3>
+  <p>
+    <code>auto makeTarget = [&amp;](GTarget&amp; g, DXGI_FORMAT fmt){ ... };</code>는 <strong>람다(익명 함수)</strong>입니다.
+    타깃마다 텍스처+RTV+SRV 세 벌을 만드는 코드가 똑같아서, 반복을 줄이려고 한 함수로 묶었습니다. 각 부분을 봅시다.
+  </p>
+  <ul>
+    <li>
+      <code>[&amp;]</code> — <strong>캡처 절</strong>입니다. <code>&amp;</code>는 "바깥 변수를 <em>참조로</em> 캡처"라는 뜻으로,
+      람다 안에서 <code>device</code>, <code>W</code>, <code>H</code> 같은 바깥 변수를 그대로 쓸 수 있게 합니다.
+      값 복사가 아니라 참조라서 큰 객체를 복사하는 비용이 없습니다.
+    </li>
+    <li>
+      <code>GTarget&amp; g</code> — 결과를 채워 넣을 타깃을 <strong>참조(<code>&amp;</code>)</strong>로 받습니다. 참조로 받아야
+      람다 안에서 만든 <code>tex/rtv/srv</code>가 호출자의 <code>gPosition</code> 등에 실제로 들어갑니다. 값으로 받으면
+      복사본만 채워지고 원본은 그대로겠죠.
+    </li>
+    <li>
+      <code>DXGI_FORMAT fmt</code> — 타깃마다 픽셀 포맷이 다르므로 인자로 받습니다(아래 1-4에서 상세히).
+    </li>
+  </ul>
+  <p>
+    <code>D3D11_TEXTURE2D_DESC td = {};</code>는 텍스처를 어떻게 만들지 적는 <strong>서술자(descriptor)</strong>입니다.
+    <code>= {}</code>로 <strong>모든 필드를 0으로 초기화</strong>한 뒤 필요한 것만 채웁니다(빼먹은 필드가 쓰레기 값이 되는
+    사고를 막는 습관). 각 필드의 의미는 이렇습니다.
+  </p>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <tr><th>필드</th><th>값</th><th>의미</th></tr>
+    <tr><td><code>Width / Height</code></td><td><code>W / H</code></td><td>화면과 같은 해상도. 화면 픽셀 1:1로 정보를 담아야 하므로.</td></tr>
+    <tr><td><code>MipLevels</code></td><td><code>1</code></td><td>밉맵 없음. G-buffer는 1:1로만 읽으므로 축소본이 필요 없습니다.</td></tr>
+    <tr><td><code>ArraySize</code></td><td><code>1</code></td><td>텍스처 배열이 아니라 낱장 한 장.</td></tr>
+    <tr><td><code>Format</code></td><td><code>fmt</code></td><td>픽셀당 채널 수·비트 폭·정수/부동소수(아래 1-4).</td></tr>
+    <tr><td><code>SampleDesc.Count</code></td><td><code>1</code></td><td>MSAA 안 씀(=1). 디퍼드는 MSAA가 까다롭습니다(아래 성능 노트).</td></tr>
+    <tr><td><code>Usage</code></td><td><code>DEFAULT</code></td><td>GPU가 읽고 쓰는 일반 텍스처. CPU 접근 없음 → 가장 빠름.</td></tr>
+    <tr><td><code>BindFlags</code></td><td><code>RENDER_TARGET | SHADER_RESOURCE</code></td><td>이 텍스처를 <em>렌더 타깃으로도, 셰이더 리소스로도</em> 쓰겠다는 두 용도 선언.</td></tr>
+  </table>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>BindFlags</code>에 <code>D3D11_BIND_RENDER_TARGET</code>과 <code>D3D11_BIND_SHADER_RESOURCE</code>를
+    <strong>둘 다 OR로 넣지 않으면</strong> 디퍼드가 성립하지 않습니다. 하나라도 빠지면 그 용도로 뷰를 만들 때
+    <code>CreateRenderTargetView</code>/<code>CreateShaderResourceView</code>가 실패(HRESULT 오류)합니다.
+    "쓰기+읽기 둘 다"라는 선언이 곧 G-buffer의 정의입니다.
+  </div>
+
+  <h3 style="margin-top:30px;">1-3. 생성 3종 세트 — 텍스처·RTV·SRV</h3>
+  <p>
+    서술자를 채웠으면 실제 객체를 만듭니다. 세 줄이 순서대로 텍스처, RTV, SRV를 생성합니다.
+  </p>
+  <ul>
+    <li>
+      <code>device-&gt;CreateTexture2D(&amp;td, nullptr, &amp;g.tex);</code> — <code>&amp;td</code>는 방금 채운 서술자의 주소,
+      가운데 <code>nullptr</code>은 <strong>초기 데이터 없음</strong>(빈 텍스처로 만들고 나중에 렌더링으로 채운다),
+      <code>&amp;g.tex</code>는 만들어진 텍스처 포인터를 받을 곳입니다. <code>&amp;</code>가 붙는 이유는 API가
+      "포인터를 채워 주는" 출력 매개변수라서 <em>포인터의 주소(이중 포인터)</em>를 넘겨야 하기 때문입니다.
+    </li>
+    <li>
+      <code>device-&gt;CreateRenderTargetView(g.tex.Get(), nullptr, &amp;g.rtv);</code> — 이 텍스처에 대한 쓰기 뷰를 만듭니다.
+      <code>g.tex.Get()</code>은 <code>ComPtr</code>에서 원시 포인터를 꺼내는 함수, 가운데 <code>nullptr</code>은
+      "서술자 기본값 사용"(텍스처 포맷을 그대로 씀), <code>&amp;g.rtv</code>는 결과 RTV를 받을 곳입니다.
+    </li>
+    <li>
+      <code>device-&gt;CreateShaderResourceView(g.tex.Get(), nullptr, &amp;g.srv);</code> — 같은 텍스처에 대한 읽기 뷰입니다.
+      역시 <code>nullptr</code>로 기본 SRV 서술자를 쓰면 전체 밉/전체 배열을 텍스처 포맷 그대로 읽는 뷰가 됩니다.
+    </li>
+  </ul>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    실전 코드는 세 <code>Create*</code> 호출의 반환값 <code>HRESULT</code>를 반드시 확인해야 합니다
+    (<code>if (FAILED(hr)) ...</code>). 원본은 학습용이라 생략했지만, 포맷·바인드 플래그가 조합상 불가능하거나
+    메모리가 부족하면 여기서 조용히 실패하고, 나중에 <code>nullptr</code> 뷰를 바인딩하며 원인 모를 크래시가 납니다.
+  </div>
+
+  <h3 style="margin-top:30px;">1-4. 세 타깃의 포맷 선택 — 정밀도와 대역폭의 흥정</h3>
+<pre style="margin:0;"><code class="language-cpp">makeTarget(gPosition,   DXGI_FORMAT_R16G16B16A16_FLOAT); // 뷰공간 위치
+makeTarget(gNormal,     DXGI_FORMAT_R16G16B16A16_FLOAT); // 뷰공간 법선
+makeTarget(gAlbedoSpec, DXGI_FORMAT_R8G8B8A8_UNORM);     // rgb=albedo, a=spec</code></pre>
+  <p>
+    포맷 이름은 <code>R16G16B16A16_FLOAT</code>처럼 읽습니다: <strong>R/G/B/A 네 채널, 각 16비트, 부동소수(FLOAT)</strong>.
+    왜 타깃마다 다르게 골랐는지가 디퍼드의 실무 감각입니다.
+  </p>
+  <ul>
+    <li>
+      <strong>위치·법선 → <code>R16G16B16A16_FLOAT</code></strong>: 위치와 법선은 <em>넓은 범위와 정밀도</em>가 필요합니다.
+      뷰 공간 위치는 값이 수십~수백까지 커질 수 있고 음수도 나옵니다. 법선은 −1~1 범위이지만 조명에서 각도 오차가
+      바로 얼룩으로 보이므로 정밀도가 중요합니다. 그래서 부동소수 16비트를 씁니다. (8비트 정수라면 위치가 뭉개져
+      계단현상이 생깁니다.)
+    </li>
+    <li>
+      <strong>알베도+스페큘러 → <code>R8G8B8A8_UNORM</code></strong>: 알베도(표면 색)는 화면에 보이는 색이라 0~1 범위면
+      충분하고, <code>UNORM</code>(0~255 정수를 0.0~1.0으로 정규화해 읽음)으로 <strong>절반 대역폭</strong>이면 됩니다.
+      남는 <strong>A 채널에 스페큘러 세기</strong>를 끼워 넣어 텍스처 한 장을 아낍니다. 이런 <em>채널 패킹(packing)</em>이
+      G-buffer 최적화의 핵심 기술입니다.
+    </li>
+  </ul>
+  <p>
+    픽셀당 대역폭을 손으로 세어 볼까요? 위치 8바이트(4채널×2바이트) + 법선 8바이트 + 알베도스펙 4바이트 = <strong>픽셀당 20바이트</strong>.
+    깊이 버퍼(보통 4바이트)까지 합치면 24바이트. Full HD(1920×1080 ≈ 207만 픽셀)면 지오메트리 패스에서
+    쓰기만 <strong>약 50MB</strong>, 라이팅 패스에서 읽기 또 그만큼. 이게 디퍼드가 대역폭을 많이 먹는 이유입니다(아래 성능 노트).
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    G-buffer 채널을 줄이는 것이 디퍼드 최적화의 절반입니다. 실무 팁: 위치를 통째로 저장하지 말고 <strong>깊이만 저장한 뒤
+    라이팅 패스에서 위치를 역투영으로 재구성</strong>하면 위치 타깃(8바이트)을 통째로 없앨 수 있습니다. 법선도 x,y 두
+    성분만 저장하고 z는 <code>z = sqrt(1 - x² - y²)</code>로 복원(옥타헤드럴 인코딩 등)해 채널을 아낄 수 있습니다.
+    원본은 이해를 위해 위치·법선을 그대로 저장하는 가장 직관적인 형태를 씁니다.
+  </div>
+
+  <h3 style="margin-top:30px;">1-5. MRT 설정 — 세 타깃에 동시에 그리기</h3>
+<pre style="margin:0;"><code class="language-cpp">ID3D11RenderTargetView* rtvs[3] = {
+    gPosition.rtv.Get(), gNormal.rtv.Get(), gAlbedoSpec.rtv.Get()
+};
+float clear[4] = { 0, 0, 0, 0 };
+for (auto* r : rtvs) ctx->ClearRenderTargetView(r, clear);
+ctx->ClearDepthStencilView(gDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+ctx->OMSetRenderTargets(3, rtvs, gDSV.Get());
+renderGeometryPass();</code></pre>
+  <p>
+    이 블록이 <strong>MRT(Multiple Render Targets)</strong>를 켜는 부분입니다. 지오메트리 패스가 한 번의 드로우로 세
+    텍스처에 동시에 쓰도록 준비합니다.
+  </p>
+  <ul>
+    <li>
+      <code>ID3D11RenderTargetView* rtvs[3] = { ... };</code> — 세 RTV의 원시 포인터를 <strong>순서대로</strong> 담은
+      배열입니다. 이 순서(0=position, 1=normal, 2=albedoSpec)가 곧 셰이더의 <code>SV_Target0/1/2</code>와 짝을 이룹니다.
+      순서를 뒤섞으면 위치 자리에 색이 들어가는 등 뒤죽박죽이 됩니다.
+    </li>
+    <li>
+      <code>float clear[4] = { 0, 0, 0, 0 };</code> — 지울 색(RGBA)입니다. 전부 0으로 지워 프레임 시작 시 잔상을 없앱니다.
+    </li>
+    <li>
+      <code>for (auto* r : rtvs) ctx-&gt;ClearRenderTargetView(r, clear);</code> — 범위 기반 for로 세 RTV를 각각 0으로 클리어합니다.
+      <code>ClearRenderTargetView</code>는 타깃 하나씩만 지우므로 반복이 필요합니다.
+    </li>
+    <li>
+      <code>ctx-&gt;ClearDepthStencilView(gDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);</code> — 깊이 버퍼를 <strong>1.0(가장 먼 값)</strong>으로
+      클리어합니다. 왼손 좌표계·클립 z[0,1] 규약에서 0이 카메라 최근접, 1이 최원거리이므로, 처음엔 "무한히 멀다"로 채워
+      놓고 더 가까운 픽셀이 오면 갱신되게 합니다. 세 번째 인자 <code>0</code>은 스텐실 클리어 값입니다.
+    </li>
+    <li>
+      <code>ctx-&gt;OMSetRenderTargets(3, rtvs, gDSV.Get());</code> — 출력 병합(OM) 단계에 <strong>렌더 타깃 3개 + 깊이 버퍼 1개</strong>를
+      한꺼번에 묶습니다. 첫 인자 <code>3</code>이 타깃 개수, 둘째가 RTV 배열, 셋째가 깊이 스텐실 뷰입니다. 이 한 줄로
+      "이제부터 그리는 픽셀은 이 세 텍스처에 동시에 기록되고, 깊이는 gDSV로 테스트한다"가 확정됩니다.
+    </li>
+    <li>
+      <code>renderGeometryPass();</code> — 실제로 씬의 모든 메시를 그립니다. 이 안의 드로우 콜들이 위 셋업을 타고
+      G-buffer를 채웁니다.
+    </li>
+  </ul>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>OMSetRenderTargets</code>에 넘긴 <strong>타깃 개수·순서</strong>는 픽셀 셰이더의 <code>SV_Target</code> 번호와
+    정확히 일치해야 합니다. 또한 세 타깃은 <strong>같은 해상도·같은 샘플 수(MSAA)</strong>여야 합니다. 하나만 크기가
+    다르면 D3D가 바인딩을 거부합니다. 깊이 버퍼(<code>gDSV</code>)도 같은 해상도여야 합니다.
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">D3D11 API 대응</span>
+    <ul style="margin:6px 0 0 0;">
+      <li><code>CreateTexture2D</code> ← GPU 메모리에 이미지 할당 (OpenGL의 <code>glTexImage2D</code>에 대응).</li>
+      <li><code>CreateRenderTargetView</code> ← 텍스처를 프레임버퍼 어태치먼트로 (OpenGL <code>glFramebufferTexture2D</code>).</li>
+      <li><code>OMSetRenderTargets(N, ...)</code> ← MRT 활성화 (OpenGL <code>glDrawBuffers</code>).</li>
+      <li><code>ClearRenderTargetView</code> ← 타깃 초기화 (OpenGL <code>glClear(GL_COLOR_BUFFER_BIT)</code>).</li>
+    </ul>
+  </div>
+
+  <!-- =========================================================
+       2. 지오메트리 패스 픽셀 셰이더 (HLSL)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">2. 지오메트리 패스 픽셀 셰이더 (HLSL)</h2>
+  <p>
+    이제 세 타깃에 <em>무엇을</em> 쓸지 정하는 셰이더입니다. 이 픽셀 셰이더는 색을 화면에 바로 내보내는 대신,
+    각 픽셀의 <strong>뷰 공간 위치·법선·알베도·스페큘러</strong>를 G-buffer 세 장에 기록합니다. 조명은 하지 않습니다 —
+    "재료만 적어 두고 요리는 나중에".
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>geometry.hlsl (픽셀 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D    diffuseTex : register(t0);
+SamplerState samp       : register(s0);
+
+cbuffer GeoConstants : register(b0) {
+    float specularStrength;
+    float3 _pad;
+};
+
+struct PSIn {
+    float4 posH   : SV_Position;
+    float3 fragPos: VIEWPOS;    // 뷰 공간 위치
+    float3 normal : NORMAL;     // 뷰 공간 법선
+    float2 uv     : TEXCOORD0;
+};
+
+// 3개의 렌더 타깃에 동시에 기록
+struct GBufferOut {
+    float3 position   : SV_Target0;   // 어태치먼트 0
+    float3 normal     : SV_Target1;   // 어태치먼트 1
+    float4 albedoSpec : SV_Target2;   // 어태치먼트 2
+};
+
+GBufferOut main(PSIn i) {
+    GBufferOut o;
+    o.position       = i.fragPos;
+    o.normal         = normalize(i.normal);
+    o.albedoSpec.rgb = diffuseTex.Sample(samp, i.uv).rgb;
+    o.albedoSpec.a   = specularStrength;   // 알파 채널에 스페큘러 세기 저장
+    return o;
+}</code></pre>
+  </div>
+
+  <h3 style="margin-top:30px;">2-1. 리소스 바인딩 — <code>register</code>의 의미</h3>
+  <ul>
+    <li>
+      <code>Texture2D diffuseTex : register(t0);</code> — 재질의 디퓨즈(색) 텍스처를 <strong>텍스처 슬롯 t0</strong>에
+      바인딩합니다. <code>t</code>는 텍스처(SRV) 슬롯을 뜻하고 번호는 C++에서 <code>PSSetShaderResources(0, ...)</code>로
+      꽂는 슬롯 번호와 일치해야 합니다.
+    </li>
+    <li>
+      <code>SamplerState samp : register(s0);</code> — 텍스처를 어떻게 필터링/래핑할지 정하는 <strong>샘플러</strong>를
+      슬롯 s0에 바인딩합니다. <code>s</code>는 샘플러 슬롯입니다.
+    </li>
+    <li>
+      <code>cbuffer GeoConstants : register(b0) { ... }</code> — <strong>상수 버퍼</strong>를 슬롯 b0에 바인딩합니다.
+      <code>b</code>는 상수 버퍼 슬롯입니다. CPU에서 매 프레임 값을 채워 셰이더에 넘기는 통로입니다.
+    </li>
+  </ul>
+  <p>
+    상수 버퍼 안의 <code>float specularStrength; float3 _pad;</code>에서 <code>_pad</code>는 <strong>패딩</strong>입니다.
+    D3D11 상수 버퍼는 <strong>16바이트(float 4개) 경계</strong>로 정렬되기 때문에, <code>float</code> 하나(4바이트) 뒤에
+    <code>float3</code>(12바이트)를 채워 16바이트를 딱 맞춰 줍니다. 이걸 빼먹으면 C++ 쪽 구조체와 셰이더의 메모리
+    배치가 어긋나 엉뚱한 값이 읽힙니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    상수 버퍼 정렬 규칙은 디퍼드가 아니라도 D3D11 초심자가 가장 많이 데는 곳입니다. 핵심 규칙: <strong>하나의 멤버가
+    16바이트 경계를 넘어가면 안 됩니다.</strong> 예컨대 <code>float3</code> 뒤에 <code>float</code>은 12+4=16으로 딱 맞아
+    안전하지만, <code>float2</code> 뒤에 <code>float3</code>는 8+12=20이라 <code>float3</code>가 경계를 넘어 다음 줄로
+    밀립니다. 이 페이지의 라이팅 <code>Light</code> 구조체도 이 규칙을 노려 정렬돼 있습니다(아래 3-1).
+  </div>
+
+  <h3 style="margin-top:30px;">2-2. 입력 <code>PSIn</code> — 정점 셰이더가 넘겨준 것</h3>
+  <p>
+    <code>PSIn</code>은 정점 셰이더가 보간해서 픽셀 셰이더로 넘겨준 값들입니다. 각 멤버 뒤의 콜론은
+    <strong>시맨틱(semantic)</strong>으로, 이 값이 파이프라인에서 어떤 역할인지 표시하는 이름표입니다.
+  </p>
+  <ul>
+    <li>
+      <code>float4 posH : SV_Position;</code> — <strong>SV_ 접두사는 시스템 값</strong>이라는 뜻입니다.
+      <code>SV_Position</code>은 래스터라이저가 채워 주는 <em>화면 픽셀 좌표</em>로, 어떤 픽셀을 칠하는지 결정합니다.
+      이 셰이더에서 직접 읽지는 않지만 파이프라인상 필수 입력입니다.
+    </li>
+    <li>
+      <code>float3 fragPos : VIEWPOS;</code> — 이 픽셀에 해당하는 표면점의 <strong>뷰 공간 위치</strong>입니다.
+      <code>VIEWPOS</code>는 우리가 임의로 붙인 사용자 시맨틱 이름으로, 정점 셰이더 출력과 이름만 맞으면 됩니다.
+    </li>
+    <li>
+      <code>float3 normal : NORMAL;</code> — <strong>뷰 공간 법선</strong>입니다. 표면이 어느 쪽을 향하는지.
+    </li>
+    <li>
+      <code>float2 uv : TEXCOORD0;</code> — 텍스처 좌표입니다. 디퓨즈 텍스처를 이 좌표로 샘플합니다.
+    </li>
+  </ul>
+  <p>
+    <strong>왜 전부 뷰 공간인가?</strong> 조명 계산을 뷰 공간에서 하면 라이팅 패스에서 "카메라 위치"가 항상 <em>원점(0,0,0)</em>이
+    되어 시선 벡터 계산이 아주 간단해집니다(아래 3-4). 그래서 지오메트리 패스에서 미리 뷰 공간으로 변환해 둡니다.
+    행벡터 규약에서는 정점 셰이더가 <code>mul(posWorld, viewMatrix)</code>로 뷰 공간 위치를, 법선은
+    <code>mul(normal, (float3x3)normalMatrix)</code>로 변환해 이 <code>PSIn</code>에 채워 넘깁니다.
+  </p>
+
+  <h3 style="margin-top:30px;">2-3. 출력 <code>GBufferOut</code> — <code>SV_Target</code>이 곧 어태치먼트 번호</h3>
+  <p>
+    이 구조체가 MRT의 심장입니다. 픽셀 셰이더가 <strong>여러 개의 값을 반환</strong>하고, 각 멤버의
+    <code>SV_TargetN</code> 시맨틱이 <em>몇 번 렌더 타깃에 갈지</em>를 지정합니다.
+  </p>
+  <ul>
+    <li><code>float3 position : SV_Target0;</code> → C++의 <code>rtvs[0]</code>(= <code>gPosition</code>)로 기록됩니다.</li>
+    <li><code>float3 normal : SV_Target1;</code> → <code>rtvs[1]</code>(= <code>gNormal</code>)로.</li>
+    <li><code>float4 albedoSpec : SV_Target2;</code> → <code>rtvs[2]</code>(= <code>gAlbedoSpec</code>)로.</li>
+  </ul>
+  <p>
+    즉 <strong>셰이더의 <code>SV_TargetN</code> 번호 = <code>OMSetRenderTargets</code>에 넘긴 배열 인덱스 N</strong>입니다.
+    이 짝이 어긋나면 위치 텍스처에 색이 들어가는 대참사가 납니다. C++ 배열 순서와 셰이더 시맨틱 번호를 항상 함께 봐야 합니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>position</code>과 <code>normal</code>은 <code>float3</code>인데 타깃 포맷은 <code>R16G16B16A16</code>(4채널)입니다.
+    셰이더가 3채널만 쓰면 4번째 채널(A)은 정의되지 않은 값이 됩니다. 라이팅 패스에서 <code>.rgb</code>만 읽으면
+    문제없지만, 실수로 <code>.a</code>를 읽으면 쓰레기가 나옵니다. <code>albedoSpec</code>만 A 채널을 의도적으로 씁니다.
+  </div>
+
+  <h3 style="margin-top:30px;">2-4. <code>main</code> — G-buffer에 실제로 기록</h3>
+  <p>
+    본체는 아주 짧습니다. 조명이 없으니 그냥 재료를 각 타깃에 옮겨 담을 뿐입니다.
+  </p>
+  <ul>
+    <li>
+      <code>o.position = i.fragPos;</code> — 뷰 공간 위치를 그대로 기록. 부동소수 타깃이라 값 범위 걱정이 없습니다.
+    </li>
+    <li>
+      <code>o.normal = normalize(i.normal);</code> — 법선을 <strong>다시 정규화</strong>합니다. 정점 셰이더에서 픽셀
+      셰이더로 오는 동안 <em>보간(interpolation)</em>을 거치면서 법선의 길이가 1에서 살짝 벗어나기 때문입니다.
+      정규화하지 않으면 조명이 미묘하게 밝거나 어두워집니다. <code>normalize(v)</code>는 <code>v / length(v)</code>입니다.
+    </li>
+    <li>
+      <code>o.albedoSpec.rgb = diffuseTex.Sample(samp, i.uv).rgb;</code> — 디퓨즈 텍스처를 <code>uv</code> 좌표에서
+      샘플해 색(RGB)을 가져옵니다. <code>.Sample(sampler, uv)</code>는 float4를 돌려주므로 <code>.rgb</code>로 앞 세 성분만 취합니다.
+    </li>
+    <li>
+      <code>o.albedoSpec.a = specularStrength;</code> — 남는 알파 채널에 스페큘러 세기를 <strong>패킹</strong>합니다.
+      텍스처 한 장을 아끼는 핵심 트릭이죠. 라이팅 패스에서 이 <code>.a</code>를 꺼내 스페큘러 강도로 씁니다.
+    </li>
+  </ul>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    지오메트리 패스 픽셀 셰이더는 <strong>조명 루프가 전혀 없어</strong> 아주 가볍습니다. 무거운 부분은 나중에 라이팅
+    패스로 미뤄졌고, 그것도 <em>보이는 픽셀에 대해 한 번씩만</em> 실행됩니다. 이 "무거운 계산을 화면 픽셀 수로 고정"하는
+    것이 디퍼드의 성능 이점 그 자체입니다.
+  </div>
+
+  <!-- =========================================================
+       3. 라이팅 패스 픽셀 셰이더 (HLSL)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">3. 라이팅 패스 픽셀 셰이더 (HLSL)</h2>
+  <p>
+    마지막 단계입니다. 화면을 덮는 풀스크린 삼각형을 그리면서, 각 화면 픽셀마다 G-buffer 세 장을 읽어 원래 표면 속성을
+    <em>복원</em>하고, 광원 64개를 돌며 조명을 합산합니다. 여기서 <strong>블린-퐁(Blinn-Phong)</strong> 조명 모델을 씁니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>lighting_pass.hlsl (픽셀 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D    gPosition   : register(t0);
+Texture2D    gNormal     : register(t1);
+Texture2D    gAlbedoSpec : register(t2);
+SamplerState samp        : register(s0);
+
+struct Light { float3 Position; float Linear; float3 Color; float Quadratic; };
+#define NR_LIGHTS 64
+cbuffer LightConstants : register(b0) {
+    Light lights[NR_LIGHTS];
+};
+
+float4 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    // G-buffer에서 픽셀 속성 복원
+    float3 FragPos = gPosition.Sample(samp, uv).rgb;
+    float3 N       = normalize(gNormal.Sample(samp, uv).rgb);
+    float3 Albedo  = gAlbedoSpec.Sample(samp, uv).rgb;
+    float  Spec    = gAlbedoSpec.Sample(samp, uv).a;
+
+    float3 V = normalize(-FragPos);      // 뷰공간에서 카메라는 원점
+    float3 lighting = Albedo * 0.1;      // 앰비언트
+
+    for (int i = 0; i &lt; NR_LIGHTS; ++i) {
+        float3 L = normalize(lights[i].Position - FragPos);
+        float  diff = max(dot(N, L), 0.0);
+        float3 H = normalize(L + V);
+        float  spec = pow(max(dot(N, H), 0.0), 32.0) * Spec;
+
+        float d = length(lights[i].Position - FragPos);
+        float atten = 1.0 / (1.0 + lights[i].Linear * d
+                                 + lights[i].Quadratic * d * d);
+        lighting += (diff * Albedo + spec) * lights[i].Color * atten;
+    }
+    return float4(lighting, 1.0);
+}</code></pre>
+  </div>
+
+  <h3 style="margin-top:30px;">3-1. G-buffer를 입력으로 — 슬롯 t0/t1/t2</h3>
+  <p>
+    세 <code>Texture2D</code>가 각각 t0/t1/t2에 바인딩됩니다. 이 번호는 지오메트리 패스가 끝난 뒤 C++에서
+    <code>ctx-&gt;PSSetShaderResources(0, 3, srvs)</code>로 세 SRV를 <strong>같은 순서로</strong> 꽂아야 맞습니다
+    (<code>srvs[0]=gPosition.srv</code> ...). 쓸 때 RTV 순서, 읽을 때 SRV 순서가 처음부터 끝까지 일관돼야 합니다.
+  </p>
+  <p>
+    <code>struct Light { float3 Position; float Linear; float3 Color; float Quadratic; };</code>는 정렬 규칙을
+    노린 배치입니다. <code>float3</code>(12바이트) + <code>float</code>(4바이트) = <strong>정확히 16바이트</strong>가 두 번
+    반복되어, 광원 하나가 딱 32바이트로 예쁘게 정렬됩니다. 그래서 <code>Linear</code>와 <code>Quadratic</code>이
+    엉뚱하게 <code>float3</code> 사이에 끼어 <em>패딩 역할까지 겸하는</em> 영리한 배치입니다.
+  </p>
+  <ul>
+    <li><code>#define NR_LIGHTS 64</code> — 광원 개수를 컴파일 타임 상수로 고정. 배열 크기와 루프 상한에 함께 쓰입니다.</li>
+    <li><code>cbuffer LightConstants : register(b0) { Light lights[NR_LIGHTS]; }</code> — 광원 64개를 한 상수 버퍼로
+      올립니다. 64×32바이트 = 2048바이트로, D3D11 상수 버퍼 한계(64KB) 안에 넉넉히 들어갑니다.</li>
+  </ul>
+
+  <h3 style="margin-top:30px;">3-2. 진입점 시그니처 — 풀스크린 픽셀의 좌표</h3>
+  <p>
+    <code>float4 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target</code>를 뜯어봅시다.
+  </p>
+  <ul>
+    <li>
+      <code>float4 posH : SV_Position</code> — 현재 칠하는 화면 픽셀의 위치. 풀스크린 삼각형이 화면을 덮으므로
+      모든 화면 픽셀에 대해 이 함수가 한 번씩 호출됩니다.
+    </li>
+    <li>
+      <code>float2 uv : TEXCOORD0</code> — 이 픽셀의 <strong>정규화된 화면 좌표 [0,1]</strong>입니다. 풀스크린 삼각형의
+      정점 셰이더가 화면 전체에 걸쳐 0~1로 보간되도록 만들어 줍니다. 이 <code>uv</code>로 G-buffer를 샘플하면
+      <em>화면상 같은 위치의</em> G-buffer 값을 정확히 읽습니다.
+    </li>
+    <li>
+      <code>: SV_Target</code> — 반환 <code>float4</code>가 <strong>최종 백버퍼(화면)</strong>로 나갑니다. 여기서 번호를
+      안 붙이면 <code>SV_Target0</code>과 같습니다.
+    </li>
+  </ul>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    텍스처 V축은 위→아래 규약입니다. 풀스크린 삼각형의 <code>uv</code>를 만들 때 V가 뒤집히면 G-buffer가 위아래로
+    거꾸로 샘플돼 화면이 뒤집힙니다. 정점 셰이더에서 <code>uv.y</code>를 규약에 맞게 만들었는지 확인하세요.
+  </div>
+
+  <h3 style="margin-top:30px;">3-3. G-buffer에서 속성 복원</h3>
+<pre style="margin:0;"><code class="language-hlsl">float3 FragPos = gPosition.Sample(samp, uv).rgb;
+float3 N       = normalize(gNormal.Sample(samp, uv).rgb);
+float3 Albedo  = gAlbedoSpec.Sample(samp, uv).rgb;
+float  Spec    = gAlbedoSpec.Sample(samp, uv).a;</code></pre>
+  <p>
+    지오메트리 패스에서 <em>기록했던 것을 그대로 되읽는</em> 대칭 구조입니다. 각 줄이 2-4의 각 줄과 정확히 짝을 이룹니다.
+  </p>
+  <ul>
+    <li><code>FragPos</code> — 이 화면 픽셀에 보이는 표면의 뷰 공간 위치.</li>
+    <li><code>N</code> — 법선. 텍스처 보간·양자화로 길이가 살짝 틀어질 수 있어 <strong>다시 정규화</strong>합니다.</li>
+    <li><code>Albedo</code> — 표면 색(RGB).</li>
+    <li><code>Spec</code> — 아까 A 채널에 패킹한 스페큘러 세기를 <strong>다시 꺼냅니다</strong>. 패킹/언패킹의 짝.</li>
+  </ul>
+  <p>
+    <strong>핵심 통찰</strong>: 라이팅 패스는 원래 3D 씬 메시를 전혀 모릅니다. 오직 화면 크기 텍스처 세 장만 봅니다.
+    조명 비용이 씬의 삼각형 수와 완전히 무관해지고 오직 <code>화면 픽셀 × 광원</code>에만 비례하는 이유가 바로 이것입니다.
+  </p>
+
+  <h3 style="margin-top:30px;">3-4. 시선 벡터와 앰비언트</h3>
+<pre style="margin:0;"><code class="language-hlsl">float3 V = normalize(-FragPos);      // 뷰공간에서 카메라는 원점
+float3 lighting = Albedo * 0.1;      // 앰비언트</code></pre>
+  <p>
+    <strong>수학적 의미</strong>: 시선 벡터 <code>V</code>는 "표면점에서 카메라를 향하는 단위 벡터"입니다. 일반적으로는
+    <code>V = normalize(cameraPos - FragPos)</code>인데, <strong>뷰 공간에서는 카메라가 원점(0,0,0)</strong>이므로
+    <code>cameraPos - FragPos = -FragPos</code>가 됩니다. 그래서 <code>normalize(-FragPos)</code> 한 줄로 끝납니다.
+  </p>
+  <p>
+    <strong>기하 직관</strong>: 뷰 공간은 "내 눈을 세상의 원점에 둔" 좌표계입니다. 그러니 표면점 <code>FragPos</code>의
+    반대 방향(<code>-FragPos</code>)이 곧 "그 점에서 나(카메라)를 바라보는 방향"이 되는 것이죠. 이 단순함이 뷰 공간에서
+    조명하는 가장 큰 실무 이점입니다.
+  </p>
+  <p>
+    <strong>코드 매핑</strong>: <code>lighting = Albedo * 0.1</code>은 <strong>앰비언트(ambient)</strong> 항입니다.
+    어떤 광원에도 닿지 않는 그늘진 면도 완전히 새까맣지 않도록, 표면 색의 10%를 바닥값으로 깔아 줍니다. 이후 루프에서
+    광원 기여가 여기에 더해집니다.
+  </p>
+
+  <h3 style="margin-top:30px;">3-5. 광원 루프 — 확산(diffuse)</h3>
+<pre style="margin:0;"><code class="language-hlsl">for (int i = 0; i &lt; NR_LIGHTS; ++i) {
+    float3 L = normalize(lights[i].Position - FragPos);
+    float  diff = max(dot(N, L), 0.0);</code></pre>
+  <p>
+    <strong>수학</strong>: <code>L</code>은 "표면점에서 광원을 향하는 단위 벡터"입니다. <code>lights[i].Position - FragPos</code>가
+    광원까지의 방향(길이 포함)이고, <code>normalize</code>로 길이를 1로 만듭니다. 확산 강도 <code>diff</code>는
+    <strong>법선 <code>N</code>과 광원 방향 <code>L</code>의 내적</strong>입니다.
+  </p>
+  <p>
+    <strong>기하 직관(램버트 코사인 법칙)</strong>: <code>dot(N, L) = cosθ</code>는 표면과 빛이 이루는 각도입니다.
+    빛이 표면에 <em>수직으로</em> 내리쬐면(θ=0) <code>cos0 = 1</code>로 가장 밝고, <em>비스듬히</em> 스치면 어두워지며,
+    표면 <em>뒤</em>에서 오면(θ&gt;90°) 음수가 됩니다. <code>max(..., 0.0)</code>은 그 음수를 0으로 잘라
+    "표면 뒤의 빛은 이 면을 밝히지 않는다"를 표현합니다.
+  </p>
+  <p>
+    <strong>손계산 예</strong>: 법선 <code>N=(0,0,1)</code>, 빛이 정면 위 45°에서 온다면 <code>L=(0, 0.707, 0.707)</code>.
+    그러면 <code>dot(N,L) = 0×0 + 0×0.707 + 1×0.707 = 0.707</code>. 즉 정면(1.0)보다 약 71% 밝기입니다. 빛이 옆(90°)에서
+    오면 <code>L=(0,1,0)</code> → <code>dot = 0</code> → 어둡습니다. 램버트 법칙이 코드 한 줄에 그대로 들어 있습니다.
+  </p>
+
+  <h3 style="margin-top:30px;">3-6. 스페큘러(specular) — 블린-퐁의 하프 벡터</h3>
+<pre style="margin:0;"><code class="language-hlsl">    float3 H = normalize(L + V);
+    float  spec = pow(max(dot(N, H), 0.0), 32.0) * Spec;</code></pre>
+  <p>
+    <strong>수학</strong>: <code>H</code>는 <strong>하프 벡터(halfway vector)</strong>로, 광원 방향 <code>L</code>과 시선 방향
+    <code>V</code>의 <em>정확히 가운데</em>를 향하는 단위 벡터입니다. <code>L + V</code>를 정규화하면 둘의 중간 방향이 나옵니다.
+    스페큘러 세기는 <code>dot(N, H)</code>를 <strong>32제곱</strong>한 값에 표면의 스페큘러 강도 <code>Spec</code>를 곱한 것입니다.
+  </p>
+  <p>
+    <strong>기하 직관</strong>: 거울 반사가 가장 강하게 보이는 순간은 "표면 법선이 <code>L</code>과 <code>V</code>의 정확히
+    가운데를 향할 때"입니다. 즉 <code>N</code>과 <code>H</code>가 나란할 때(<code>dot(N,H)≈1</code>) 하이라이트가 뜹니다.
+    <code>pow(..., 32)</code>의 <strong>지수 32는 광택(shininess)</strong>입니다. 지수가 클수록 하이라이트가 <em>작고 날카롭게</em>
+    (반짝이는 금속), 작을수록 <em>넓고 부드럽게</em>(무광 플라스틱) 퍼집니다.
+  </p>
+  <p>
+    <strong>손계산 예</strong>: <code>dot(N,H)=0.9</code>이면 <code>0.9^32 ≈ 0.034</code>로 뚝 떨어지고, <code>dot(N,H)=0.99</code>이면
+    <code>0.99^32 ≈ 0.725</code>로 확 살아납니다. 지수 승이 <em>거의 정면일 때만</em> 밝게 만드는, 날카로운 하이라이트를
+    만듭니다. 여기에 <code>* Spec</code>로 표면별 반짝임 정도(아까 A 채널에 패킹한 값)를 곱해 조절합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">왜 하프 벡터?</span>
+    원조 퐁(Phong) 모델은 반사 벡터 <code>R = reflect(-L, N)</code>을 구해 <code>dot(R, V)</code>를 썼습니다. 블린-퐁은
+    반사 벡터 대신 하프 벡터 <code>H</code>로 <code>dot(N, H)</code>를 써서 <strong>reflect 계산을 아끼고</strong>, 스치는
+    각도에서 하이라이트가 더 자연스럽게 나옵니다. 실무 표준이 블린-퐁인 이유입니다.
+  </div>
+
+  <h3 style="margin-top:30px;">3-7. 거리 감쇠(attenuation)</h3>
+<pre style="margin:0;"><code class="language-hlsl">    float d = length(lights[i].Position - FragPos);
+    float atten = 1.0 / (1.0 + lights[i].Linear * d
+                             + lights[i].Quadratic * d * d);</code></pre>
+  <p>
+    <strong>수학</strong>: <code>d</code>는 광원까지의 실제 거리입니다. 감쇠 <code>atten</code>은
+    <code>1 / (1 + a·d + b·d²)</code> 꼴의 <strong>역이차(inverse-quadratic) 감쇠</strong>입니다. <code>Linear</code>가
+    1차 계수 <code>a</code>, <code>Quadratic</code>이 2차 계수 <code>b</code>입니다.
+  </p>
+  <p>
+    <strong>기하 직관</strong>: 현실의 빛은 거리 제곱에 반비례해 약해집니다(점광원이 퍼지는 구의 표면적이 <code>4πd²</code>이므로).
+    <code>d²</code> 항이 그 물리를 담고, <code>d</code>(1차) 항과 상수 1은 <strong>가까울 때 값이 무한대로 튀는 것을 막고</strong>
+    감쇠 곡선을 부드럽게 다듬는 실무용 보정입니다. 분모가 항상 1 이상이라 <code>atten</code>은 0~1 사이에 안전하게 머뭅니다.
+  </p>
+  <p>
+    <strong>손계산 예</strong>: <code>a=0.09, b=0.032</code>일 때, 거리 <code>d=1</code>이면 분모 <code>1 + 0.09 + 0.032 = 1.122</code> →
+    <code>atten ≈ 0.89</code>(거의 밝음). <code>d=10</code>이면 <code>1 + 0.9 + 3.2 = 5.1</code> → <code>atten ≈ 0.196</code>(많이 어두움).
+    <code>d=20</code>이면 <code>1 + 1.8 + 12.8 = 15.6</code> → <code>atten ≈ 0.064</code>. 거리가 멀수록 <code>d²</code> 항이
+    지배해 급격히 어두워집니다.
+  </p>
+
+  <h3 style="margin-top:30px;">3-8. 최종 합산과 반환</h3>
+<pre style="margin:0;"><code class="language-hlsl">    lighting += (diff * Albedo + spec) * lights[i].Color * atten;
+}
+return float4(lighting, 1.0);</code></pre>
+  <p>
+    <strong>성분별 해부</strong>: 한 광원의 기여는 <code>(diff * Albedo + spec) * Color * atten</code>입니다.
+  </p>
+  <ul>
+    <li>
+      <code>diff * Albedo</code> — 확산광은 <strong>표면 색을 입습니다</strong>. 빨간 표면은 확산광도 붉게 반사하죠.
+    </li>
+    <li>
+      <code>+ spec</code> — 스페큘러는 <strong>표면 색을 곱하지 않습니다</strong>. 하이라이트는 광원 색 그대로(흰 빛이면
+      흰 반짝임)라서 알베도를 안 곱합니다. 이 미묘한 차이가 재질감을 살립니다.
+    </li>
+    <li>
+      <code>* lights[i].Color</code> — 광원 자체의 색을 곱합니다(붉은 조명이면 전체가 붉게).
+    </li>
+    <li>
+      <code>* atten</code> — 마지막에 거리 감쇠를 곱해 먼 광원의 기여를 줄입니다.
+    </li>
+  </ul>
+  <p>
+    <code>lighting += ...</code>로 <strong>모든 광원의 기여를 누적</strong>합니다(빛은 더해집니다). 루프가 끝나면
+    <code>return float4(lighting, 1.0)</code>로 알파 1(불투명)을 붙여 화면에 출력합니다. 이 한 픽셀에 대해 광원 64개를
+    다 돈 결과가 최종 색입니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    이 루프는 <strong>화면의 모든 픽셀에 대해</strong> 64번 도므로, 광원 대부분이 그 픽셀에서 멀어 기여가 0에 가까워도
+    비용은 똑같이 듭니다. 실무 최적화는 <strong>라이트 볼륨(light volume)</strong>이나 <strong>타일드/클러스터드
+    디퍼드</strong>로, 각 픽셀이 <em>실제로 영향받는 광원만</em> 돌게 합니다. 원본은 이해를 위해 모든 광원을 무조건 도는
+    가장 단순한 형태입니다.
+  </div>
+
+  <!-- =========================================================
+       4. 전체 흐름 요약 & 트레이드오프
+       ========================================================= -->
+  <h2 style="margin-top:44px;">4. 전체 흐름 한눈에</h2>
+  <ol class="steps">
+    <li><strong>준비(1회)</strong>: 위치·법선·알베도스펙 세 타깃 생성(텍스처+RTV+SRV), 깊이 버퍼 생성.</li>
+    <li><strong>지오메트리 패스(매 프레임)</strong>: 세 RTV+깊이를 MRT로 묶고 클리어 → 씬 메시를 그림 → 각 픽셀 속성이 G-buffer에 기록됨.</li>
+    <li><strong>전환</strong>: RTV 언바인드 → 세 SRV를 t0/t1/t2에 바인딩 → 백버퍼를 렌더 타깃으로 설정.</li>
+    <li><strong>라이팅 패스(매 프레임)</strong>: 풀스크린 삼각형 1개 드로우 → 픽셀마다 G-buffer 읽어 광원 64개 합산 → 화면 출력.</li>
+    <li><strong>포워드 보정 패스(선택)</strong>: 반투명 물체·스카이박스 등 디퍼드로 안 되는 것들을 포워드로 덧그림.</li>
+  </ol>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <strong>대역폭 트레이드오프</strong>: 디퍼드는 픽셀당 여러 개의 넓은 G-buffer를 쓰고 읽어 메모리 대역폭을
+    많이 씁니다. 그 대신 오버드로우 셰이딩이 사라져 <em>광원이 많을 때</em> 압승입니다. 단점은
+    (1) MSAA가 어렵고(에지 안티앨리어싱을 G-buffer 단계에서 하기 까다로워 보통 FXAA/TAA 같은 후처리 AA로 대체),
+    (2) 반투명 처리가 안 돼(반투명은 여러 겹의 색을 섞어야 하는데 G-buffer는 픽셀당 표면 하나만 담으므로, 포워드로 별도 패스 필요),
+    (3) 재질 다양성이 G-buffer 크기에 제한됩니다(재질 파라미터가 늘면 타깃이 늘고 대역폭도 늡니다).
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">DirectXMath 대응</span>
+    이 페이지의 셰이더는 좌표를 만들어 오는 정점 셰이더에 의존합니다. C++/DirectXMath 쪽에서는
+    행벡터 규약으로 <code>XMMatrixMultiply</code>로 월드·뷰·투영을 곱하고, cbuffer에 올릴 때는 HLSL <code>mul(v, M)</code>과
+    맞추기 위해 <strong><code>XMMatrixTranspose</code>로 전치</strong>해 업로드합니다. 광원 위치도 CPU에서
+    <code>XMVector3TransformCoord(worldPos, viewMatrix)</code>로 <strong>뷰 공간</strong>으로 옮겨 넘겨야 셰이더의
+    뷰 공간 조명과 좌표계가 일치합니다. 이 좌표계 일관성이 디퍼드에서 가장 자주 틀리는 부분입니다.
+  </div>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-shadowmap.html">← 섀도우 맵 (Shadow Mapping)</a>
+    <a href="./06-screenspace.html">스크린 스페이스 효과 (SSAO 포함) →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

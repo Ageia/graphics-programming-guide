@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: HLSL 요점 — C++/DirectX 11</title>
+<meta name="description" content="HLSL의 입출력·시맨틱·리소스 바인딩·타입·내장 함수·셰이더 모델을 한 줄 한 줄 해부하는 입문자용 상세 구현 가이드 (Direct3D 11 / 셰이더 모델 5.0)." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./04-shaders.html">4장. GPU · 셰이더</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">HLSL 요점</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 4</span>
+  <h1 style="font-size:32px; margin:0 0 12px;">HLSL 요점 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead" style="font-size:16px;">
+    HLSL(High-Level Shading Language)은 Direct3D에서 GPU 프로그램을 작성하는 언어입니다. C 계열
+    문법을 따르므로 C++에 익숙하면 낯설지 않습니다. 문법 규모 자체는 작아서, <strong>입출력 구조체 · 시맨틱 ·
+    리소스 바인딩 · 벡터/행렬 타입 · 내장 함수</strong> 이 다섯 가지만 확실히 익히면 실무 셰이더의 대부분을 읽고
+    쓸 수 있습니다. 이 페이지에서는 각 요소를 <strong>한 줄씩 해부</strong>하면서, 뒤에 숨은 GPU 하드웨어·수학
+    원리와 CPU 쪽(C++/D3D11 API·DirectXMath) 대응까지 1:1로 짚습니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">규약</span>
+    이 가이드 전체는 <strong>행벡터 규약</strong>(<code>v' = v · M</code>, HLSL에서 <code>mul(v, M)</code>),
+    <strong>행 우선 저장</strong>, <strong>왼손 좌표계</strong>, <strong>클립 공간 z ∈ [0,1]</strong>,
+    <strong>텍스처 V축 위→아래</strong>를 씁니다. 실무에서는 검증된 라이브러리(DirectXMath)를 쓰는 것을
+    권장하며, 여기서 손으로 뜯어보는 것은 어디까지나 <em>원리를 몸에 익히기 위한 학습용</em>입니다.
+  </div>
+
+  <!-- ===================================================================== -->
+  <section id="io-resources">
+    <h2>1. 입출력과 리소스 — 셰이더의 "함수 시그니처"</h2>
+    <p>
+      셰이더 하나는 결국 <strong>GPU 위에서 수백만 번 병렬 호출되는 함수</strong>입니다. 함수라면 반드시
+      <em>무엇이 들어오고(입력)</em>, <em>무엇이 나가며(출력)</em>, <em>바깥에서 공유하는 상수·리소스가
+      무엇인지</em>가 정해져 있어야 합니다. HLSL은 이 세 가지를 각각 <strong>입력 구조체 + 시맨틱</strong>,
+      <strong>반환 구조체 / 시스템 값 시맨틱</strong>, <strong>cbuffer·Texture·Sampler·UAV의 register 바인딩</strong>
+      으로 표현합니다. C 언어의 함수 원형(prototype)에 해당하는 "계약서"라고 보면 됩니다.
+    </p>
+
+    <table class="impl">
+      <thead><tr><th>요소</th><th>의미</th><th>GLSL 대응</th></tr></thead>
+      <tbody>
+        <tr><td>입력 구조체 + 시맨틱</td><td>이 스테이지로 들어오는 입력 (정점 속성 / 앞 스테이지에서 보간된 값)</td><td><code>in</code></td></tr>
+        <tr><td>반환 구조체 / <code>: SV_Target</code></td><td>다음 스테이지로 내보내는 출력 / 픽셀의 최종 색</td><td><code>out</code></td></tr>
+        <tr><td><code>cbuffer : register(b#)</code></td><td>드로우콜 동안 모든 호출이 공유하는 CPU→GPU 상수</td><td><code>uniform</code></td></tr>
+        <tr><td>시맨틱 (<code>POSITION</code>, <code>TEXCOORD#</code>, <code>SV_Position</code>)</td><td>속성 슬롯 / 시스템 값을 이름으로 지정</td><td>레이아웃 <code>location</code></td></tr>
+        <tr><td><code>Texture2D : register(t#)</code> / <code>SamplerState : register(s#)</code></td><td>텍스처 리소스와 샘플러의 바인딩 슬롯</td><td><code>sampler2D</code></td></tr>
+        <tr><td><code>RWStructuredBuffer</code> / <code>RWTexture2D : register(u#)</code></td><td>컴퓨트에서 읽고 쓰는 UAV 리소스</td><td><code>buffer</code> / image</td></tr>
+      </tbody>
+    </table>
+
+    <h3>1-1. 시맨틱(semantic)이란 무엇인가</h3>
+    <p>
+      <strong>무엇을 하나:</strong> 시맨틱은 셰이더의 입출력 변수 하나하나에 <em>이름표</em>를 붙여, GPU
+      파이프라인의 어느 "선(wire)"에 그 값이 연결될지 알려주는 문자열입니다. 예를 들어 정점 셰이더 입력
+      필드에 <code>: POSITION</code>을 붙이면 "이 필드는 정점 버퍼의 위치 속성과 연결하라"는 뜻이고,
+      출력 필드에 <code>: SV_Position</code>을 붙이면 "이 값은 래스터라이저가 화면 좌표로 쓸 클립 공간
+      위치다"라는 뜻입니다.
+    </p>
+    <p>
+      <strong>왜 필요한가:</strong> GPU는 C++처럼 <em>변수 이름</em>으로 데이터를 연결하지 않습니다. 컴파일된
+      셰이더 안에서 변수 이름은 사라지고, 대신 <em>슬롯 번호와 시맨틱 이름</em>만 남습니다. CPU 쪽에서 정점
+      버퍼의 레이아웃을 기술하는 <code>D3D11_INPUT_ELEMENT_DESC</code>의 <code>SemanticName</code>·
+      <code>SemanticIndex</code>가 바로 이 시맨틱과 <em>문자열로 매칭</em>되어 데이터가 흘러 들어갑니다.
+      즉 시맨틱은 CPU와 GPU가 서로를 못 보는 상태에서 데이터를 이어 붙이는 "약속된 커넥터 이름"입니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>입력/출력 구조체 예시</span><span class="lang">hlsl</span></div>
+      <pre><code class="language-hlsl">// ── 정점 셰이더 입력: 정점 버퍼의 각 속성과 시맨틱으로 매칭 ──
+struct VSInput
+{
+    float3 posLocal : POSITION;    // 모델(로컬) 공간 위치 → 정점 버퍼 슬롯
+    float3 normal   : NORMAL;      // 정점 법선
+    float2 uv       : TEXCOORD0;   // 텍스처 좌표 0번
+};
+
+// ── 정점 셰이더 출력 = 픽셀 셰이더 입력: 래스터라이저가 보간해서 전달 ──
+struct VSOutput
+{
+    float4 posClip  : SV_Position; // 시스템 값: 클립 공간 위치(필수 출력)
+    float3 normalW  : NORMAL;      // 월드 공간 법선(보간됨)
+    float2 uv       : TEXCOORD0;   // UV(보간됨)
+};
+
+// ── 픽셀 셰이더: 최종 색을 렌더 타깃으로 ──
+float4 PSMain(VSOutput i) : SV_Target
+{
+    return float4(i.uv, 0, 1);     // UV를 색으로 시각화
+}</code></pre>
+    </div>
+
+    <h3>1-2. 위 코드를 한 줄씩 해부</h3>
+    <p>
+      <code>struct VSInput { ... };</code> — C/C++의 구조체와 문법이 똑같습니다. 세미콜론까지 동일합니다.
+      다만 각 멤버 뒤에 <code>: POSITION</code>처럼 <strong>콜론 + 시맨틱</strong>이 붙는 것이 HLSL만의 문법입니다.
+      이 구조체는 "정점 하나가 GPU에 들어올 때 어떤 필드를 어떤 순서로 갖는가"를 기술합니다.
+    </p>
+    <p>
+      <code>float3 posLocal : POSITION;</code> — <code>float3</code>는 32비트 부동소수 3개(x, y, z)를 묶은
+      벡터 타입입니다(뒤 2절에서 상세히). 변수 이름 <code>posLocal</code>은 <em>우리끼리 읽기 위한 이름</em>일
+      뿐이고, GPU 입력 배선을 결정하는 것은 <code>POSITION</code>이라는 시맨틱입니다. 이름을 <code>abc</code>로
+      바꿔도 시맨틱만 <code>POSITION</code>이면 동일하게 동작합니다. 이 필드에는 <strong>모델 로컬 공간</strong>의
+      정점 위치가 들어옵니다.
+    </p>
+    <p>
+      <code>float2 uv : TEXCOORD0;</code> — <code>TEXCOORD</code> 뒤의 <strong>0</strong>은 시맨틱 인덱스입니다.
+      UV가 여러 세트 필요하면(라이트맵 UV 등) <code>TEXCOORD0</code>, <code>TEXCOORD1</code>처럼 번호로
+      구분합니다. CPU 쪽 <code>D3D11_INPUT_ELEMENT_DESC</code>에서 <code>SemanticName = "TEXCOORD"</code>,
+      <code>SemanticIndex = 0</code>과 짝이 맞아야 데이터가 연결됩니다.
+    </p>
+    <p>
+      <code>float4 posClip : SV_Position;</code> — 접두사 <strong>SV_</strong>는 "System Value", 즉 파이프라인
+      고정 기능이 특별한 의미로 소비하는 값을 뜻합니다. <code>SV_Position</code>은 <em>클립 공간</em>의 4성분
+      위치(x, y, z, w)이며, 래스터라이저가 이 값을 원근 분할(perspective divide, <code>xyz/w</code>)한 뒤
+      뷰포트 변환하여 실제 화면 픽셀을 정합니다. 정점 셰이더는 이 출력을 <strong>반드시</strong> 채워야 합니다.
+      이것을 빼먹으면 컴파일은 되어도 아무것도 그려지지 않습니다.
+    </p>
+    <p>
+      <code>float4 PSMain(VSOutput i) : SV_Target</code> — 픽셀 셰이더의 시그니처입니다. 인자 <code>i</code>는
+      래스터라이저가 <strong>삼각형 내부 각 픽셀 위치마다 보간해 준</strong> <code>VSOutput</code> 값입니다(정점
+      3개의 출력을 무게중심 좌표로 섞은 값). 함수 뒤의 <code>: SV_Target</code>은 "이 반환값을 0번 렌더 타깃에
+      쓴다"는 시맨틱입니다. 여러 렌더 타깃(MRT)을 쓰면 <code>SV_Target0</code>, <code>SV_Target1</code>로
+      나눕니다.
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      정점 셰이더 출력 구조체와 픽셀 셰이더 입력 구조체는 <strong>시맨틱과 순서가 정확히 일치</strong>해야
+      합니다. 필드 이름이 아니라 <em>시맨틱</em>으로 연결되므로, 순서를 바꾸거나 시맨틱을 오타 내면(예:
+      <code>TEXCOORD0</code>를 <code>TEXCORD0</code>) 값이 엉뚱하게 들어오거나 컴파일이 실패합니다.
+    </div>
+
+    <h3>1-3. cbuffer — 드로우콜이 공유하는 상수</h3>
+    <p>
+      <strong>무엇을 하나:</strong> <code>cbuffer</code>(constant buffer)는 한 번의 드로우콜 동안 <em>모든 정점·
+      픽셀 호출이 똑같이 읽는</em> 상수 묶음입니다. 카메라 행렬, 시간, 광원 위치 같은 "이번 프레임/이번 물체에
+      공통인 값"을 여기에 담아 CPU에서 GPU로 한 번에 올립니다. GLSL의 <code>uniform</code>에 정확히 대응합니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>상수 버퍼 선언</span><span class="lang">hlsl</span></div>
+      <pre><code class="language-hlsl">cbuffer PerObject : register(b0)   // b0 = 상수 버퍼 슬롯 0번
+{
+    float4x4 gWorldViewProj;       // 월드·뷰·투영을 합친 행렬(행 우선)
+    float4   gTint;                // 색 보정
+    float    gTime;                // 애니메이션용 시간(초)
+    float3   _pad;                 // 16바이트 정렬을 위한 패딩
+};
+
+VSOutput VSMain(VSInput v)
+{
+    VSOutput o;
+    // 행벡터 규약: v' = v * M  →  HLSL 에서는 mul(row, M)
+    o.posClip = mul(float4(v.posLocal, 1.0), gWorldViewProj);
+    o.normalW = v.normal;
+    o.uv      = v.uv;
+    return o;
+}</code></pre>
+    </div>
+
+    <p>
+      <code>cbuffer PerObject : register(b0)</code> — 블록 이름 <code>PerObject</code>는 사람이 읽기 위한
+      것이고, GPU 배선은 <code>register(b0)</code>이 결정합니다. 접두사 <strong>b</strong>는 buffer(상수
+      버퍼)를 뜻하고 뒤의 <strong>0</strong>은 슬롯 번호입니다. CPU 쪽에서
+      <code>context-&gt;VSSetConstantBuffers(0, 1, &amp;cb)</code>로 0번 슬롯에 버퍼를 바인딩하면, 이
+      <code>b0</code> 선언과 연결됩니다. 여기서 슬롯 번호 <code>0</code>이 양쪽에서 일치해야 합니다.
+    </p>
+    <p>
+      <code>float4x4 gWorldViewProj;</code> — 4×4 행렬입니다. 관례로 상수에는 <code>g</code>(global) 접두사를
+      붙여 지역 변수와 구분합니다. 우리 규약은 <strong>행벡터·행 우선</strong>이므로, 이 행렬은 CPU에서
+      월드·뷰·투영을 곱한 결과를 담습니다.
+    </p>
+    <p>
+      <code>float3 _pad;</code> — <strong>패딩</strong>입니다. cbuffer는 하드웨어 규칙상 각 멤버가
+      <strong>16바이트(float 4개) 경계</strong>를 넘지 않도록 배치되고, 전체 크기도 16의 배수여야 합니다.
+      <code>gTime</code>(4바이트) 뒤에 12바이트를 채워 다음 경계를 맞추려고 넣은 더미입니다. 이 규칙을
+      무시하고 CPU 구조체를 만들면 값이 어긋나 읽힙니다(아래 함정 참고).
+    </p>
+    <p>
+      <code>o.posClip = mul(float4(v.posLocal, 1.0), gWorldViewProj);</code> — 이 페이지에서 가장 중요한 한
+      줄입니다. 수학적으로는 <em>동차 좌표(homogeneous)</em>로 확장한 위치 벡터에 변환 행렬을 곱해 클립 공간
+      좌표를 얻습니다. 성분별로 뜯으면:
+    </p>
+    <ul>
+      <li><strong>수학:</strong> <code>float4(v.posLocal, 1.0)</code>은 3차원 점 (x, y, z)를 4차원 (x, y, z, 1)로
+      올립니다. w=1은 "이것은 방향이 아니라 <em>점</em>이라 평행이동의 영향을 받는다"는 표시입니다(방향
+      벡터라면 w=0을 씁니다).</li>
+      <li><strong>기하 직관:</strong> 로컬 공간에 놓인 정점을, 세계에 배치하고(월드) → 카메라 시점으로 옮기고
+      (뷰) → 원근 투영(투영)까지 한 번에 통과시켜, 화면에 찍히기 직전의 "클립 공간"으로 보냅니다. 마치 물체를
+      들어 세계에 놓고, 카메라 뒤에서 렌즈로 들여다본 좌표로 접는 과정입니다.</li>
+      <li><strong>코드 매핑:</strong> <code>mul(row, M)</code>은 <em>행벡터 × 행렬</em>이므로, 결과의 각 성분은
+      "행벡터와 M의 각 <em>열</em>의 내적"입니다. 우리 규약(<code>v' = v·M</code>)과 정확히 일치합니다.</li>
+    </ul>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <strong>인자 순서와 전치(transpose):</strong> HLSL의 <code>mul(A, B)</code>은 인자 순서가 결과를 바꿉니다.
+      행벡터 규약에서는 반드시 <code>mul(v, M)</code>(벡터가 앞)이어야 합니다. 또한 DirectXMath는 행벡터·행 우선을
+      쓰지만 HLSL <code>float4x4</code>는 기본이 <em>열 우선(column-major)</em> 팩킹이라, CPU에서 cbuffer에
+      올리기 전에 <code>XMMatrixTranspose</code>로 <strong>전치</strong>해 주는 것이 표준 관행입니다. 이걸
+      빼먹으면 물체가 이상하게 찌그러지거나 전혀 안 보입니다.
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>C++ 쪽 cbuffer 구조체 (DirectXMath)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+
+// HLSL cbuffer PerObject 와 바이트 레이아웃이 정확히 일치해야 함
+struct PerObjectCB
+{
+    XMFLOAT4X4 worldViewProj;  // 64바이트 (16 x 4)
+    XMFLOAT4   tint;           // 16바이트
+    float      time;           // 4바이트
+    float      _pad[3];        // 12바이트 패딩 → 여기까지 16의 배수
+};
+static_assert(sizeof(PerObjectCB) % 16 == 0, "cbuffer must be 16-byte aligned");
+
+// 행렬을 만들고 cbuffer에 올릴 때: 전치해서 넣는다
+XMMATRIX world = XMMatrixIdentity();
+XMMATRIX view  = XMMatrixLookAtLH(eye, at, up);   // LH = 왼손 좌표계
+XMMATRIX proj  = XMMatrixPerspectiveFovLH(fovY, aspect, zn, zf);
+XMMATRIX wvp   = world * view * proj;             // 행벡터 규약: 왼→오른쪽 순서
+
+PerObjectCB cb;
+XMStoreFloat4x4(&amp;cb.worldViewProj, XMMatrixTranspose(wvp)); // 전치 필수</code></pre>
+    </div>
+
+    <p>
+      C++ 구조체의 각 필드가 HLSL cbuffer와 <strong>같은 바이트 오프셋</strong>에 있어야 합니다.
+      <code>_pad[3]</code>은 HLSL의 <code>_pad</code>와 대응하며, <code>static_assert</code>로 전체 크기가 16의
+      배수임을 컴파일 타임에 강제했습니다. <code>XMMatrixLookAtLH</code>·<code>XMMatrixPerspectiveFovLH</code>의
+      끝 <strong>LH</strong>가 왼손 좌표계용, 그리고 <code>PerspectiveFovLH</code>는 클립 z를 [0,1] 범위로
+      만들어 우리 규약과 맞습니다. <code>world * view * proj</code> 순서(왼→오른쪽)는 행벡터 규약에서 "먼저
+      적용할 변환을 왼쪽"에 두는 것과 일치합니다.
+    </p>
+
+    <h3>1-4. 텍스처와 샘플러, UAV</h3>
+    <div class="code">
+      <div class="code-head"><span>텍스처·샘플러·UAV 바인딩</span><span class="lang">hlsl</span></div>
+      <pre><code class="language-hlsl">Texture2D    gAlbedo : register(t0);   // t = SRV(읽기 전용 리소스) 슬롯 0
+SamplerState gSamp   : register(s0);   // s = 샘플러 슬롯 0
+
+RWTexture2D&lt;float4&gt;      gOutput : register(u0);  // u = UAV(읽기/쓰기) 슬롯 0
+RWStructuredBuffer&lt;uint&gt; gCount  : register(u1);  // 구조화 버퍼 UAV
+
+float4 PSTextured(VSOutput i) : SV_Target
+{
+    float4 c = gAlbedo.Sample(gSamp, i.uv);  // 텍스처 + 샘플러로 UV 위치 샘플
+    return c;
+}</code></pre>
+    </div>
+
+    <p>
+      <code>Texture2D gAlbedo : register(t0);</code> — 텍스처는 <strong>SRV</strong>(Shader Resource View,
+      읽기 전용)로 바인딩되며 register 접두사 <strong>t</strong>(texture)를 씁니다. CPU 쪽
+      <code>PSSetShaderResources(0, ...)</code>의 0번과 짝이 됩니다.
+    </p>
+    <p>
+      <code>SamplerState gSamp : register(s0);</code> — <strong>샘플러</strong>는 텍스처를 "어떻게 읽을지"를
+      정하는 설정입니다: 필터링(최근접/선형/이방성), 주소 지정(반복/클램프/미러), 밉맵 처리 등. 텍스처(데이터)와
+      샘플러(읽는 방법)가 분리되어 있는 것이 D3D의 특징입니다.
+    </p>
+    <p>
+      <code>gAlbedo.Sample(gSamp, i.uv)</code> — 텍스처 객체의 메서드로 샘플러와 UV를 넘겨 색을 뽑습니다.
+      반환은 <code>float4</code>(RGBA)입니다. 우리 규약상 <strong>텍스처 V축은 위→아래</strong>이므로, uv=(0,0)이
+      좌상단, (1,1)이 우하단입니다. OpenGL(아래→위)에서 옮겨온 애셋이라면 V를 뒤집어야 할 수 있습니다.
+    </p>
+    <p>
+      <code>RWTexture2D&lt;float4&gt; gOutput : register(u0);</code> — 접두사 <strong>u</strong>(unordered
+      access)는 <strong>UAV</strong>, 즉 셰이더가 <em>읽고 쓸 수</em> 있는 리소스입니다. 주로 컴퓨트 셰이더에서
+      결과를 직접 기록할 때 씁니다. 픽셀 셰이더가 렌더 타깃에 "출력만" 하는 것과 달리, UAV는 임의 위치에
+      읽기/쓰기가 가능합니다. 컴퓨트 셰이더 자세한 사용은 <a href="./04-computeshader.html">Compute Shader</a>
+      페이지에서 다룹니다.
+    </p>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      한 프레임에 자주 바뀌는 상수(뷰·투영)와 물체마다 바뀌는 상수(월드)를 <strong>서로 다른 cbuffer 슬롯</strong>
+      (예: <code>b0</code> per-frame, <code>b1</code> per-object)으로 나누면, 안 바뀌는 버퍼는 다시 안 올려도
+      되어 CPU→GPU 대역폭을 아낍니다. 모든 상수를 한 cbuffer에 몰아넣으면 매 드로우콜마다 전부 다시 업로드하게
+      됩니다.
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="types">
+    <h2>2. 타입 — 스칼라 · 벡터 · 행렬 · 스위즐</h2>
+    <p>
+      HLSL의 타입 체계는 작지만, <strong>벡터·행렬이 1급 시민(first-class)</strong>이라는 점이 C++과 크게
+      다릅니다. C++에서는 벡터를 <code>struct Vec3</code>로 직접 만들고 연산자를 오버로딩해야 하지만, HLSL에서는
+      <code>float3</code>가 언어 내장 타입이고 사칙연산·내적·정규화가 전부 하드웨어 명령으로 준비되어 있습니다.
+      GPU가 원래 벡터 연산에 최적화된 하드웨어이기 때문입니다.
+    </p>
+
+    <ul>
+      <li><strong>스칼라</strong>: <code>float</code>(32비트 실수), <code>int</code>, <code>uint</code>(부호 없는
+      정수), <code>bool</code>. GPU에서는 <code>float</code>가 가장 빠르고 흔합니다.</li>
+      <li><strong>벡터</strong>: <code>float2/3/4</code>, <code>int2/3/4</code>, <code>uint2/3/4</code> — 성분 2~4개.
+      <strong>스위즐</strong>(swizzle)로 성분을 자유롭게 골라 재배열할 수 있습니다: <code>v.xyz</code>,
+      <code>v.rgb</code>, <code>v.xy</code>, 심지어 <code>v.xxz</code>(반복)나 <code>v.zyx</code>(역순)도 됩니다.</li>
+      <li><strong>행렬</strong>: <code>float2x2/3x3/4x4</code>(또는 별칭 <code>matrix</code> = <code>float4x4</code>).
+      벡터·행렬 곱은 연산자 <code>*</code>가 아니라 <strong><code>mul()</code></strong> 함수를 씁니다.</li>
+      <li><strong>텍스처/샘플러</strong>: <code>Texture2D</code>, <code>TextureCube</code> + <code>SamplerState</code>
+      — 데이터와 읽는 방법의 분리(1절).</li>
+    </ul>
+
+    <h3>2-1. 스위즐이 왜 강력한가</h3>
+    <p>
+      <strong>수학:</strong> 스위즐은 벡터의 성분을 임의로 선택·복제·재배열하는 연산입니다. <code>v.rgb</code>는
+      <code>float4</code> 색에서 알파를 뺀 <code>float3</code>를 뽑고, <code>v.bgr</code>는 R과 B를 맞바꿉니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> 화면에 흩어진 4개의 서랍(x, y, z, w)에서 원하는 서랍을 원하는 순서로 꺼내
+      새 상자에 담는 것과 같습니다. GPU 하드웨어는 이 재배열을 <em>추가 비용 거의 없이</em> 처리하도록 설계되어
+      있어, CPU에서 인덱싱·복사로 하는 것보다 훨씬 자연스럽습니다.
+    </p>
+    <p>
+      <strong>코드 매핑:</strong> <code>.xyzw</code>(위치·수학용)와 <code>.rgba</code>(색용)는 같은 성분을
+      가리키는 두 별칭입니다. 섞어 쓰면(<code>v.xg</code>) 컴파일 오류가 나므로, 한 스위즐 안에서는 한 세트만
+      씁니다. 왼쪽 대입도 가능해서 <code>v.xy = otherVec2;</code>처럼 일부 성분만 갱신할 수 있습니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>타입과 스위즐 예제</span><span class="lang">hlsl</span></div>
+      <pre><code class="language-hlsl">float4 c = float4(0.2, 0.4, 0.8, 1.0);
+float3 rgb = c.rgb;          // (0.2, 0.4, 0.8)  — 알파 제거
+float3 bgr = c.bgr;          // (0.8, 0.4, 0.2)  — R↔B 스왑
+float2 xy  = c.xy;           // (0.2, 0.4)
+float  lum = dot(c.rgb, float3(0.299, 0.587, 0.114)); // 밝기(휘도)
+
+float3 a = float3(1, 2, 3);
+float3 b = float3(4, 0, 0);
+float  d = dot(a, b);        // 1*4 + 2*0 + 3*0 = 4    ← 손계산
+float3 x = cross(a, b);      // 외적 (아래 해부)
+float3 n = normalize(a);     // a / |a|,  |a| = sqrt(14) ≈ 3.742</code></pre>
+    </div>
+
+    <p>
+      <code>float lum = dot(c.rgb, float3(0.299, 0.587, 0.114));</code> — RGB 색의 <strong>휘도(밝기)</strong>를
+      계산하는 표준 공식입니다. 사람 눈은 녹색에 가장 민감하므로 녹색 가중치(0.587)가 가장 큽니다. 내적으로
+      <code>0.2·0.299 + 0.4·0.587 + 0.8·0.114 = 0.0598 + 0.2348 + 0.0912 = 0.3858</code>이 나옵니다. 흑백 변환·
+      톤 매핑에 자주 쓰이는 패턴입니다.
+    </p>
+    <p>
+      <code>float d = dot(a, b);</code> — 내적을 손으로 계산하면
+      <code>(1)(4) + (2)(0) + (3)(0) = 4</code>입니다. 내적은 두 벡터가 이루는 각의 코사인에 두 크기를 곱한 값
+      (<code>a·b = |a||b|cosθ</code>)이라, 조명에서 "빛과 표면 법선이 얼마나 마주 보는가"를 재는 데 핵심입니다.
+    </p>
+
+    <h3>2-2. cross(외적)를 성분 단위로</h3>
+    <p>
+      <strong>수학:</strong> 외적 <code>a × b</code>는 <em>두 벡터에 동시에 수직</em>인 새 벡터를 만듭니다.
+      성분식은 다음과 같습니다:
+    </p>
+    <ul>
+      <li><code>x = a.y*b.z - a.z*b.y</code></li>
+      <li><code>y = a.z*b.x - a.x*b.z</code></li>
+      <li><code>z = a.x*b.y - a.y*b.x</code></li>
+    </ul>
+    <p>
+      위 예제의 <code>a=(1,2,3)</code>, <code>b=(4,0,0)</code>로 손계산하면:
+      <code>x = 2·0 - 3·0 = 0</code>, <code>y = 3·4 - 1·0 = 12</code>, <code>z = 1·0 - 2·4 = -8</code> →
+      결과 <code>(0, 12, -8)</code>. 검산으로 <code>a·(a×b) = 1·0 + 2·12 + 3·(-8) = 0</code>이 되어, 정말로
+      <code>a</code>에 수직임을 확인할 수 있습니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> 삼각형의 두 변 벡터를 외적하면 그 면에 수직인 <strong>법선(normal)</strong>이
+      나옵니다. 조명 계산의 출발점입니다. <strong>왼손 좌표계</strong>에서는 왼손 엄지·검지·중지로 방향을
+      잡습니다(오른손 좌표계와 부호 관례가 반대). 정점 감김 순서(winding)와 외적 순서가 맞아야 법선이 바깥을
+      향합니다.
+    </p>
+    <p>
+      <strong>코드 매핑:</strong> HLSL의 <code>cross(a, b)</code>는 위 세 식을 하드웨어로 한 번에 처리합니다.
+      C++에서 직접 짠다면 세 줄로 성분을 계산해야 하지만, HLSL은 한 함수 호출입니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>C++ / DirectXMath 대응</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">using namespace DirectX;
+
+XMVECTOR a = XMVectorSet(1, 2, 3, 0);   // float3 a
+XMVECTOR b = XMVectorSet(4, 0, 0, 0);   // float3 b
+
+float  d = XMVectorGetX(XMVector3Dot(a, b));   // dot(a,b)   → 4
+XMVECTOR x = XMVector3Cross(a, b);             // cross(a,b) → (0,12,-8,0)
+XMVECTOR n = XMVector3Normalize(a);            // normalize(a)
+float  len = XMVectorGetX(XMVector3Length(a)); // length(a)  → 3.742...</code></pre>
+    </div>
+
+    <p>
+      DirectXMath는 HLSL 내장 함수를 CPU에서 SIMD로 흉내 낸 라이브러리입니다. 1:1 대응은 이렇습니다:
+    </p>
+    <table class="impl">
+      <thead><tr><th>HLSL</th><th>DirectXMath</th><th>비고</th></tr></thead>
+      <tbody>
+        <tr><td><code>dot(a,b)</code></td><td><code>XMVector3Dot</code></td><td>결과가 벡터로 나와 <code>XMVectorGetX</code>로 스칼라 추출</td></tr>
+        <tr><td><code>cross(a,b)</code></td><td><code>XMVector3Cross</code></td><td>3D 외적</td></tr>
+        <tr><td><code>normalize(v)</code></td><td><code>XMVector3Normalize</code></td><td>0 벡터 주의</td></tr>
+        <tr><td><code>length(v)</code></td><td><code>XMVector3Length</code></td><td>제곱근 포함</td></tr>
+        <tr><td><code>mul(v,M)</code></td><td><code>XMVector4Transform</code></td><td>행벡터 × 행렬</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>normalize()</code>에 <strong>영벡터</strong>(길이 0)를 넣으면 0으로 나누게 되어 NaN/무한대가
+      나옵니다. 법선을 보간한 뒤에는 길이가 1이 아닐 수 있으니 픽셀 셰이더에서 다시 <code>normalize</code>하되,
+      길이가 0에 가까운 경우를 대비해야 합니다.
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="builtins">
+    <h2>3. 자주 쓰는 내장 함수</h2>
+    <p>
+      셰이더는 <strong>분기(if)를 피하고 수식으로 처리</strong>하는 것이 성능상 유리합니다(같은 워프 안에서
+      스레드들이 다른 분기를 타면 <em>발산(divergence)</em>이 생겨 양쪽을 다 실행해야 하기 때문). 그래서 HLSL
+      내장 함수 중 <code>lerp</code>·<code>step</code>·<code>smoothstep</code>·<code>clamp</code>처럼 조건을
+      "매끄러운 수식"으로 바꿔 주는 함수들이 특히 많이 쓰입니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>HLSL built-ins</span><span class="lang">hlsl</span></div>
+      <pre><code class="language-hlsl">lerp(a, b, t)        // 선형 보간: a*(1-t) + b*t  (분기 대신 자주 씀)
+clamp(x, lo, hi)     // 범위 제한
+step(edge, x)        // x &lt; edge ? 0 : 1   (하드 컷)
+smoothstep(a, b, x)  // a~b 구간에서 부드러운 0→1
+dot(a, b)            // 내적 (조명, 각도 판정)
+cross(a, b)          // 외적 (법선, 접선)
+normalize(v)         // 단위 벡터
+length(v)            // 크기
+reflect(I, N)        // 반사 벡터
+tex.Sample(samp, uv) // 텍스처 샘플링 → float4
+pow, sin, cos, abs, floor, frac, fmod, min, max   // GLSL의 fract→frac, mod→fmod</code></pre>
+    </div>
+
+    <h3>3-1. lerp — 선형 보간</h3>
+    <p>
+      <strong>수식:</strong> <code>lerp(a, b, t) = a*(1-t) + b*t</code>. <code>t=0</code>이면 <code>a</code>,
+      <code>t=1</code>이면 <code>b</code>, <code>t=0.5</code>면 정확히 중간입니다. 예로
+      <code>lerp(10, 20, 0.25) = 10·0.75 + 20·0.25 = 7.5 + 5 = 12.5</code>.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> a와 b를 잇는 직선 위를 t 비율만큼 이동한 점입니다. 색 그라데이션, 위치
+      애니메이션, 두 상태를 부드럽게 섞을 때 어디서나 등장합니다.
+    </p>
+    <p>
+      <strong>코드 매핑 / 함정:</strong> <code>t</code>는 보통 [0,1]이지만 HLSL은 범위를 강제하지 않습니다.
+      벗어나면 외삽(extrapolation)되어 a·b 바깥으로 넘어갑니다. 안전하게 쓰려면 <code>lerp(a, b, saturate(t))</code>
+      처럼 <code>saturate</code>(= <code>clamp(t,0,1)</code>)로 감싸세요.
+    </p>
+
+    <h3>3-2. step 과 smoothstep — 하드 컷 vs 부드러운 전이</h3>
+    <p>
+      <strong>step:</strong> <code>step(edge, x)</code>는 <code>x &lt; edge</code>면 0, 아니면 1인 계단 함수입니다.
+      <em>if 없이</em> 임계값 판정을 하는 트릭입니다. 예: <code>step(0.5, 0.7) = 1</code>, <code>step(0.5, 0.3) = 0</code>.
+    </p>
+    <p>
+      <strong>smoothstep:</strong> <code>smoothstep(a, b, x)</code>는 x가 a보다 작으면 0, b보다 크면 1, 그
+      사이에서는 <em>S자 곡선</em>(3t²−2t³)으로 부드럽게 0→1로 이어 줍니다. step의 딱딱한 경계 대신 앤티에일리어싱된
+      부드러운 가장자리를 만들 때 씁니다. 예로 <code>smoothstep(0, 1, 0.5) = 3·0.25 − 2·0.125 = 0.75 − 0.25 = 0.5</code>
+      이고, <code>smoothstep(0, 1, 0.25) = 3·0.0625 − 2·0.015625 ≈ 0.1563</code>으로 시작 부분에서 완만합니다.
+    </p>
+
+    <h3>3-3. reflect — 반사 벡터</h3>
+    <p>
+      <strong>수식:</strong> <code>reflect(I, N) = I - 2·dot(I, N)·N</code> (N은 단위 법선). 입사 벡터
+      <code>I</code>를 표면 법선 <code>N</code>에 대해 튕겨 낸 방향입니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> 거울에 빛이 부딪혀 반사되는 방향, 또는 공이 벽에 맞고 튀는 방향입니다. 입사각과
+      반사각이 같아지도록 법선 성분만 뒤집습니다. 정반사 하이라이트(스페큘러) 계산의 핵심입니다.
+    </p>
+    <p>
+      <strong>주의:</strong> <code>N</code>은 반드시 <em>정규화된</em> 단위 벡터여야 공식이 맞습니다.
+      보간된 법선은 <code>normalize</code>한 뒤 넣으세요.
+    </p>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      <code>pow(x, y)</code>는 내부적으로 <code>exp2(y·log2(x))</code>로 계산되어 비싼 편입니다. 스페큘러 지수처럼
+      정수 거듭제곱을 반복하는 경우, 작은 정수 지수는 곱셈으로 풀어 쓰는 것이 더 빠를 수 있습니다. 또한
+      <code>fmod</code>는 GLSL의 <code>mod</code>와 음수 처리 부호가 다를 수 있으니(HLSL <code>fmod</code>는
+      나눗셈의 나머지, 결과 부호가 피제수를 따름) 이식 시 주의하세요.
+    </div>
+
+    <table class="impl">
+      <thead><tr><th>HLSL</th><th>GLSL</th><th>메모</th></tr></thead>
+      <tbody>
+        <tr><td><code>frac(x)</code></td><td><code>fract(x)</code></td><td>소수부</td></tr>
+        <tr><td><code>fmod(x,y)</code></td><td><code>mod(x,y)</code></td><td>부호 관례 차이 주의</td></tr>
+        <tr><td><code>lerp(a,b,t)</code></td><td><code>mix(a,b,t)</code></td><td>선형 보간</td></tr>
+        <tr><td><code>saturate(x)</code></td><td><code>clamp(x,0,1)</code></td><td>GLSL엔 전용 함수 없음</td></tr>
+        <tr><td><code>atan2(y,x)</code></td><td><code>atan(y,x)</code></td><td>인자 순서 동일</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="shadermodel">
+    <h2>4. 셰이더 모델(프로파일)과 컴파일 타깃</h2>
+    <p>
+      HLSL 소스는 그 자체로 GPU에서 돌지 않습니다. CPU에서 <strong>컴파일</strong>하여 중간 바이트코드
+      (DXBC)로 바꾼 뒤 드라이버에 넘겨야 합니다. 이때 "어느 셰이더 모델·어느 스테이지로 컴파일할지"를
+      <strong>타깃 프로파일 문자열</strong>로 지정합니다. GLSL의 <code>#version</code> 지시문과 목적은 비슷하지만,
+      HLSL은 <em>소스 안</em>이 아니라 <em>컴파일 호출의 인자</em>로 넘긴다는 점이 다릅니다.
+    </p>
+
+    <ul>
+      <li><code>vs_5_0</code> / <code>ps_5_0</code> — 셰이더 모델 5.0의 버텍스/픽셀 셰이더. D3D11의 기본 프로파일입니다.</li>
+      <li><code>cs_5_0</code> — 컴퓨트 셰이더. 구조화 버퍼·UAV·그룹 공유 메모리를 쓸 수 있습니다.</li>
+      <li>프로파일은 <code>D3DCompile</code>(또는 <code>D3DCompileFromFile</code>)의 <strong>target 인자</strong>로 지정합니다.</li>
+    </ul>
+
+    <div class="code">
+      <div class="code-head"><span>HLSL을 컴파일하는 C++ (D3DCompile)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;d3dcompiler.h&gt;
+#pragma comment(lib, "d3dcompiler.lib")
+
+Microsoft::WRL::ComPtr&lt;ID3DBlob&gt; code, errors;
+HRESULT hr = D3DCompileFromFile(
+    L"shader.hlsl",          // 소스 파일 경로 (와이드 문자열)
+    nullptr,                 // 매크로 정의 배열 (없음)
+    D3D_COMPILE_STANDARD_FILE_INCLUDE, // #include 처리기
+    "VSMain",                // 진입점 함수 이름
+    "vs_5_0",                // ★ 타깃 프로파일: 버텍스 SM5.0
+    D3DCOMPILE_ENABLE_STRICTNESS, // 컴파일 플래그
+    0,
+    &amp;code,                   // 출력: 컴파일된 바이트코드
+    &amp;errors);                // 출력: 오류 메시지 blob
+
+if (FAILED(hr)) {
+    if (errors) OutputDebugStringA((const char*)errors-&gt;GetBufferPointer());
+    return hr;              // 컴파일 실패 처리
+}</code></pre>
+    </div>
+
+    <p>
+      <code>D3DCompileFromFile(...)</code>의 인자를 하나씩 봅니다.
+    </p>
+    <ul>
+      <li><code>L"shader.hlsl"</code> — 접두사 <code>L</code>은 <em>와이드 문자열</em>(UTF-16) 리터럴입니다.
+      Win32 파일 API가 와이드 문자열을 받기 때문입니다.</li>
+      <li><code>"VSMain"</code> — <strong>진입점</strong> 함수 이름. 한 HLSL 파일에 여러 셰이더 함수를 두고
+      진입점만 바꿔 각각 컴파일할 수 있습니다(예: <code>VSMain</code>, <code>PSMain</code>).</li>
+      <li><code>"vs_5_0"</code> — 이 페이지의 핵심 인자. "버텍스 셰이더, 셰이더 모델 5.0"으로 컴파일하라는
+      뜻입니다. 픽셀은 <code>"ps_5_0"</code>, 컴퓨트는 <code>"cs_5_0"</code>으로 바꿉니다. 진입점 함수의 시그니처
+      (입출력 시맨틱)가 그 스테이지에 맞아야 합니다.</li>
+      <li><code>&amp;code</code>, <code>&amp;errors</code> — 각각 컴파일 결과 바이트코드와 오류 메시지를 받는
+      <code>ID3DBlob</code> 출력입니다. 실패 시 <code>errors</code>의 문자열을 디버그 출력으로 찍어 원인을
+      확인합니다.</li>
+    </ul>
+    <p>
+      성공하면 <code>code-&gt;GetBufferPointer()</code>/<code>GetBufferSize()</code>를
+      <code>device-&gt;CreateVertexShader(...)</code> 등에 넘겨 실제 셰이더 객체를 만듭니다. 즉 흐름은
+      <strong>HLSL 소스 → D3DCompile(타깃 프로파일 지정) → 바이트코드 blob → CreateXxxShader → 파이프라인
+      바인딩</strong> 순입니다.
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      런타임 <code>D3DCompile</code>은 개발 중 편하지만 <strong>시작 시간</strong>을 잡아먹습니다. 배포 빌드에서는
+      <strong>fxc.exe</strong>(또는 최신 <strong>dxc.exe</strong>)로 <em>미리 컴파일</em>한 <code>.cso</code>
+      바이트코드를 로드하는 것이 표준입니다. 셰이더 모델 6.x(파형 인트린식 등)를 쓰려면 dxc + DXIL이 필요하며,
+      이 경우 타깃 문자열은 <code>vs_6_0</code> 같은 형태가 됩니다.
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="mapping">
+    <h2>5. 다른 언어와의 매핑 — 문법만 바뀐다</h2>
+    <p>
+      셰이더의 <em>아이디어</em>(스테이지별 병렬 실행, 속성 입력, 상수 버퍼, 내장 벡터 수학)는 API가 달라도
+      같습니다. GLSL(OpenGL/Vulkan)·WGSL(WebGPU)·MSL(Metal)은 <strong>문법만</strong> 다를 뿐, 셰이더를
+      "GPU에서 병렬로 도는 작은 함수"로 보는 사고방식은 동일합니다. 그래서 HLSL 하나를 제대로 익히면 나머지는
+      번역에 가깝습니다.
+    </p>
+
+    <table class="impl">
+      <thead><tr><th>개념</th><th>GLSL</th><th>HLSL (DX)</th><th>WGSL (WebGPU)</th></tr></thead>
+      <tbody>
+        <tr><td>선형 보간</td><td><code>mix(a,b,t)</code></td><td><code>lerp(a,b,t)</code></td><td><code>mix(a,b,t)</code></td></tr>
+        <tr><td>float 벡터</td><td><code>vec3</code></td><td><code>float3</code></td><td><code>vec3&lt;f32&gt;</code></td></tr>
+        <tr><td>정점 출력 위치</td><td><code>gl_Position</code></td><td><code>SV_Position</code></td><td><code>@builtin(position)</code></td></tr>
+        <tr><td>상수 전달</td><td><code>uniform</code></td><td>cbuffer</td><td><code>var&lt;uniform&gt;</code></td></tr>
+        <tr><td>텍스처 샘플</td><td><code>texture()</code></td><td><code>tex.Sample()</code></td><td><code>textureSample()</code></td></tr>
+        <tr><td>텍스처 V축</td><td>아래→위</td><td>위→아래</td><td>위→아래</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      표의 마지막 줄이 실무에서 자주 발목을 잡습니다. HLSL/WGSL은 UV의 원점이 <strong>좌상단</strong>(V가
+      아래로 증가)이지만, GLSL은 <strong>좌하단</strong>(V가 위로 증가)입니다. OpenGL용으로 만든 텍스처나
+      UV를 그대로 D3D로 옮기면 <em>상하가 뒤집혀</em> 보입니다. 우리 규약(텍스처 V 위→아래)을 따르므로 D3D
+      기준으로 UV를 다루면 됩니다.
+    </p>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      한 번 HLSL로 셰이더 사고방식을 익히면 GLSL·WGSL·Metal(MSL)은 며칠이면 옮겨갑니다. 언어보다 중요한 것은
+      <strong>병렬 실행 모델</strong>(1장의 워프/SIMT)과 <strong>분기 발산 회피</strong>를 몸에 익히는 것입니다.
+      문법은 검색하면 나오지만, "수천 스레드가 같은 코드를 동시에 돈다"는 감각은 직접 짜 보며 길러야 합니다.
+    </div>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./04-computeshader.html">← Compute Shader</a>
+    <a href="./05-api.html">5장. 그래픽스 API →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 (셰이더 모델 5.0)</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

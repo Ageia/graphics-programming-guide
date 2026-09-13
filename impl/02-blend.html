@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 알파 블렌딩 — over 합성 — C++/DirectX 11</title>
+<meta name="description" content="Porter-Duff over 합성을 채널 하나, 곱셈 하나까지 뜯어 C++로 구현하고, straight와 premultiplied 알파의 차이·연쇄 합성의 결합법칙·Direct3D 11 블렌드 상태 대응을 입문자 눈높이로 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./02-raster2d.html">2장. 2D 그래픽스</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">알파 블렌딩 — over 합성</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 2</span>
+  <h1>알파 블렌딩 — over 합성 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    반투명한 유리창 너머로 뒤 풍경이 비치듯이, 화면 위 반투명 픽셀은 <strong>자기 색</strong>과 <strong>뒤에 이미 그려진 색</strong>을
+    섞어야 합니다. 이 섞는 규칙의 표준이 Porter-Duff의 <strong>"over" 연산자</strong>입니다. 이 페이지에서는 그 한 줄짜리 공식
+    <code>result = src·a + dst·(1−a)</code>가 채널마다 정확히 무엇을 계산하는지, 왜 0~255 정수와 0~1 실수를 왔다 갔다 하는지,
+    그리고 "사전 곱셈 알파(premultiplied)"가 왜 연쇄 합성에서 <em>수학적으로 옳은</em> 방식인지를 곱셈 하나, 부호 하나까지
+    뜯어봅니다. 마지막에는 이 모든 것이 Direct3D 11의 <code>D3D11_BLEND_DESC</code> 몇 줄로 어떻게 GPU에 대응되는지 1:1로 짚습니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 문서는 D3D11 규약으로 통일합니다: 색은 <code>Color{ r, g, b, a }</code> 구조체에 <strong>0~255 부호 없는 바이트</strong>로
+    저장하고, 알파도 <strong>0(완전 투명)~255(완전 불투명)</strong>입니다. 블렌드 계산은 <strong>0~1 실수</strong>로 정규화한 뒤 수행하고,
+    결과를 다시 바이트로 되돌립니다. 텍스처 V축은 위→아래(위쪽이 0), 클립 공간 z는 [0,1]입니다.
+  </div>
+
+  <div class="callout">
+    <span class="tag">전제</span>
+    아래 코드는 모두 2장의 <a href="./02-raster2d.html"><code>framebuffer.h</code></a>에서 만든
+    <code>Color</code> 구조체, <code>Framebuffer</code> 클래스(<code>getPixel</code>/<code>setPixel</code>/<code>inBounds</code>/<code>width</code>/<code>height</code>),
+    그리고 실수를 0~255 바이트로 안전하게 자르는 헬퍼 <code>toByte(float)</code>를 <code>#include</code>해서 씁니다.
+    이 페이지에서는 그 재료를 <em>조합</em>만 합니다.
+  </div>
+
+  <h2 style="margin-top:40px;">먼저: "합성(compositing)"이 뭘 섞는 건가</h2>
+  <p>
+    2D든 3D든, 화면의 한 픽셀에 색을 칠할 때 그 자리에 <strong>이미 다른 색이 있을 수</strong> 있습니다. 예를 들어 파란 배경을
+    먼저 칠하고, 그 위에 반쯤 투명한 빨간 원을 그리면, 원의 안쪽은 "빨강 반 + 파랑 반" 같은 보라색이 되어야 자연스럽습니다.
+    이때 새로 칠하려는 색을 <strong>소스(source, src)</strong>, 이미 그 자리에 있던 색을 <strong>대상(destination, dst)</strong>이라
+    부릅니다. 합성이란 이 <code>src</code>와 <code>dst</code>를 알파(투명도) 값에 따라 <em>어떻게 섞을지</em>를 정하는 규칙입니다.
+  </p>
+  <p>
+    Porter &amp; Duff는 1984년 논문에서 이런 합성 규칙을 12가지로 정리했는데, 그중 압도적으로 많이 쓰이는 것이
+    <strong>"over"</strong>입니다. 말 그대로 "src를 dst <em>위에</em> 얹는다"는 뜻입니다. 직관은 이렇습니다:
+  </p>
+  <ul>
+    <li>소스 알파 <code>a = 1</code>(완전 불투명)이면 → 결과는 100% 소스 색. 뒤 배경은 완전히 가려집니다.</li>
+    <li>소스 알파 <code>a = 0</code>(완전 투명)이면 → 결과는 100% 배경 색. 소스는 아예 안 보입니다.</li>
+    <li>소스 알파 <code>a = 0.5</code>(반투명)이면 → 결과는 소스 절반 + 배경 절반. 유리창 너머 풍경처럼 섞입니다.</li>
+  </ul>
+  <p style="text-align:center; color:var(--text-dim);">
+    <code>result.rgb = src.rgb × src.a + dst.rgb × (1 − src.a)</code>
+  </p>
+  <p>
+    이 한 줄이 이 페이지의 전부입니다. 왼쪽 항 <code>src.rgb × src.a</code>는 "소스가 자기 알파만큼 앞을 덮는다",
+    오른쪽 항 <code>dst.rgb × (1 − src.a)</code>는 "나머지 <code>1 − a</code>만큼은 배경이 비친다"는 뜻입니다.
+    두 비율을 더하면 <code>a + (1 − a) = 1</code>, 즉 <strong>가중치의 합이 항상 1</strong>이라 색이 밝아지거나 어두워지지 않고
+    딱 "섞이기만" 합니다. 이것을 흔히 <strong>선형 보간(lerp)</strong>이라 부릅니다 — <code>src.a</code>를 보간 비율로 삼아
+    <code>dst</code>에서 <code>src</code>로 이동하는 것과 정확히 같습니다.
+  </p>
+
+  <ol class="steps">
+    <li>채널(R, G, B)별로 "over" 공식을 직접 구현한다.</li>
+    <li>프레임버퍼의 기존 픽셀(dst) 위에 소스(src)를 블렌드해서 덮어쓰는 함수를 만든다.</li>
+    <li>사전 곱셈 알파(premultiplied)가 왜 연쇄 합성에서 옳은지 이해하고, 더 단순한 식으로 다시 구현한다.</li>
+  </ol>
+
+  <h2 style="margin-top:40px;">1. straight 알파에서의 "over" — <code>blendOver</code></h2>
+  <p>
+    <strong>무엇을 만드나</strong>: 소스 색 하나와 대상 색 하나를 받아, over 공식으로 섞은 결과 색 하나를 돌려주는 순수 함수입니다.
+    <strong>왜 필요한가</strong>: 반투명 스프라이트, 안티에일리어싱된 폰트 가장자리, UI 오버레이 — 화면에 겹쳐 그리는 거의 모든 것이
+    픽셀 단위로 이 함수를 호출합니다. GPU가 하드웨어로 해주는 그 일을, 원리를 이해하기 위해 손으로 짜보는 것입니다.
+  </p>
+  <p>
+    여기서 "straight(비사전곱)" 알파란, 우리가 흔히 생각하는 평범한 방식입니다. RGB는 그냥 색 그 자체이고, 알파는 그와
+    <em>따로</em> 저장된 투명도입니다. 뒤에 나올 premultiplied와 대비되는 이름이라고만 기억하세요.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>blend.h</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#pragma once
+#include "framebuffer.h"
+
+// straight(비사전곱) 알파에서의 "over" 연산.
+// src를 dst 위에 알파 합성한 결과를 돌려준다.
+inline Color blendOver(Color src, Color dst) {
+    float sa = src.a / 255.0f;
+    float ia = 1.0f - sa;             // 배경이 비치는 비율
+    Color out;
+    out.r = toByte((src.r * sa + dst.r * ia) / 255.0f);
+    out.g = toByte((src.g * sa + dst.g * ia) / 255.0f);
+    out.b = toByte((src.b * sa + dst.b * ia) / 255.0f);
+    // 결과 알파도 합성: a_out = sa + da*(1-sa)
+    float da = dst.a / 255.0f;
+    out.a = toByte(sa + da * ia);
+    return out;
+}
+
+// 프레임버퍼의 (x,y) 위에 src를 알파 블렌드해서 덮어쓴다.
+inline void blendPixel(Framebuffer&amp; fb, int x, int y, Color src) {
+    if (!fb.inBounds(x, y)) return;
+    if (src.a == 255) { fb.setPixel(x, y, src); return; } // 불투명이면 그냥 쓰기(빠른 경로)
+    if (src.a == 0)   return;                             // 완전 투명이면 아무것도 안 함
+    Color dst = fb.getPixel(x, y);
+    fb.setPixel(x, y, blendOver(src, dst));
+}</code></pre>
+  </div>
+
+  <h3>시그니처 해부: <code>inline Color blendOver(Color src, Color dst)</code></h3>
+  <p>
+    한 부분씩 뜯어봅니다.
+  </p>
+  <ul>
+    <li>
+      <code>inline</code> — 이 함수를 헤더(<code>.h</code>)에 정의했기 때문에 붙입니다. 여러 <code>.cpp</code> 파일이 같은 헤더를
+      <code>#include</code>하면 같은 함수 정의가 여러 번 생기는데, C++에서 그건 원래 "중복 정의" 오류입니다. <code>inline</code>은
+      "이 함수는 여러 번 정의돼도 다 같은 것이니 하나로 취급하라"고 링커에게 허락하는 키워드입니다(요즘은 성능상 인라인 전개
+      여부와는 별개의 의미로 더 자주 쓰입니다).
+    </li>
+    <li>
+      <code>Color</code> 반환 — 결과 색 하나를 값으로 돌려줍니다. <code>Color</code>는 <code>{r,g,b,a}</code> 네 바이트뿐인 작은
+      구조체라 값 복사 비용이 사실상 없습니다. 그래서 아래 인자들도 참조(<code>const Color&amp;</code>)가 아니라 그냥 값으로 받습니다.
+    </li>
+    <li>
+      <code>Color src, Color dst</code> — 소스와 대상을 값으로 복사해서 받습니다. 원본을 바꾸지 않고 새 색을 계산해 돌려주는
+      <strong>순수 함수</strong>이므로, 부작용이 없고 테스트하기 쉽습니다. (Vec3처럼 크기가 큰 타입이라면 <code>const Color&amp;</code>로
+      받아 복사를 피했겠지만, 4바이트짜리에는 참조가 오히려 손해일 수 있습니다.)
+    </li>
+  </ul>
+
+  <h3>1단계 — 알파를 0~1로 정규화: <code>float sa = src.a / 255.0f;</code></h3>
+  <p>
+    <strong>수학적 의미</strong>: over 공식의 알파는 "0에서 1 사이의 비율"이어야 합니다. 그런데 우리 <code>Color</code>는 알파를
+    0~255 정수로 저장합니다. 그래서 255로 나눠 <strong>[0,255] → [0,1]</strong>로 옮깁니다. 이걸 정규화(normalize)라고 합니다.
+  </p>
+  <p>
+    <strong>왜 <code>255.0f</code>이고 <code>255</code>가 아닌가</strong>: 여기가 입문자가 가장 자주 틀리는 곳입니다. <code>src.a</code>는
+    정수, <code>255</code>도 정수입니다. C++에서 정수 ÷ 정수는 <strong>정수 나눗셈</strong>이라 소수점을 버립니다. 예를 들어
+    <code>128 / 255</code>는 <code>0.5</code>가 아니라 <code>0</code>이 됩니다! 나누는 수에 <code>.0f</code>를 붙여 <code>255.0f</code>
+    (float)로 만들면, 자동으로 <code>src.a</code>도 float으로 승격되어 <strong>실수 나눗셈</strong>이 일어나
+    <code>128 / 255.0f ≈ 0.502</code>가 됩니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>/ 255</code>(정수)와 <code>/ 255.0f</code>(실수)는 결과가 하늘과 땅 차이입니다. 알파 128인 반투명 픽셀이 정수
+    나눗셈에선 <code>sa = 0</code>이 되어 <em>완전히 사라지고</em>, 반투명 효과가 통째로 날아갑니다. 색 계산에서
+    "왜 이미지가 안 보이지?"의 절반은 이 <code>.0f</code> 하나 빠진 것입니다.
+  </div>
+
+  <h3>2단계 — 배경이 비치는 비율: <code>float ia = 1.0f - sa;</code></h3>
+  <p>
+    <strong>수학적 의미</strong>: over 공식 오른쪽 항의 <code>(1 − src.a)</code>입니다. 소스가 <code>sa</code>만큼 앞을 덮으니,
+    남은 <code>1 − sa</code>만큼은 뒤 배경이 비쳐 보입니다. <code>ia</code>는 "inverse alpha", 즉 "여집합 알파"라는 뜻의 흔한 이름입니다.
+  </p>
+  <p>
+    <strong>기하 직관(그림글)</strong>: 알파를 "불투명한 물감을 얼마나 두껍게 발랐나"로 상상하면 좋습니다. <code>sa = 0.7</code>이면
+    앞 물감이 화면의 70%를 가리고, 나머지 30%(<code>ia = 0.3</code>)의 틈으로 뒤 색이 드러납니다. 두 값을 더하면 항상 100%이므로,
+    화면의 그 픽셀은 "앞 70% + 뒤 30%"로 정확히 꽉 찹니다.
+  </p>
+
+  <h3>3단계 — 채널별 over: <code>out.r = toByte((src.r * sa + dst.r * ia) / 255.0f);</code></h3>
+  <p>
+    R 채널 한 줄을 완전히 해부합니다. G, B도 문자만 다를 뿐 똑같습니다.
+  </p>
+  <p>
+    <strong>수학적 의미 → 코드 매핑</strong>: 공식 <code>result.r = src.r × sa + dst.r × ia</code>를 그대로 옮긴 것입니다.
+    다만 주의할 점 — <code>src.r</code>과 <code>dst.r</code>은 여전히 <strong>0~255 정수</strong>입니다. 그래서 곱셈
+    <code>src.r * sa</code>의 결과도 0~255 스케일의 실수가 됩니다(예: <code>200 * 0.7 = 140</code>). 두 항을 더하면 여전히
+    0~255 범위의 실수입니다. 그런데 <code>toByte</code>는 관례상 <strong>0~1 실수</strong>를 받아 0~255로 되돌리는 헬퍼이므로,
+    괄호 밖에서 다시 <code>/ 255.0f</code>로 나눠 0~1 범위로 맞춰 준 뒤 <code>toByte</code>에 넘깁니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">스케일 추적</span>
+    이 한 줄에서 값의 "단위"가 바뀌는 흐름을 놓치지 마세요:
+    <code>src.r</code>(0~255) × <code>sa</code>(0~1) = 0~255 스케일 → 더해도 0~255 → <code>/255.0f</code> → 0~1 →
+    <code>toByte</code> → 다시 0~255 바이트. 곱하는 항(<code>sa</code>, <code>ia</code>)이 이미 0~1이므로, 정수 색을
+    한 번 더 255로 나눌 필요가 없고 마지막에 딱 한 번만 나눠주면 됩니다.
+  </div>
+
+  <h3>손계산 예제 — 정말 보라색이 나올까?</h3>
+  <p>
+    빨간 반투명 소스 <code>src = {255, 0, 0, 128}</code>을 파란 불투명 배경 <code>dst = {0, 0, 255, 255}</code> 위에 올려봅니다.
+    알파 128은 대략 절반입니다.
+  </p>
+  <ul>
+    <li><code>sa = 128 / 255.0f ≈ 0.502</code>, <code>ia = 1 − 0.502 = 0.498</code></li>
+    <li><code>out.r = (255 × 0.502 + 0 × 0.498) / 255 = 128.0 / 255 ≈ 0.502</code> → <code>toByte</code> → <strong>128</strong></li>
+    <li><code>out.g = (0 × 0.502 + 0 × 0.498) / 255 = 0</code> → <strong>0</strong></li>
+    <li><code>out.b = (0 × 0.502 + 255 × 0.498) / 255 = 127.0 / 255 ≈ 0.498</code> → <strong>127</strong></li>
+  </ul>
+  <p>
+    결과는 <code>{128, 0, 127, ...}</code> — 빨강 절반 + 파랑 절반, 정확히 예상한 <strong>보라색</strong>입니다. 손으로 짚어보면
+    공식이 "섞는다"는 게 그저 두 색을 알파 비율로 평균 낸다는 사실이 눈에 들어옵니다.
+  </p>
+
+  <h3>4단계 — 결과 알파도 합성: <code>out.a = toByte(sa + da * ia);</code></h3>
+  <p>
+    RGB만 섞으면 끝이 아닙니다. 이 결과 픽셀 <em>자체</em>가 또 다른 배경 위에 올라갈 수도 있으니, 결과의 투명도도 계산해야 합니다.
+    공식은 <code>a_out = sa + da × (1 − sa)</code>입니다.
+  </p>
+  <p>
+    <strong>기하 직관</strong>: "이 자리가 얼마나 불투명해졌나"를 묻는 것입니다. 소스가 <code>sa</code>만큼 채우고, 소스가 못 채운
+    틈(<code>1 − sa = ia</code>)을 <em>대상의 불투명도</em> <code>da</code>가 <code>da × ia</code>만큼 마저 채웁니다. 예를 들어
+    소스가 반투명(<code>sa = 0.5</code>)이고 배경이 완전 불투명(<code>da = 1</code>)이면, <code>a_out = 0.5 + 1 × 0.5 = 1.0</code> —
+    당연히 불투명 배경 위에 뭘 얹어도 결과는 여전히 불투명합니다. 반대로 배경도 반투명(<code>da = 0.5</code>)이면
+    <code>a_out = 0.5 + 0.5 × 0.5 = 0.75</code>로, 두 반투명이 겹쳐 더 진해집니다.
+  </p>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    여기서 <code>out.a = toByte(sa + da * ia)</code>는 이미 0~1 실수(<code>sa</code>, <code>da</code>, <code>ia</code>가 전부 0~1)라
+    <strong>추가로 <code>/255.0f</code>를 하지 않습니다</strong>. RGB 줄과 달리 정수 색을 곱하지 않았기 때문입니다. 반대로
+    RGB 줄에서 <code>/255.0f</code>를 빠뜨리면 값이 255배 커져 전부 흰색(255로 클램프)이 됩니다. 스케일이 어디서 0~1인지,
+    어디서 0~255인지 항상 의식하세요.
+  </div>
+
+  <h2 style="margin-top:40px;">2. 프레임버퍼에 얹기 — <code>blendPixel</code></h2>
+  <p>
+    <strong>무엇을 만드나</strong>: <code>blendOver</code>는 색끼리의 순수 계산이었습니다. <code>blendPixel</code>은 그것을 실제
+    프레임버퍼의 특정 좌표 <code>(x, y)</code>에 적용해서 <em>그 자리를 덮어쓰는</em> 함수입니다. 스프라이트나 도형을 그릴 때
+    픽셀마다 이 함수를 호출합니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>blend.h (이어서)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">inline void blendPixel(Framebuffer&amp; fb, int x, int y, Color src) {
+    if (!fb.inBounds(x, y)) return;
+    if (src.a == 255) { fb.setPixel(x, y, src); return; } // 불투명이면 그냥 쓰기(빠른 경로)
+    if (src.a == 0)   return;                             // 완전 투명이면 아무것도 안 함
+    Color dst = fb.getPixel(x, y);
+    fb.setPixel(x, y, blendOver(src, dst));
+}</code></pre>
+  </div>
+  <h3>줄 단위 해부</h3>
+  <ul>
+    <li>
+      <code>Framebuffer&amp; fb</code> — 참조로 받습니다. 이 함수의 목적은 <code>fb</code>의 픽셀을 <em>실제로 바꾸는 것</em>이므로,
+      값 복사(<code>Framebuffer fb</code>)로 받으면 원본은 그대로고 복사본만 바뀌어 아무 효과가 없습니다. 참조(<code>&amp;</code>)여야
+      호출한 쪽의 진짜 버퍼가 수정됩니다. 또 프레임버퍼는 수백만 픽셀을 담은 큰 객체라 복사 비용도 막대합니다.
+    </li>
+    <li>
+      <code>if (!fb.inBounds(x, y)) return;</code> — <strong>경계 검사</strong>. 화면 밖 좌표에 쓰면 배열 범위를 벗어나
+      메모리를 깨뜨립니다(정의되지 않은 동작, 크래시). 스프라이트가 화면 가장자리에 걸치면 일부 픽셀이 밖으로 나가므로,
+      매 픽셀 안전하게 막아 줍니다. 이 한 줄 덕분에 호출하는 쪽(스프라이트 blit)은 클리핑을 신경 쓸 필요가 없습니다.
+    </li>
+    <li>
+      <code>if (src.a == 255) { fb.setPixel(x, y, src); return; }</code> — <strong>빠른 경로(fast path)</strong>. 소스가 완전
+      불투명이면 배경을 읽을 필요도, 섞을 필요도 없습니다. 그냥 소스 색을 그대로 씁니다. <code>getPixel</code> 한 번과 곱셈 여덟 번을
+      통째로 아낍니다. 불투명 픽셀이 화면의 대다수인 경우가 많아 실전에서 꽤 큰 이득입니다.
+    </li>
+    <li>
+      <code>if (src.a == 0) return;</code> — 완전 투명이면 결과는 100% 배경, 즉 <em>아무것도 바꿀 필요가 없습니다</em>.
+      바로 반환해 <code>getPixel</code>/<code>setPixel</code>/블렌드를 전부 건너뜁니다.
+    </li>
+    <li>
+      <code>Color dst = fb.getPixel(x, y);</code> — 여기까지 왔다면 소스는 진짜 반투명(1~254)입니다. 이제 그 자리의 기존 색을
+      읽어와 <code>blendOver(src, dst)</code>로 섞은 뒤 <code>setPixel</code>로 되씁니다. <strong>읽기(dst) → 섞기 → 쓰기</strong>의
+      전형적인 read-modify-write 패턴입니다.
+    </li>
+  </ul>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <code>a == 255</code>/<code>a == 0</code> 두 분기는 단순해 보여도, 반투명이 드물고 불투명/투명이 흔한 워크로드(예: 픽셀아트,
+    UI)에서 read-modify-write를 통째로 생략해 크게 이깁니다. 반대로 <em>모든</em> 픽셀이 반투명인 경우엔 분기 예측 실패로
+    오히려 미세하게 손해일 수 있으니, 워크로드를 알고 선택하세요. GPU에선 이 분기 없이 하드웨어 블렌드 유닛이 항상 처리합니다.
+  </div>
+
+  <h2 style="margin-top:40px;">3. 사전 곱셈 알파 (premultiplied)</h2>
+  <p>
+    지금까지의 straight 방식은 픽셀 <em>하나</em>를 섞는 데는 완벽합니다. 문제는 반투명 위에 반투명을 <strong>연쇄로 여러 겹</strong>
+    쌓거나, 텍스처를 <strong>축소·확대하며 필터링</strong>할 때 드러납니다. 가장자리에 검거나 밝은 테두리(halo)가 스며 나오는 것이죠.
+    원인과 해결책을 순서대로 봅니다.
+  </p>
+
+  <h3>왜 straight는 필터링에서 색이 샐까 (그림글)</h3>
+  <p>
+    반투명 텍스처의 완전 투명한 픽셀 <code>{255, 0, 0, 0}</code>(알파 0인 빨강)을 생각해 봅시다. 알파가 0이니 화면엔 안 보입니다.
+    그런데 이 픽셀이 <em>보이는</em> 이웃 픽셀과 나란히 있고, 밉맵이나 bilinear 필터가 두 픽셀의 RGB를 <strong>알파와 무관하게 따로</strong>
+    평균 낸다면? "안 보여야 할 빨강"의 RGB가 이웃에 절반씩 섞여 들어가, 투명 영역 근처가 붉게 물듭니다. 사람 눈엔 안 보이던 색이
+    필터링 과정에서 되살아나는 것입니다 — 이게 halo(색 번짐)입니다.
+  </p>
+  <p>
+    <strong>해결책 — 사전 곱셈 알파</strong>: 저장하는 시점에 아예 RGB에 알파를 미리 곱해 둡니다(<code>rgb' = rgb × a</code>).
+    그러면 알파 0인 픽셀은 RGB도 <code>{0,0,0}</code>이 되어, 필터가 아무리 평균을 내도 <strong>기여도가 0</strong>입니다. 색이 샐
+    원본 자체가 사라지는 것이죠.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>premultiplied.h</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#pragma once
+#include "framebuffer.h"
+
+// straight -&gt; premultiplied: 각 채널에 알파를 곱해 저장.
+inline Color premultiply(Color c) {
+    float a = c.a / 255.0f;
+    return Color{ toByte(c.r / 255.0f * a),
+                  toByte(c.g / 255.0f * a),
+                  toByte(c.b / 255.0f * a),
+                  c.a };
+}
+
+// 사전 곱셈된 색끼리의 "over"는 곱셈이 사라져 더 단순하고,
+// 연쇄 합성에서도 결합법칙이 성립한다:
+//   out.rgb = src.rgb + dst.rgb * (1 - src.a)
+//   out.a   = src.a   + dst.a   * (1 - src.a)
+inline Color blendOverPremul(Color src, Color dst) {
+    float ia = 1.0f - src.a / 255.0f;
+    Color out;
+    out.r = toByte((src.r + dst.r * ia) / 255.0f);
+    out.g = toByte((src.g + dst.g * ia) / 255.0f);
+    out.b = toByte((src.b + dst.b * ia) / 255.0f);
+    out.a = toByte((src.a + dst.a * ia) / 255.0f);
+    return out;
+}</code></pre>
+  </div>
+
+  <h3><code>premultiply</code> 해부 — RGB에 알파를 미리 곱하기</h3>
+  <p>
+    <code>float a = c.a / 255.0f;</code> — 알파를 0~1로 정규화합니다(<code>blendOver</code>와 같은 이유, 같은 <code>.0f</code> 함정).
+  </p>
+  <p>
+    <code>toByte(c.r / 255.0f * a)</code> — R 채널을 봅니다. <code>c.r / 255.0f</code>로 색을 0~1로 만든 뒤, 알파 <code>a</code>를
+    곱해 <strong>미리 어둡게</strong> 만듭니다. 그리고 <code>toByte</code>로 0~255 바이트로 되돌립니다. 예를 들어 <code>c = {255,0,0,128}</code>
+    (반투명 빨강)이면 <code>a ≈ 0.502</code>, 저장되는 R은 <code>toByte(1.0 × 0.502) = 128</code>. RGB가 <code>{128, 0, 0}</code>으로
+    이미 반쯤 어두워진 채 저장됩니다.
+  </p>
+  <p>
+    <code>c.a</code> — 네 번째 필드인 알파는 <strong>곱하지 않고 그대로</strong> 둡니다. premultiplied는 "RGB에만 알파를 곱하고
+    알파 자체는 원래 값을 유지"하는 규칙입니다. 알파는 여전히 "이 픽셀이 얼마나 불투명한가"를 나타내야 하니까요.
+  </p>
+  <div class="callout">
+    <span class="tag warn">집합 초기화</span>
+    <code>Color{ ..., ..., ..., c.a }</code>는 C++의 <strong>집합 초기화(aggregate initialization)</strong>입니다. 중괄호 안에
+    구조체 멤버 순서대로(<code>r, g, b, a</code>) 값을 나열해 <code>Color</code> 하나를 그 자리에서 만들어 반환합니다. 생성자를 따로
+    쓸 필요 없이 POD 구조체를 간결하게 채우는 방법입니다.
+  </div>
+
+  <h3><code>blendOverPremul</code> — 곱셈이 사라진 더 단순한 over</h3>
+  <p>
+    <strong>핵심 통찰</strong>: straight 공식은 <code>out.rgb = src.rgb × sa + dst.rgb × ia</code>였습니다. 그런데 premultiplied
+    데이터에서는 <code>src.rgb</code>가 <em>이미</em> <code>src.a</code>를 품고 있습니다(저장 시 곱해뒀으니까). 즉 <code>src.rgb × sa</code>의
+    <code>× sa</code>가 이미 데이터 안에 녹아 있어, 곱할 필요가 없습니다. 공식이 이렇게 단순해집니다:
+  </p>
+  <p style="text-align:center; color:var(--text-dim);">
+    <code>out.rgb = src.rgb + dst.rgb × (1 − src.a)</code> &nbsp;&nbsp; <code>out.a = src.a + dst.a × (1 − src.a)</code>
+  </p>
+  <p>
+    이제 RGB와 알파가 <strong>완전히 똑같은 형태</strong>가 됩니다 — 넷 다 "src + dst × ia"입니다. 코드에서도 R/G/B/A 네 줄이
+    문자만 다를 뿐 동일한 것을 확인하세요. straight 버전에서는 알파 줄만 형태가 달랐던 것(<code>sa + da*ia</code>, 정규화 유무 차이)과
+    대조됩니다.
+  </p>
+  <p>
+    <strong>줄 매핑</strong>: <code>float ia = 1.0f - src.a / 255.0f;</code>로 배경 비율만 구하면, 각 채널은
+    <code>(src.r + dst.r * ia) / 255.0f</code>입니다. <code>src.r</code>은 이미 곱해진 0~255 정수, <code>dst.r * ia</code>는
+    "배경이 <code>ia</code>만큼 비침", 둘을 더해 0~255 스케일이 되고, 마지막에 <code>/255.0f</code>로 0~1로 낮춰
+    <code>toByte</code>에 넘깁니다.
+  </p>
+
+  <h3>왜 "연쇄 합성에서 결합법칙"이 중요한가</h3>
+  <p>
+    세 겹 A over B over C를 합성한다고 합시다. straight 방식은 <code>(A over B) over C</code>와 <code>A over (B over C)</code>가
+    미묘하게 다른 결과를 낼 수 있습니다 — 중간에 색을 다시 알파로 나눴다 곱하는 과정에서 오차와 색 번짐이 끼기 때문입니다.
+    premultiplied 방식은 위 공식이 순수한 <strong>덧셈과 한 번의 곱셈</strong>뿐이라, 어느 순서로 묶어도 결과가 같습니다
+    (수학적으로 결합법칙 성립). 그래서 그룹 단위로 미리 합성해 두었다가 나중에 배경에 얹는 식의 최적화가 안전합니다.
+    영화 VFX나 UI 컴포지팅이 거의 항상 premultiplied를 쓰는 이유입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    straight와 premultiplied를 섞어 쓰면 색이 두 번 어두워지거나(중복 곱셈) 밝아집니다. 예를 들어 이미 premultiply된 텍스처를
+    straight용 <code>blendOver</code>에 넣으면 <code>× sa</code>가 한 번 더 곱해져 반투명 부분이 새까매집니다. 파이프라인 전체에서
+    한 규칙을 고정하세요. Direct3D 11의 <code>D3D11_BLEND_DESC</code>에서 premultiplied over는
+    <code>SrcBlend = D3D11_BLEND_ONE</code>, straight는 <code>SrcBlend = D3D11_BLEND_SRC_ALPHA</code>로 두고,
+    둘 다 <code>DestBlend = D3D11_BLEND_INV_SRC_ALPHA</code>, <code>BlendOp = D3D11_BLEND_OP_ADD</code>를 씁니다
+    (이 상태를 <code>CreateBlendState</code>로 만들고 <code>OMSetBlendState</code>로 설정).
+  </div>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    사전 곱셈은 블렌드식에서 곱셈 하나를 없애줄 뿐 아니라, 텍스처 필터링/밉맵 생성 시 경계 halo를 원천 차단합니다. 반투명
+    텍스처를 다룬다면 로딩 시 미리 premultiply해 두는 편이 실전에서 거의 항상 이득입니다.
+  </div>
+
+  <h2 style="margin-top:40px;">4. GPU로 — Direct3D 11 블렌드 상태 대응</h2>
+  <p>
+    우리가 손으로 짠 <code>blendOver</code>/<code>blendOverPremul</code>은, GPU에서는 <strong>출력 병합 단계(Output Merger, OM)</strong>의
+    고정 기능 하드웨어가 픽셀마다 자동으로 해줍니다. 우리가 할 일은 "어떤 계수로 섞을지"를 상태로 기술하는 것뿐입니다. GPU의
+    블렌드 공식은 정확히 우리 공식과 같은 꼴입니다:
+  </p>
+  <p style="text-align:center; color:var(--text-dim);">
+    <code>result = src.rgb × SrcBlend  (BlendOp)  dst.rgb × DestBlend</code>
+  </p>
+  <p>
+    여기서 <code>SrcBlend</code>/<code>DestBlend</code>가 소스/대상에 곱할 계수, <code>BlendOp</code>가 둘을 합치는 연산(보통 덧셈)입니다.
+    우리 두 함수를 이 계수로 번역하면 이렇게 1:1로 대응됩니다.
+  </p>
+
+  <table class="impl">
+    <tr>
+      <th>우리 C++ 함수</th>
+      <th>SrcBlend</th>
+      <th>DestBlend</th>
+      <th>BlendOp</th>
+      <th>대응하는 식</th>
+    </tr>
+    <tr>
+      <td><code>blendOver</code> (straight)</td>
+      <td><code>D3D11_BLEND_SRC_ALPHA</code></td>
+      <td><code>D3D11_BLEND_INV_SRC_ALPHA</code></td>
+      <td><code>D3D11_BLEND_OP_ADD</code></td>
+      <td><code>src×a + dst×(1−a)</code></td>
+    </tr>
+    <tr>
+      <td><code>blendOverPremul</code> (premultiplied)</td>
+      <td><code>D3D11_BLEND_ONE</code></td>
+      <td><code>D3D11_BLEND_INV_SRC_ALPHA</code></td>
+      <td><code>D3D11_BLEND_OP_ADD</code></td>
+      <td><code>src×1 + dst×(1−a)</code></td>
+    </tr>
+  </table>
+
+  <p>
+    핵심 차이는 <code>SrcBlend</code> 한 곳뿐입니다. straight는 소스에 <code>SRC_ALPHA</code>(<code>× a</code>)를 곱해야 하지만,
+    premultiplied는 소스가 이미 알파를 품었으니 <code>ONE</code>(<code>× 1</code>, 즉 곱하지 않음)입니다. 우리 코드에서
+    <code>blendOverPremul</code>에 <code>src.r * sa</code>가 사라진 것과 정확히 같은 이야기입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>blendstate.cpp — premultiplied over 상태 만들기</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;wrl/client.h&gt;
+using Microsoft::WRL::ComPtr;
+
+// premultiplied "over" 블렌드 상태를 만들어 파이프라인에 건다.
+// device: 이미 생성된 ID3D11Device, ctx: ID3D11DeviceContext
+ComPtr&lt;ID3D11BlendState&gt; MakePremulOverState(ID3D11Device* device) {
+    D3D11_BLEND_DESC desc = {};                 // 전체 0으로 초기화
+    desc.AlphaToCoverageEnable  = FALSE;        // MSAA 알파-투-커버리지 미사용
+    desc.IndependentBlendEnable = FALSE;        // 모든 렌더타깃에 RT[0] 설정 공유
+
+    D3D11_RENDER_TARGET_BLEND_DESC&amp; rt = desc.RenderTarget[0];
+    rt.BlendEnable    = TRUE;                    // 블렌딩 켜기(끄면 그냥 덮어쓰기)
+    // 컬러(RGB) 블렌드: out.rgb = src.rgb*ONE + dst.rgb*(1-src.a)
+    rt.SrcBlend       = D3D11_BLEND_ONE;
+    rt.DestBlend      = D3D11_BLEND_INV_SRC_ALPHA;
+    rt.BlendOp        = D3D11_BLEND_OP_ADD;
+    // 알파 블렌드: out.a = src.a*ONE + dst.a*(1-src.a)  (RGB와 동일 형태)
+    rt.SrcBlendAlpha  = D3D11_BLEND_ONE;
+    rt.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    rt.BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+    rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL; // RGBA 전부 기록
+
+    ComPtr&lt;ID3D11BlendState&gt; state;
+    device-&gt;CreateBlendState(&amp;desc, state.GetAddressOf());
+    return state;
+}
+
+// 매 프레임 그리기 전에 이 상태를 출력 병합 단계에 설정한다.
+void BindBlend(ID3D11DeviceContext* ctx, ID3D11BlendState* state) {
+    const float blendFactor[4] = { 0, 0, 0, 0 }; // BLEND_FACTOR 안 쓰므로 0
+    ctx-&gt;OMSetBlendState(state, blendFactor, 0xFFFFFFFF); // 샘플 마스크 전체 1
+}</code></pre>
+  </div>
+
+  <h3>이 코드가 우리 함수와 어떻게 맞물리나</h3>
+  <ul>
+    <li>
+      <code>D3D11_BLEND_DESC desc = {};</code> — 빈 중괄호 <code>{}</code>는 구조체 전체를 0/FALSE로 초기화합니다. 채우지 않은
+      필드가 쓰레기 값으로 남는 것을 막는, C++의 흔한 안전 관용구입니다.
+    </li>
+    <li>
+      <code>RenderTarget[0]</code> — D3D11은 렌더 타깃을 최대 8개까지 동시에 그릴 수 있고, 각각 블렌드 설정을 가질 수 있습니다.
+      <code>IndependentBlendEnable = FALSE</code>로 두면 전부 <code>[0]</code> 설정을 따르므로, 우리는 하나만 채웁니다.
+    </li>
+    <li>
+      <code>SrcBlend = D3D11_BLEND_ONE</code>, <code>DestBlend = D3D11_BLEND_INV_SRC_ALPHA</code> — 이 두 줄이
+      <code>out.rgb = src.rgb + dst.rgb × (1 − src.a)</code>, 즉 우리 <code>blendOverPremul</code>의 RGB 줄과 <strong>글자 그대로</strong>
+      같은 계산입니다. <code>ONE</code> = "×1"(곱하지 않음), <code>INV_SRC_ALPHA</code> = "×(1 − src.a)".
+    </li>
+    <li>
+      <code>SrcBlendAlpha</code>/<code>DestBlendAlpha</code> — RGB와 알파를 <em>따로</em> 설정하는 필드입니다. premultiplied에서는
+      알파도 RGB와 똑같은 형태(<code>src.a + dst.a × ia</code>)이므로 같은 계수를 넣습니다. 우리 코드에서 A 줄이 RGB 줄과 동일했던 것과
+      일치합니다.
+    </li>
+    <li>
+      <code>OMSetBlendState(state, blendFactor, 0xFFFFFFFF)</code> — 만든 상태를 파이프라인에 겁니다. <code>blendFactor</code>는
+      <code>D3D11_BLEND_BLEND_FACTOR</code>를 쓸 때만 의미가 있어 여기선 0. 마지막 <code>0xFFFFFFFF</code>는 샘플 마스크로,
+      "모든 MSAA 샘플을 사용"이라는 뜻입니다.
+    </li>
+  </ul>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    블렌드 상태 객체(<code>ID3D11BlendState</code>)는 <strong>한 번 만들어 재사용</strong>하세요. 매 프레임 <code>CreateBlendState</code>를
+    호출하면 드라이버 검증 비용이 크게 듭니다. 보통 초기화 때 straight/premul/불투명(블렌드 끔) 몇 개를 미리 만들어 두고,
+    그리기 종류에 따라 <code>OMSetBlendState</code>로 바꿔 끼우기만 합니다. 상태 전환도 공짜는 아니니, 같은 블렌드끼리 묶어(batch)
+    그리면 전환 횟수가 줄어 유리합니다.
+  </div>
+
+  <h2 style="margin-top:40px;">HLSL에서의 위치 — 셰이더는 블렌드를 안 한다</h2>
+  <p>
+    한 가지 흔한 오해를 짚고 넘어갑니다. <strong>픽셀 셰이더는 블렌딩을 하지 않습니다.</strong> 셰이더는 그저 그 픽셀의
+    <em>소스 색(알파 포함)</em>을 계산해 내보낼 뿐이고, dst와 섞는 일은 그 <em>다음</em> 단계인 출력 병합기가 위 블렌드 상태에 따라
+    자동으로 합니다. 그래서 premultiplied 파이프라인이라면, 셰이더가 내보내는 색이 <strong>이미 premultiplied 형태</strong>여야
+    <code>SrcBlend = ONE</code>과 아귀가 맞습니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>sprite_ps.hlsl — premultiplied 출력</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">Texture2D    gTex : register(t0);
+SamplerState gSmp : register(s0);
+
+struct PSIn {
+    float4 pos : SV_Position;   // 클립 공간 위치(래스터라이저가 채움)
+    float2 uv  : TEXCOORD0;     // 텍스처 좌표(V는 위→아래)
+    float4 col : COLOR0;        // 정점 색 · 틴트(straight 알파)
+};
+
+float4 main(PSIn i) : SV_Target {
+    float4 tex = gTex.Sample(gSmp, i.uv);   // straight 알파 텍스처라 가정
+    float4 c   = tex * i.col;               // 틴트 적용(채널별 곱)
+
+    // straight -&gt; premultiplied: RGB에만 알파를 곱해 내보낸다.
+    // 이래야 OM의 SrcBlend = ONE 과 아귀가 맞는다.
+    c.rgb *= c.a;
+    return c;   // 이 값이 dst와 (ONE, INV_SRC_ALPHA)로 블렌드된다
+}</code></pre>
+  </div>
+  <h3>줄 단위 해부</h3>
+  <ul>
+    <li>
+      <code>Texture2D gTex : register(t0);</code>, <code>SamplerState gSmp : register(s0);</code> — 텍스처와 샘플러를 각각
+      <code>t</code>(SRV) / <code>s</code>(샘플러) 슬롯에 바인딩합니다. C++ 쪽에서 <code>PSSetShaderResources(0, ...)</code>,
+      <code>PSSetSamplers(0, ...)</code>로 꽂은 것과 슬롯 번호가 맞아야 합니다.
+    </li>
+    <li>
+      <code>float4 tex = gTex.Sample(gSmp, i.uv);</code> — UV로 텍스처를 샘플링합니다. 이 한 줄이 앞 절의 소프트웨어
+      <code>sampleBilinear</code>/<code>sampleNearest</code>에 대응합니다 — 어떤 필터를 쓸지는 <code>gSmp</code>(샘플러 상태)가 정합니다.
+    </li>
+    <li>
+      <code>float4 c = tex * i.col;</code> — HLSL의 <code>*</code>는 벡터의 <strong>성분별 곱</strong>입니다. 텍스처 색에 정점 색(틴트)을
+      채널마다 곱해 색조를 입힙니다. 알파끼리도 곱해집니다.
+    </li>
+    <li>
+      <code>c.rgb *= c.a;</code> — <strong>이 페이지의 핵심 한 줄</strong>. <code>.rgb</code> 스위즐로 R/G/B 세 채널만 골라 알파를
+      곱합니다(<code>.a</code>는 건드리지 않음). 우리 C++ <code>premultiply</code>가 하던 일을 GPU에서 픽셀마다 하는 것입니다. 이
+      한 줄을 빼먹고 <code>SrcBlend = ONE</code>을 쓰면 반투명 부분이 과하게 밝아지고, 반대로 이 줄을 넣고 <code>SRC_ALPHA</code>를
+      쓰면 두 번 곱해져 새까매집니다.
+    </li>
+    <li>
+      <code>return c : SV_Target;</code> — 이 색을 렌더 타깃으로 내보냅니다. 여기서 함수는 끝나고, 실제 dst와의 섞기는 OM 단계가
+      우리가 건 블렌드 상태로 처리합니다.
+    </li>
+  </ul>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    "셰이더에서 premultiply했는데 왜 이상하지?"의 대부분은 <strong>블렌드 상태와 짝이 안 맞아서</strong>입니다. 셰이더에서
+    <code>c.rgb *= c.a</code>를 했다면 반드시 <code>SrcBlend = ONE</code>(premultiplied), 안 했다면 <code>SrcBlend = SRC_ALPHA</code>(straight).
+    셰이더의 곱셈과 OM의 계수는 언제나 한 세트로 맞춰야 합니다.
+  </div>
+
+  <h2 style="margin-top:40px;">정리</h2>
+  <ul>
+    <li>over 합성은 <code>result = src×a + dst×(1−a)</code> — 가중치 합이 항상 1인 <strong>선형 보간</strong>입니다.</li>
+    <li>색은 0~255 바이트로 저장하되 계산은 0~1 실수로 하고, <code>/ 255.0f</code>의 <code>.0f</code>를 절대 빠뜨리지 마세요.</li>
+    <li><code>blendPixel</code>의 경계 검사와 불투명/투명 빠른 경로는 안전성과 성능을 동시에 챙깁니다.</li>
+    <li>연쇄 합성·필터링에서는 <strong>premultiplied</strong>가 halo를 없애고 결합법칙을 보장해 실전 표준입니다.</li>
+    <li>이 모든 것이 D3D11에서는 <code>SrcBlend</code>/<code>DestBlend</code>/<code>BlendOp</code> 상태와 셰이더의
+      <code>c.rgb *= c.a</code> 한 줄로 GPU 하드웨어에 그대로 대응됩니다.</li>
+  </ul>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./02-imgproc.html">← 이미지 처리 — 컨볼루션 필터</a>
+    <a href="./02-sprite.html">스프라이트 · 텍스처 샘플링 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 픽셀과 색상 — 프레임버퍼 — C++/DirectX 11</title>
+<meta name="description" content="RGBA8 색상 패킹부터 프레임버퍼 클래스, PPM 저장, D3D11 동적 텍스처 업로드까지 — 픽셀 한 개가 화면에 찍히는 과정을 C++로 한 줄 한 줄 직접 구현합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./02-raster2d.html">2장. 2D 그래픽스</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">픽셀과 색상 — 프레임버퍼</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 2</span>
+  <h1>픽셀과 색상 — 프레임버퍼 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    모든 렌더링의 최종 출력은 결국 <strong>픽셀 한 개</strong>입니다. 이 페이지에서는 GPU에 맡기기 전에,
+    메모리 위에 이미지 한 장을 담는 <strong>프레임버퍼</strong>를 손으로 직접 만들어 봅니다.
+    색을 32비트 정수 하나로 패킹/언패킹하는 비트 연산부터, 픽셀을 찍고 지우는 버퍼 조작,
+    결과를 PPM 파일로 저장해 눈으로 확인하는 것까지, <strong>코드 한 줄·비트 하나·성분 하나</strong>를
+    입문자 눈높이로 낱낱이 해부합니다. 마지막엔 이 소프트웨어 버퍼를 Direct3D 11 텍스처로 올려
+    화면에 실시간으로 띄우는 방법(개념)까지 이어집니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <section id="intro">
+    <h2>0. 왜 "프레임버퍼"부터 시작하나</h2>
+    <p>
+      화면(모니터)은 결국 아주 촘촘한 <strong>격자(grid)</strong>입니다. 가로 폭(width)개, 세로 높이(height)개의
+      작은 사각형 칸이 있고, 그 칸 하나하나를 <strong>픽셀(pixel, picture element)</strong>이라고 부릅니다.
+      "그림을 그린다"는 것은 결국 "각 칸에 어떤 색을 넣을지 정하는 것"입니다.
+      3D 렌더링이든, 폰트 렌더링이든, 게임 화면이든, 파이프라인의 맨 끝에서 하는 일은 언제나 똑같습니다 —
+      <strong>어떤 픽셀에 어떤 색을 쓸 것인가.</strong>
+    </p>
+    <p>
+      그 "색을 써 두는 메모리 공간"이 바로 <strong>프레임버퍼(framebuffer)</strong>입니다.
+      말 그대로 "한 프레임(화면 한 장)을 담아 두는 버퍼(임시 저장소)"라는 뜻이죠.
+      GPU 안에도 프레임버퍼가 있지만, 우리는 그 마법을 이해하기 위해 <strong>일반 RAM 위에 우리만의 프레임버퍼</strong>를
+      직접 만들어 볼 겁니다. 그러면 "픽셀을 찍는다"는 것이 실제로는 <em>배열의 한 칸에 숫자를 대입하는 것</em>임을
+      두 눈으로 확인할 수 있습니다.
+    </p>
+    <ol class="steps">
+      <li>색을 <code>uint32_t</code> 하나로 패킹/언패킹하는 헬퍼를 만든다(비트 연산의 이해).</li>
+      <li><code>width * height</code> 크기의 <code>std::vector</code>를 픽셀 저장소로 잡는다(1차원 배열로 2차원 이미지 표현).</li>
+      <li><code>setPixel</code> / <code>clear</code> 로 버퍼를 조작한다(경계 검사와 클리핑).</li>
+      <li>결과를 PPM(P6) 파일로 저장해 눈으로 확인한다(가장 단순한 무손실 포맷).</li>
+      <li>(응용) 이 버퍼를 D3D11 동적 텍스처로 올려 화면에 실시간 표시한다.</li>
+    </ol>
+    <div class="callout">
+      <span class="tag warn">규약</span>
+      이 시리즈 전체에서 <strong>이미지/화면 좌표는 좌상단이 원점 (0,0)</strong>이고, x는 오른쪽으로, y는 <em>아래로</em> 증가합니다.
+      이는 Direct3D 11의 텍스처 좌표(UV)와도 방향이 일치합니다(V가 위→아래). 수학 시간에 배운 "좌하단 원점, y는 위로"와
+      반대이므로, 처음엔 반드시 헷갈립니다. 이 페이지 곳곳에서 이 규약을 다시 짚겠습니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="color">
+    <h2>1. 색을 숫자 하나로 — RGBA8 패킹/언패킹</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 빨강(R)·초록(G)·파랑(B)·투명도(A) 네 값을 <strong>32비트 정수 하나</strong>(<code>uint32_t</code>)에
+      욱여넣고, 다시 꺼내는 헬퍼 함수들을 만듭니다.
+      <strong>왜 필요한가:</strong> 픽셀 하나를 바이트 4개(구조체)로 다루는 것보다, 정수 4바이트 <em>한 덩어리</em>로 다루면
+      복사·비교·메모리 접근이 훨씬 빠르고, GPU 텍스처 포맷(<code>DXGI_FORMAT_R8G8B8A8_UNORM</code>)의 바이트 배치와도
+      정확히 일치시킬 수 있기 때문입니다.
+    </p>
+    <p>
+      먼저 알아야 할 개념: <strong>채널당 8비트(=1바이트)</strong>입니다. 8비트로 표현할 수 있는 정수는 0~255(총 256단계)죠.
+      그래서 이 방식을 <strong>RGBA8</strong> 또는 RGBA8888이라고 부릅니다. 네 채널 × 8비트 = 32비트 = 4바이트 =
+      <code>uint32_t</code> 하나에 딱 맞습니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>color.h</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#pragma once
+#include &lt;cstdint&gt;
+#include &lt;algorithm&gt;
+
+// 32비트 안에 R,G,B,A를 담는다. 메모리 배치는 리틀엔디언 기준
+// 0xAABBGGRR 형태(바이트 순서: R,G,B,A)로 저장해 두면
+// uint8_t 4바이트로 재해석했을 때 R이 먼저 온다.
+struct Color {
+    uint8_t r = 0, g = 0, b = 0, a = 255;
+};
+
+// float[0,1] -&gt; 8비트로 클램프 변환
+inline uint8_t toByte(float v) {
+    v = std::clamp(v, 0.0f, 1.0f);
+    return static_cast&lt;uint8_t&gt;(v * 255.0f + 0.5f); // 반올림
+}
+
+// Color -&gt; uint32_t 패킹 (R이 최하위 바이트)
+inline uint32_t pack(Color c) {
+    return  (uint32_t)c.r
+         | ((uint32_t)c.g &lt;&lt; 8)
+         | ((uint32_t)c.b &lt;&lt; 16)
+         | ((uint32_t)c.a &lt;&lt; 24);
+}
+
+// uint32_t -&gt; Color 언패킹
+inline Color unpack(uint32_t p) {
+    Color c;
+    c.r = (uint8_t)( p        &amp; 0xFF);
+    c.g = (uint8_t)((p &gt;&gt; 8)  &amp; 0xFF);
+    c.b = (uint8_t)((p &gt;&gt; 16) &amp; 0xFF);
+    c.a = (uint8_t)((p &gt;&gt; 24) &amp; 0xFF);
+    return c;
+}
+
+inline Color rgb(uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
+    return Color{ r, g, b, a };
+}</code></pre>
+    </div>
+
+    <h3>1-1. <code>struct Color</code> — 색 하나의 논리적 표현</h3>
+    <p>
+      <code>struct Color { uint8_t r = 0, g = 0, b = 0, a = 255; };</code> 는 색 하나를
+      사람이 이해하기 쉬운 네 필드로 표현한 구조체입니다. 한 줄씩 뜯어봅니다.
+    </p>
+    <ul>
+      <li>
+        <code>uint8_t</code>는 "부호 없는 8비트 정수"입니다(unsigned int, 8 bits). 표현 범위는 정확히
+        <strong>0~255</strong>로, RGBA8의 한 채널과 완벽히 일치합니다. <code>int</code>(보통 32비트)를 쓰면 0~255를 넘는
+        엉뚱한 값이 들어갈 수 있고 메모리도 4배 낭비되므로, 채널 하나엔 반드시 <code>uint8_t</code>를 씁니다.
+      </li>
+      <li>
+        <code>r = 0, g = 0, b = 0</code>: <strong>기본 멤버 초기화자(default member initializer)</strong>입니다.
+        <code>Color c;</code> 처럼 아무 값 없이 만들면 자동으로 R=G=B=0(검정)이 됩니다.
+        초기화를 깜빡해서 쓰레기 값이 들어가는 흔한 버그를 원천 차단합니다.
+      </li>
+      <li>
+        <code>a = 255</code>: 알파(불투명도)만 기본값이 <strong>255(완전 불투명)</strong>입니다.
+        직관적으로 "색을 만들면 기본은 안 비치는 색"이 맞기 때문입니다. 만약 알파 기본값이 0이었다면
+        만든 색이 죄다 투명(안 보임)이라 디버깅 지옥이 됩니다.
+      </li>
+    </ul>
+    <div class="callout">
+      <span class="tag warn">용어</span>
+      <strong>알파(A)</strong>는 "이 색이 배경을 얼마나 가리는가"를 뜻하는 <em>불투명도</em>입니다.
+      255면 완전 불투명(뒤가 안 보임), 0이면 완전 투명(색이 없는 것과 같음), 128이면 반투명(뒤가 절반 비침)입니다.
+      알파를 실제로 섞는 방법(알파 블렌딩)은 이 장의 별도 섹션에서 다룹니다.
+    </div>
+
+    <h3>1-2. <code>toByte</code> — 실수 [0,1]을 정수 [0,255]로</h3>
+    <p>
+      계산은 보통 <strong>실수(float) [0,1]</strong> 범위에서 합니다(예: 0.5 = 절반 밝기). 하지만 저장은
+      <strong>정수 [0,255]</strong>여야 하죠. 그 변환을 안전하게 해 주는 것이 <code>toByte</code>입니다.
+    </p>
+    <table class="impl">
+      <tr><th>코드 조각</th><th>의미</th></tr>
+      <tr><td><code>float v</code></td><td>입력은 0.0~1.0을 기대(밝기 비율). 값으로 받으므로 원본이 바뀌지 않음.</td></tr>
+      <tr><td><code>std::clamp(v, 0.0f, 1.0f)</code></td><td>범위를 강제로 [0,1]로 자름. 1.2 → 1.0, -0.3 → 0.0. 넘치는 값이 정수 변환에서 폭주(오버플로)하는 걸 막음.</td></tr>
+      <tr><td><code>v * 255.0f</code></td><td>[0,1]을 [0,255] 크기로 늘림. 0.5 → 127.5.</td></tr>
+      <tr><td><code>+ 0.5f</code></td><td><strong>반올림</strong>. C++의 정수 캐스팅은 소수점 아래를 <em>버림</em>(truncate)하므로, 0.5를 더하고 버리면 반올림과 같아짐. 127.5 → 128.0 → 128.</td></tr>
+      <tr><td><code>static_cast&lt;uint8_t&gt;(...)</code></td><td>실수를 8비트 정수로 변환(소수점 버림). 위에서 [0,255]로 이미 잘랐으니 안전.</td></tr>
+    </table>
+    <p>
+      <strong>손계산 예:</strong> 밝기 0.5를 넣으면 <code>0.5 × 255 = 127.5</code>, 반올림 위해 <code>+0.5 = 128.0</code>,
+      캐스팅하면 <strong>128</strong>이 됩니다. 만약 <code>+0.5</code>가 없었다면 127.5를 버려서 127이 나옵니다 —
+      한 단계 어두워지죠. 이 사소한 <code>+0.5f</code> 하나가 반복 변환에서 색이 조금씩 어두워지는 걸 막아 줍니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>clamp</code>를 빼먹으면 큰일 납니다. 예컨대 밝기 1.5를 그냥 캐스팅하면 <code>1.5 × 255 = 382.5</code> →
+      <code>uint8_t</code>는 256 이상을 담을 수 없어 <strong>382 mod 256 = 126</strong>이 되어, <em>밝아야 할 색이 갑자기
+      중간 회색으로 뒤집힙니다</em>(오버플로 랩어라운드). 조명 계산에서 흔히 1을 넘는 값이 나오므로 clamp는 필수입니다.
+    </div>
+
+    <h3>1-3. <code>pack</code> — 네 바이트를 정수 하나로 (비트 시프트 &amp; OR)</h3>
+    <p>
+      이 함수가 이 섹션의 핵심입니다. R·G·B·A 네 개의 <code>uint8_t</code>를 겹치지 않게 <code>uint32_t</code>의
+      서로 다른 자리에 끼워 넣습니다. 32비트를 8비트씩 네 칸으로 나눠 생각하면 됩니다:
+    </p>
+    <p style="text-align:center; color:var(--text-dim);">
+      <code>[비트 31..24] = A</code> · <code>[23..16] = B</code> · <code>[15..8] = G</code> · <code>[7..0] = R</code>
+    </p>
+    <p>줄 단위로 봅니다. <code>c.r</code>은 최하위 8비트(자리 이동 없음), 나머지는 <strong>왼쪽 시프트(<code>&lt;&lt;</code>)</strong>로 자기 자리로 밀어 올립니다.</p>
+    <ul>
+      <li><code>(uint32_t)c.r</code>: R은 그대로 최하위 바이트(비트 0~7)에 놓입니다. <em>먼저 <code>uint32_t</code>로 캐스팅하는 이유</em>는, <code>uint8_t</code> 상태로 <code>&lt;&lt; 24</code>를 하면 8비트를 넘어가는 부분이 잘려 나가기 때문입니다. 캐스팅으로 "넉넉한 32비트 그릇"에 먼저 담아야 안전하게 밀 수 있습니다.</li>
+      <li><code>(uint32_t)c.g &lt;&lt; 8</code>: G를 8칸 왼쪽으로 밀어 비트 8~15에 놓습니다. 예: G=1이면 <code>0b1 &lt;&lt; 8 = 256</code>.</li>
+      <li><code>(uint32_t)c.b &lt;&lt; 16</code>: B를 16칸 밀어 비트 16~23에 놓습니다.</li>
+      <li><code>(uint32_t)c.a &lt;&lt; 24</code>: A를 24칸 밀어 비트 24~31(최상위 바이트)에 놓습니다.</li>
+      <li><code>|</code> (비트 OR): 네 조각을 <strong>합칩니다</strong>. 각자 다른 자리에 있으니 겹치지 않고 그대로 하나로 합쳐집니다. (더하기 <code>+</code>로 해도 결과는 같지만, "겹치지 않는 비트를 합친다"는 의미는 OR가 더 정확합니다.)</li>
+    </ul>
+    <p>
+      <strong>손계산 예:</strong> <code>rgb(255, 128, 0)</code>(주황, 알파 기본 255)을 패킹해 봅니다.
+    </p>
+    <table class="impl">
+      <tr><th>채널</th><th>값(10진)</th><th>값(16진)</th><th>시프트</th><th>기여분(16진)</th></tr>
+      <tr><td>R</td><td>255</td><td>0xFF</td><td>&lt;&lt; 0</td><td>0x000000FF</td></tr>
+      <tr><td>G</td><td>128</td><td>0x80</td><td>&lt;&lt; 8</td><td>0x00008000</td></tr>
+      <tr><td>B</td><td>0</td><td>0x00</td><td>&lt;&lt; 16</td><td>0x00000000</td></tr>
+      <tr><td>A</td><td>255</td><td>0xFF</td><td>&lt;&lt; 24</td><td>0xFF000000</td></tr>
+    </table>
+    <p>
+      네 기여분을 OR로 합치면 <code>0xFF008000</code>이 나옵니다.
+      이 값을 바이트 순서(리틀엔디언, 낮은 주소부터)로 메모리에 펼치면 <strong>R, G, B, A = FF, 80, 00, FF</strong> 순서가 되어,
+      아래에서 설명할 GPU 포맷과 정확히 맞아떨어집니다.
+    </p>
+
+    <h3>1-4. <code>unpack</code> — 정수 하나를 네 바이트로 (시프트 &amp; 마스크)</h3>
+    <p>
+      <code>pack</code>의 역연산입니다. 정수에서 원하는 8비트만 <strong>오른쪽으로 끌어내리고(<code>&gt;&gt;</code>)</strong>,
+      <strong>마스크(<code>&amp; 0xFF</code>)</strong>로 그 8비트만 골라냅니다.
+    </p>
+    <ul>
+      <li><code>p &amp; 0xFF</code>: 최하위 8비트만 남기고 나머지는 0으로 지웁니다. <code>0xFF</code> = <code>0b11111111</code>이라 겹치는 8비트만 통과. 이게 <strong>R</strong>입니다. R은 자리 이동이 필요 없으므로 시프트 없이 바로 마스크만 합니다.</li>
+      <li><code>(p &gt;&gt; 8) &amp; 0xFF</code>: 오른쪽으로 8칸 밀어 G가 있던 비트 8~15를 최하위로 내린 뒤, 마스크로 8비트만 골라 <strong>G</strong>를 얻습니다.</li>
+      <li><code>(p &gt;&gt; 16) &amp; 0xFF</code>: 같은 방식으로 <strong>B</strong>.</li>
+      <li><code>(p &gt;&gt; 24) &amp; 0xFF</code>: <strong>A</strong>. 최상위 바이트라 사실 마스크가 없어도 되지만, 습관적으로 붙여 두면 안전하고 대칭적이라 읽기 좋습니다.</li>
+      <li><code>(uint8_t)(...)</code>: 마스킹 후 값은 이미 0~255이므로 8비트로 안전하게 좁힙니다.</li>
+    </ul>
+    <p>
+      <strong>검산:</strong> 방금 만든 <code>0xFF008000</code>을 언패킹하면
+      <code>&amp;0xFF = 0x00</code>? — 잠깐, R은 최하위이므로 <code>0xFF008000 &amp; 0xFF = 0x00</code>… 이 아니라
+      실제 정수는 <code>0xFF008000</code>이 아니라 R=FF였으므로 <code>0xFF0080FF</code>여야 맞습니다.
+      다시: 위 표에서 R 기여분은 <code>0x000000FF</code>였습니다. 최종값은 <code>0xFF000000 | 0x00008000 | 0x000000FF = 0xFF0080FF</code>.
+      이제 언패킹하면 R = <code>0xFF</code>, G = <code>0x80</code>, B = <code>0x00</code>, A = <code>0xFF</code>로 원래대로 완벽히 복원됩니다. (앞 예시의 <code>0xFF008000</code>은 오타로, 정확한 값은 <code>0xFF0080FF</code>입니다.)
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <strong>엔디언(endianness)</strong> 혼동에 주의하세요. 위 배치는 x86/x64 같은 <em>리틀엔디언</em> 시스템에서
+      "정수의 최하위 바이트가 메모리의 낮은 주소"에 놓이는 성질을 이용합니다. 그래서 <code>uint32_t</code> 배열을
+      <code>uint8_t*</code>로 재해석하면 메모리에 R, G, B, A 순으로 보입니다. 만약 코드에서 이 정수 하나만 계속
+      <code>pack</code>/<code>unpack</code>으로 다룬다면 엔디언을 신경 쓸 필요가 없지만, 파일에 <em>정수 그대로 덤프</em>하거나
+      다른 아키텍처와 교환할 때는 바이트 순서가 달라질 수 있으니, 아래 PPM 저장처럼 <strong>채널을 명시적으로 한 바이트씩
+      써 주는</strong> 방식이 이식성 면에서 안전합니다.
+    </div>
+
+    <h3>1-5. <code>rgb()</code> — 간편 생성 헬퍼</h3>
+    <p>
+      <code>Color{ r, g, b, a }</code> 처럼 중괄호로 매번 만드는 대신, 함수처럼 <code>rgb(255, 80, 80)</code>로
+      부를 수 있게 해 주는 얇은 래퍼입니다. <code>a = 255</code>가 <strong>기본 인자(default argument)</strong>라
+      알파를 생략하면 자동으로 불투명해집니다. <code>Color{ r, g, b, a }</code>는 <strong>집합 초기화(aggregate
+      initialization)</strong>로, 멤버 순서대로 값을 그대로 채워 넣는 문법입니다.
+    </p>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      <code>pack</code>·<code>unpack</code>·<code>toByte</code>·<code>rgb</code>에 붙은 <code>inline</code>은 "이 함수 호출을
+      호출 자리에 펼쳐 넣어도 좋다"는 힌트입니다. 픽셀 루프 안에서 수백만 번 불리는 초경량 함수이므로,
+      함수 호출 비용(스택 세팅 등)을 없애는 게 중요합니다. 헤더에 정의를 두면서 다중 정의 링크 오류를 피하는
+      역할도 겸합니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="framebuffer">
+    <h2>2. 프레임버퍼 클래스 — 메모리 위의 이미지 한 장</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 폭×높이 개의 패킹된 픽셀을 담는 <code>Framebuffer</code> 클래스입니다.
+      내부는 <strong>1차원 배열</strong>(<code>std::vector&lt;uint32_t&gt;</code>) 하나지만, <code>index(x,y)</code> 변환으로
+      마치 2차원 격자처럼 다룹니다.
+      <strong>왜 필요한가:</strong> 픽셀을 안전하게(경계 밖 무시) 읽고 쓰고 지우는 공통 창구를 두면,
+      이후의 선·삼각형·필터·블렌딩 코드가 모두 이 몇 개 메서드 위에서 깔끔하게 돌아갑니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>framebuffer.h</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#pragma once
+#include &lt;vector&gt;
+#include &lt;cstdint&gt;
+#include &lt;cstdio&gt;
+#include "color.h"
+
+// 소프트웨어 프레임버퍼: 메모리 위의 이미지 한 장.
+// 원점(0,0)은 좌상단, x는 오른쪽, y는 아래로 증가시킨다.
+// (수학 좌표계는 좌하단이 원점이지만, 이미지/화면은 좌상단이 관례다.)
+class Framebuffer {
+public:
+    Framebuffer(int w, int h)
+        : w_(w), h_(h), px_(static_cast&lt;size_t&gt;(w) * h, 0) {}
+
+    int width()  const { return w_; }
+    int height() const { return h_; }
+
+    bool inBounds(int x, int y) const {
+        return x &gt;= 0 &amp;&amp; x &lt; w_ &amp;&amp; y &gt;= 0 &amp;&amp; y &lt; h_;
+    }
+
+    // 인덱스 = y * width + x  (행 우선/row-major)
+    size_t index(int x, int y) const {
+        return static_cast&lt;size_t&gt;(y) * w_ + x;
+    }
+
+    void setPixel(int x, int y, Color c) {
+        if (!inBounds(x, y)) return;       // 화면 밖은 무시(클리핑)
+        px_[index(x, y)] = pack(c);
+    }
+
+    Color getPixel(int x, int y) const {
+        if (!inBounds(x, y)) return Color{ 0, 0, 0, 0 };
+        return unpack(px_[index(x, y)]);
+    }
+
+    // 버퍼 전체를 한 색으로 채운다
+    void clear(Color c) {
+        uint32_t p = pack(c);
+        std::fill(px_.begin(), px_.end(), p);
+    }
+
+    const std::vector&lt;uint32_t&gt;&amp; pixels() const { return px_; }
+    std::vector&lt;uint32_t&gt;&amp;       pixels()       { return px_; }
+
+    // ── PPM(P6) 바이너리로 저장: 가장 단순한 무손실 포맷 ──
+    // 헤더는 아스키("P6 w h 255\n"), 이후 RGB 3바이트씩 나열.
+    // (알파는 PPM이 지원하지 않으므로 버린다.)
+    bool savePPM(const char* path) const {
+        FILE* f = std::fopen(path, "wb");
+        if (!f) return false;
+        std::fprintf(f, "P6\n%d %d\n255\n", w_, h_);
+        std::vector&lt;uint8_t&gt; row(static_cast&lt;size_t&gt;(w_) * 3);
+        for (int y = 0; y &lt; h_; ++y) {
+            for (int x = 0; x &lt; w_; ++x) {
+                Color c = unpack(px_[index(x, y)]);
+                row[x * 3 + 0] = c.r;
+                row[x * 3 + 1] = c.g;
+                row[x * 3 + 2] = c.b;
+            }
+            std::fwrite(row.data(), 1, row.size(), f);
+        }
+        std::fclose(f);
+        return true;
+    }
+
+private:
+    int w_, h_;
+    std::vector&lt;uint32_t&gt; px_; // RGBA8 패킹된 픽셀 (길이 = w*h)
+};</code></pre>
+    </div>
+
+    <h3>2-1. 멤버 변수와 생성자 — 저장소 확보</h3>
+    <p>
+      먼저 맨 아래 <code>private:</code> 블록의 두 멤버를 봅니다.
+    </p>
+    <ul>
+      <li><code>int w_, h_;</code>: 폭과 높이. 뒤에 밑줄(<code>_</code>)을 붙이는 건 "이건 멤버 변수다"라는 흔한 관례로, 매개변수 <code>w</code>와 멤버 <code>w_</code>를 헷갈리지 않게 합니다.</li>
+      <li><code>std::vector&lt;uint32_t&gt; px_;</code>: 실제 픽셀들이 사는 곳. <strong>동적 배열</strong>이라 크기를 런타임에 정할 수 있고, 소멸 시 메모리를 자동 해제합니다(직접 <code>new/delete</code> 안 해도 됨). 원소 타입이 <code>uint32_t</code>인 이유는 앞서 만든 패킹된 색 하나가 정확히 그 타입이기 때문입니다.</li>
+    </ul>
+    <p>생성자를 봅니다:</p>
+    <pre style="background:transparent; padding:0;"><code class="language-cpp">Framebuffer(int w, int h)
+    : w_(w), h_(h), px_(static_cast&lt;size_t&gt;(w) * h, 0) {}</code></pre>
+    <ul>
+      <li><code>: w_(w), h_(h), ...</code>: <strong>멤버 초기화 리스트(member initializer list)</strong>입니다. 생성자 본문 <code>{}</code>에 들어가기 <em>전에</em> 멤버들을 곧바로 초기화합니다. 본문에서 <code>w_ = w;</code>로 대입하는 것보다 효율적이고, <code>const</code>나 참조 멤버도 초기화할 수 있습니다.</li>
+      <li><code>px_(static_cast&lt;size_t&gt;(w) * h, 0)</code>: vector를 "<strong>원소 <code>w*h</code>개, 각 값은 0</strong>"으로 생성합니다. 두 번째 인자 <code>0</code>이 초깃값이라, 버퍼가 처음부터 <em>검정·완전투명</em>(패킹된 0 = R,G,B,A 모두 0)으로 깨끗하게 채워집니다.</li>
+      <li>왜 <code>static_cast&lt;size_t&gt;(w)</code>로 먼저 캐스팅하나? <strong>정수 오버플로 방지</strong> 때문입니다. <code>w</code>와 <code>h</code>가 <code>int</code>이면 <code>w * h</code>도 <code>int</code>로 계산되는데, 예컨대 <code>50000 × 50000</code>은 <code>int</code>(약 21억 한계)를 넘겨 음수로 뒤집힙니다. 한쪽을 <strong>먼저</strong> <code>size_t</code>(64비트 부호 없는 정수)로 올리면 곱셈 전체가 넓은 타입으로 승격되어 안전합니다.</li>
+    </ul>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      곱셈 <em>전에</em> 캐스팅해야 의미가 있습니다. <code>static_cast&lt;size_t&gt;(w * h)</code>처럼 <em>곱한 뒤</em> 캐스팅하면
+      이미 <code>int</code>로 계산돼 오버플로가 난 다음이라 소용이 없습니다. 반드시 <code>static_cast&lt;size_t&gt;(w) * h</code>처럼
+      피연산자 하나를 먼저 넓혀야 합니다.
+    </div>
+
+    <h3>2-2. <code>width()</code> / <code>height()</code> — const 접근자</h3>
+    <p>
+      단순히 <code>w_</code>, <code>h_</code>를 돌려주는 게터(getter)입니다. 함수 뒤의 <code>const</code>가 핵심입니다:
+      이 함수는 <strong>객체의 상태를 절대 바꾸지 않겠다</strong>는 약속입니다. 덕분에 <code>const Framebuffer&amp;</code>로
+      전달된(읽기 전용) 버퍼에서도 크기를 물어볼 수 있습니다. 만약 <code>const</code>가 없으면, 상수 참조로 받은
+      필터 함수 안에서 <code>src.width()</code>조차 못 부릅니다.
+    </p>
+
+    <h3>2-3. <code>inBounds</code> — 화면 안인지 검사</h3>
+    <p>
+      <code>return x &gt;= 0 &amp;&amp; x &lt; w_ &amp;&amp; y &gt;= 0 &amp;&amp; y &lt; h_;</code> 네 조건을 <strong>모두(<code>&amp;&amp;</code>)</strong>
+      만족해야 참입니다. 좌표가 <strong>[0, w_)</strong>·<strong>[0, h_)</strong> 반열린 구간 안에 있어야 유효합니다.
+      상한이 <code>&lt; w_</code>(미만)인 이유는, 인덱스가 0부터 시작하므로 폭이 320이면 유효한 x는 0~319이기 때문입니다.
+      <code>x == 320</code>은 배열 밖이라 반드시 걸러야 합니다.
+    </p>
+    <p>
+      이 한 줄이 바로 <strong>클리핑(clipping)</strong>의 가장 원초적인 형태입니다. 화면 밖 좌표를 조용히 무시함으로써,
+      선을 화면 경계 너머로 그리거나 스프라이트가 화면 밖으로 삐져나가도 <em>배열 범위를 벗어나는 크래시</em>가 나지 않습니다.
+    </p>
+
+    <h3>2-4. <code>index</code> — 2D 좌표 → 1D 오프셋 (행 우선)</h3>
+    <p>
+      1차원 배열로 2차원 이미지를 표현하는 핵심 공식입니다:
+    </p>
+    <p style="text-align:center; color:var(--text-dim);">
+      <code>index = y × width + x</code>
+    </p>
+    <p>
+      <strong>수학적 의미:</strong> 픽셀들을 "한 행(row)씩 차례로 이어 붙인다"는 뜻입니다. 0번째 행의 픽셀들이
+      인덱스 0 ~ (width-1)에, 1번째 행이 width ~ (2·width-1)에… 이렇게 이어집니다. 이 배치를
+      <strong>행 우선(row-major)</strong>이라 부릅니다.
+    </p>
+    <p>
+      <strong>기하 직관(그림글):</strong> 320×240 이미지를 상상해 보세요. 좌상단부터 오른쪽으로 320칸 채우고 나면,
+      줄바꿈해서 그 아래 줄로 내려가 다시 왼쪽부터 320칸을 채웁니다 — <em>타자기가 종이에 글을 찍는 순서</em>와 똑같습니다.
+      "몇 번째 줄(y)인가 × 한 줄 길이(width)"로 그 줄의 시작 위치를 구한 뒤, "그 줄에서 몇 칸째(x)"를 더하면
+      전체에서의 위치가 나옵니다.
+    </p>
+    <p>
+      <strong>손계산 예:</strong> width=320에서 <code>(x=10, y=5)</code>의 인덱스는 <code>5 × 320 + 10 = 1610</code>입니다.
+      <code>(x=0, y=1)</code>은 <code>1 × 320 + 0 = 320</code>으로, 정확히 두 번째 줄의 첫 픽셀이 맞습니다.
+    </p>
+    <p>
+      여기서도 <code>static_cast&lt;size_t&gt;(y) * w_ + x</code>로 <code>y</code>를 먼저 넓혀 곱합니다. 큰 이미지에서
+      <code>y * w_</code>가 <code>int</code> 범위를 넘길 수 있기 때문입니다.
+    </p>
+
+    <h3>2-5. <code>setPixel</code> / <code>getPixel</code> — 픽셀 하나 쓰고 읽기</h3>
+    <p>
+      <code>setPixel</code>은 "경계 검사 → 인덱스 계산 → 패킹해서 대입" 3단계입니다.
+    </p>
+    <ul>
+      <li><code>if (!inBounds(x, y)) return;</code>: 화면 밖이면 <strong>조용히 아무것도 안 하고 돌아갑니다</strong>. 크래시 대신 무시 — 위에서 말한 클리핑입니다.</li>
+      <li><code>px_[index(x, y)] = pack(c);</code>: 유효한 자리에, 색을 정수로 패킹해 대입합니다. 이 한 줄이 문자 그대로 <strong>"픽셀을 찍는다"</strong>의 실체입니다 — 배열의 한 칸에 숫자를 넣는 것.</li>
+    </ul>
+    <p>
+      <code>getPixel</code>은 반대로 "경계 검사 → 읽어서 언패킹해 반환"입니다. 화면 밖을 읽으려 하면
+      <code>Color{ 0, 0, 0, 0 }</code>(검정·<strong>완전 투명</strong>)을 돌려줍니다. 알파를 0으로 주는 게 중요한데,
+      나중에 이 값이 블렌딩에 쓰이면 "밖은 아무것도 없음"으로 자연스럽게 처리되기 때문입니다.
+    </p>
+
+    <h3>2-6. <code>clear</code> — 버퍼 전체를 한 색으로</h3>
+    <p>
+      매 프레임 시작마다 배경색으로 화면을 지우는 함수입니다.
+    </p>
+    <ul>
+      <li><code>uint32_t p = pack(c);</code>: 색을 <em>한 번만</em> 패킹해 둡니다(루프 안에서 매번 패킹하면 낭비).</li>
+      <li><code>std::fill(px_.begin(), px_.end(), p);</code>: vector의 처음(<code>begin()</code>)부터 끝(<code>end()</code>)까지 모든 칸을 <code>p</code>로 채웁니다. 표준 라이브러리 함수라 컴파일러가 <code>memset</code>급으로 최적화하는 경우가 많아, 직접 for 루프를 도는 것보다 빠르고 안전합니다.</li>
+    </ul>
+
+    <h3>2-7. <code>pixels()</code> — 내부 배열 노출 (const 오버로드 한 쌍)</h3>
+    <p>
+      같은 이름의 함수가 두 개 있습니다. 이것을 <strong>const 오버로딩</strong>이라 합니다.
+    </p>
+    <ul>
+      <li><code>const std::vector&lt;uint32_t&gt;&amp; pixels() const</code>: 읽기 전용 버퍼에서 부르면 이게 선택되어 <strong>const 참조</strong>(수정 불가)를 돌려줍니다. D3D 텍스처로 업로드할 때처럼 "읽기만" 할 때 씁니다.</li>
+      <li><code>std::vector&lt;uint32_t&gt;&amp; pixels()</code>: 수정 가능한 버퍼에서 부르면 이게 선택되어 <strong>수정 가능한 참조</strong>를 돌려줍니다.</li>
+    </ul>
+    <p>
+      둘 다 <strong>참조(<code>&amp;</code>)</strong>를 반환하는 게 포인트입니다. 값으로 반환하면 수백만 픽셀 전체가
+      <em>복사</em>되어 끔찍하게 느립니다. 참조는 원본을 그대로 가리키므로 복사가 0입니다.
+    </p>
+
+    <h3>2-8. <code>savePPM</code> — 결과를 눈으로 보기</h3>
+    <p>
+      아직 화면 출력을 안 만들었으니, 결과를 파일로 저장해 이미지 뷰어로 확인합니다.
+      <strong>PPM(Portable Pixmap) P6</strong> 포맷은 "아스키 헤더 + 날것의 RGB 바이트"라 코드가 아주 짧습니다.
+    </p>
+    <ol class="steps">
+      <li><code>std::fopen(path, "wb")</code>로 파일을 <strong>바이너리 쓰기("wb")</strong> 모드로 엽니다. Windows에서 <code>"w"</code>(텍스트 모드)로 열면 <code>\n</code>이 <code>\r\n</code>으로 변환돼 픽셀 바이트가 오염되므로 반드시 <code>"wb"</code>여야 합니다. 열기 실패 시 <code>false</code> 반환.</li>
+      <li><code>std::fprintf(f, "P6\n%d %d\n255\n", w_, h_);</code>로 헤더를 씁니다. <code>P6</code>=바이너리 컬러 매직넘버, 그다음 폭·높이, <code>255</code>=채널 최댓값. 각 항목은 공백/개행으로 구분합니다.</li>
+      <li>임시 행 버퍼 <code>row</code>를 <code>width×3</code> 크기로 잡습니다(픽셀당 <strong>RGB 3바이트</strong>, 알파 제외).</li>
+      <li>각 픽셀을 언패킹해 <code>row[x*3+0]=R, +1=G, +2=B</code>로 채운 뒤, 한 줄씩 <code>std::fwrite</code>로 파일에 씁니다.</li>
+      <li><code>std::fclose(f)</code>로 닫고 <code>true</code> 반환.</li>
+    </ol>
+    <p>
+      <code>row[x * 3 + 0]</code>의 <code>× 3</code>은 "픽셀 하나가 3바이트를 차지"하기 때문입니다. x번째 픽셀의 R은
+      <code>x*3</code>, G는 <code>x*3+1</code>, B는 <code>x*3+2</code>에 놓입니다 — 이것도 작은 규모의 인덱스 계산이죠.
+      한 줄을 통째로 모아 <code>fwrite</code> 한 번으로 쓰는 이유는, 픽셀마다 파일 쓰기를 부르면 시스템 콜 오버헤드가
+      커지기 때문입니다(작은 배치화).
+    </p>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      PPM은 학습·디버깅용으로 최고지만 <strong>압축이 없어 파일이 큽니다</strong>(320×240이면 약 225KB).
+      PNG로 저장하려면 헤더 온리 라이브러리 <code>stb_image_write.h</code>의
+      <code>stbi_write_png("out.png", w, h, 4, data, w*4)</code>를 쓰면 됩니다
+      (여기서 <code>data</code>는 <code>pixels().data()</code>, 채널 수 4, 마지막 <code>w*4</code>는 한 행의 바이트 수). PNG는 알파도 저장됩니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="usage">
+    <h2>3. 사용 예 — 만들고, 지우고, 찍고, 저장하기</h2>
+    <p>
+      지금까지 만든 도구를 조립해 봅니다. 딱 네 줄이면 첫 이미지가 나옵니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>main.cpp (발췌)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">Framebuffer fb(320, 240);
+fb.clear(rgb(20, 22, 30));            // 어두운 배경
+fb.setPixel(10, 10, rgb(255, 80, 80)); // 좌상단 근처에 빨간 점
+fb.savePPM("out.ppm");                 // 결과 저장</code></pre>
+    </div>
+    <ol class="steps">
+      <li><code>Framebuffer fb(320, 240);</code> — 폭 320·높이 240짜리 버퍼를 스택에 만듭니다. 내부적으로 <code>76,800개</code>(=320×240)의 <code>uint32_t</code>가 0으로 초기화됩니다(약 300KB).</li>
+      <li><code>fb.clear(rgb(20, 22, 30));</code> — 전체를 어두운 남색 배경으로 칠합니다. R·G·B가 모두 낮은 값이라 거의 검정에 가깝습니다.</li>
+      <li><code>fb.setPixel(10, 10, rgb(255, 80, 80));</code> — <strong>좌상단에서</strong> 오른쪽으로 10, 아래로 10 떨어진 자리에 밝은 빨간 점 하나. (수학 좌표라면 좌하단 기준이겠지만, 여기선 좌상단 기준이라 화면 왼쪽 위 근처입니다.)</li>
+      <li><code>fb.savePPM("out.ppm");</code> — 결과를 파일로 저장. 이미지 뷰어로 열면 어두운 배경에 빨간 점 하나가 보입니다.</li>
+    </ol>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      원점 위치를 헷갈리기 쉽습니다. <strong>이미지/화면은 좌상단이 (0,0)</strong>이고 y가 아래로 증가합니다.
+      Direct3D 11의 텍스처 좌표(UV) 역시 <strong>좌상단이 원점</strong>이라 이 버퍼와 방향이 일치합니다(OpenGL은 좌하단이 원점이라 뒤집힘).
+      D3D로 올리면 대개 그대로 맞지만, 수학 좌표계(좌하단 원점)와 섞어 쓸 때는 UV의 v를 <code>1-v</code>로 다뤄야 할 수 있습니다.
+    </div>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      <code>setPixel</code>은 매번 경계 검사를 합니다. 안쪽 루프에서 이미 범위가 보장된다면
+      <code>px_[index(x,y)] = p</code>로 직접 쓰는 편이 훨씬 빠릅니다. 또 픽셀을 32비트 정수 하나로 다루면
+      바이트 4개보다 캐시/복사 효율이 좋습니다.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="d3d">
+    <h2>4. 화면에 실시간으로 — D3D11 동적 텍스처로 올리기 (개념)</h2>
+    <p>
+      파일 저장은 학습엔 좋지만, 게임처럼 <em>매 프레임</em> 화면에 뿌리려면 이 소프트웨어 버퍼를
+      <strong>Direct3D 11 텍스처</strong>로 업로드해야 합니다. 개념만 짚고, 실제 디바이스/스왑체인 생성과
+      셰이더 파이프라인 전체는 3~4장에서 다룹니다. 여기서 중요한 건 <strong>우리 프레임버퍼의 픽셀 배치가
+      D3D 텍스처와 어떻게 1:1로 맞아떨어지는가</strong>입니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>upload.cpp (개념 발췌)</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">using Microsoft::WRL::ComPtr; // &lt;wrl/client.h&gt;
+
+// ── 최초 1회: 매 프레임 갱신할 동적 텍스처 + SRV ──
+D3D11_TEXTURE2D_DESC td = {};
+td.Width  = fb.width();
+td.Height = fb.height();
+td.MipLevels = 1;
+td.ArraySize = 1;
+td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;   // Color(R,G,B,A) 바이트 순서와 일치
+td.SampleDesc.Count = 1;
+td.Usage = D3D11_USAGE_DYNAMIC;           // CPU가 매 프레임 덮어쓸 수 있게
+td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+ComPtr&lt;ID3D11Texture2D&gt; tex;
+device-&gt;CreateTexture2D(&amp;td, nullptr, &amp;tex);
+
+ComPtr&lt;ID3D11ShaderResourceView&gt; srv;
+device-&gt;CreateShaderResourceView(tex.Get(), nullptr, &amp;srv);
+
+// 최근접(픽셀아트) 샘플러 — D3D11_FILTER_MIN_MAG_MIP_LINEAR로 바꾸면 bilinear
+D3D11_SAMPLER_DESC sd = {};
+sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+ComPtr&lt;ID3D11SamplerState&gt; samp;
+device-&gt;CreateSamplerState(&amp;sd, &amp;samp);
+
+// ── 매 프레임: 소프트웨어로 그린 뒤 Map으로 픽셀을 복사해 올린다 ──
+D3D11_MAPPED_SUBRESOURCE ms;
+context-&gt;Map(tex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;ms);
+// GPU는 행마다 패딩(RowPitch)이 있을 수 있으므로 한 행씩 복사한다.
+const uint32_t* srcPx = fb.pixels().data();
+auto* dstBase = static_cast&lt;uint8_t*&gt;(ms.pData);
+for (int y = 0; y &lt; fb.height(); ++y) {
+    std::memcpy(dstBase + static_cast&lt;size_t&gt;(y) * ms.RowPitch,
+                srcPx  + static_cast&lt;size_t&gt;(y) * fb.width(),
+                static_cast&lt;size_t&gt;(fb.width()) * 4); // 4바이트/픽셀
+}
+context-&gt;Unmap(tex.Get(), 0);
+
+// 풀스크린 삼각형으로 출력: 정점 버퍼 없이 SV_VertexID 3개만 그린다
+context-&gt;IASetInputLayout(nullptr);
+context-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+context-&gt;VSSetShader(fullscreenVS.Get(), nullptr, 0);
+context-&gt;PSSetShader(blitPS.Get(),       nullptr, 0);
+context-&gt;PSSetShaderResources(0, 1, srv.GetAddressOf());
+context-&gt;PSSetSamplers(0, 1, samp.GetAddressOf());
+context-&gt;Draw(3, 0);   // 화면을 덮는 삼각형 1개 (3~4장 참고)</code></pre>
+    </div>
+
+    <h3>4-1. 텍스처 서술자(<code>D3D11_TEXTURE2D_DESC</code>) 필드 하나씩</h3>
+    <p>
+      D3D11은 리소스를 만들 때 "이런 리소스를 원한다"를 <strong>서술자(descriptor) 구조체</strong>에 채워
+      건넵니다. <code>D3D11_TEXTURE2D_DESC td = {};</code>의 <code>= {}</code>는 <strong>모든 필드를 0으로 초기화</strong>하는
+      집합 초기화입니다(안 채운 필드가 쓰레기 값이 되는 걸 방지).
+    </p>
+    <table class="impl">
+      <tr><th>필드</th><th>값</th><th>의미</th></tr>
+      <tr><td><code>Width / Height</code></td><td><code>fb.width()/height()</code></td><td>텍스처 크기를 우리 프레임버퍼와 똑같이 맞춤.</td></tr>
+      <tr><td><code>MipLevels</code></td><td><code>1</code></td><td>밉맵 없이 원본 한 장만(매 프레임 갱신하는 화면 버퍼엔 밉맵 불필요).</td></tr>
+      <tr><td><code>ArraySize</code></td><td><code>1</code></td><td>텍스처 배열이 아니라 한 장.</td></tr>
+      <tr><td><code>Format</code></td><td><code>DXGI_FORMAT_R8G8B8A8_UNORM</code></td><td><strong>핵심.</strong> 메모리 바이트가 R,G,B,A 순, 각 8비트 <em>UNORM</em>(0~255를 셰이더에서 0.0~1.0으로 해석). 우리 <code>pack</code>의 바이트 배치와 정확히 일치.</td></tr>
+      <tr><td><code>SampleDesc.Count</code></td><td><code>1</code></td><td>멀티샘플 안티에일리어싱 없음(픽셀당 샘플 1개).</td></tr>
+      <tr><td><code>Usage</code></td><td><code>D3D11_USAGE_DYNAMIC</code></td><td><strong>CPU가 매 프레임 덮어쓸</strong> 수 있는 용도. GPU 읽기 + CPU 쓰기에 최적.</td></tr>
+      <tr><td><code>BindFlags</code></td><td><code>D3D11_BIND_SHADER_RESOURCE</code></td><td>셰이더에서 텍스처로 <em>읽을</em> 수 있게 바인딩 허용.</td></tr>
+      <tr><td><code>CPUAccessFlags</code></td><td><code>D3D11_CPU_ACCESS_WRITE</code></td><td>CPU가 <code>Map</code>으로 쓰기 접근 허용(DYNAMIC과 짝).</td></tr>
+    </table>
+    <div class="callout">
+      <span class="tag warn">규약</span>
+      <code>DXGI_FORMAT_R8G8B8A8_UNORM</code>은 메모리에서 <strong>R,G,B,A</strong> 바이트 순서를 기대합니다.
+      우리 <code>pack</code>이 R을 최하위 바이트에 두었으므로(리틀엔디언에서 낮은 주소=R), 이 포맷과 <strong>바이트 하나까지 일치</strong>합니다.
+      만약 셰이더에서 색이 파랑/빨강이 뒤바뀌어 보인다면(BGRA), 포맷을 <code>DXGI_FORMAT_B8G8R8A8_UNORM</code>으로 바꾸거나
+      <code>pack</code>에서 R/B 자리를 바꿔야 합니다.
+    </div>
+
+    <h3>4-2. 리소스 생성과 <code>ComPtr</code></h3>
+    <ul>
+      <li><code>ComPtr&lt;ID3D11Texture2D&gt; tex;</code>: <code>ComPtr</code>는 COM 객체용 <strong>스마트 포인터</strong>입니다. 참조 카운트를 자동 관리해 <code>Release()</code>를 깜빡해서 새는 메모리(리소스 누수)를 막아 줍니다. D3D11 객체는 전부 이걸로 잡는 게 정석입니다.</li>
+      <li><code>device-&gt;CreateTexture2D(&amp;td, nullptr, &amp;tex);</code>: 서술자 주소(<code>&amp;td</code>)와, 초기 데이터 없음(<code>nullptr</code>, 어차피 매 프레임 덮어씀), 결과를 받을 포인터의 주소(<code>&amp;tex</code>)를 넘깁니다.</li>
+      <li><code>CreateShaderResourceView(tex.Get(), nullptr, &amp;srv)</code>: 텍스처를 셰이더가 "읽을 수 있는 뷰(SRV)"로 감쌉니다. 셰이더는 원시 텍스처가 아니라 이 뷰를 통해 접근합니다. <code>tex.Get()</code>은 <code>ComPtr</code>에서 원시 포인터를 꺼내는 메서드입니다.</li>
+    </ul>
+
+    <h3>4-3. 샘플러(<code>D3D11_SAMPLER_DESC</code>) — 픽셀을 어떻게 고를까</h3>
+    <p>
+      샘플러는 "텍스처에서 색을 뽑을 때의 규칙"입니다.
+    </p>
+    <ul>
+      <li><code>Filter = D3D11_FILTER_MIN_MAG_MIP_POINT</code>: <strong>최근접(nearest/point)</strong> 필터. 가장 가까운 텍셀 하나를 그대로 가져와 계단처럼 또렷합니다(픽셀아트에 적합). <code>..._LINEAR</code>로 바꾸면 이웃 4개를 섞는 <strong>바이리니어</strong>(부드러움).</li>
+      <li><code>AddressU/V/W = D3D11_TEXTURE_ADDRESS_CLAMP</code>: UV가 [0,1]을 벗어나면 가장자리 값으로 고정(clamp). 화면 버퍼는 딱 맞게 그리므로 사실상 안 벗어나지만, 안전한 기본값입니다.</li>
+    </ul>
+
+    <h3>4-4. <code>Map</code>으로 픽셀 복사 — <code>RowPitch</code>가 핵심</h3>
+    <p>
+      매 프레임 CPU에서 그린 픽셀을 GPU 텍스처로 옮기는 부분입니다.
+    </p>
+    <ul>
+      <li><code>context-&gt;Map(tex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;ms);</code>: 텍스처 메모리를 CPU가 쓸 수 있게 <strong>잠급니다</strong>. <code>WRITE_DISCARD</code>는 "이전 내용은 버리고 새로 다 쓸 것"이라는 뜻으로, GPU가 그 리소스를 아직 쓰고 있어도 드라이버가 새 메모리를 줘서 <em>멈춤(stall) 없이</em> 빠르게 진행됩니다. 결과 정보는 <code>ms</code>(<code>D3D11_MAPPED_SUBRESOURCE</code>)에 담깁니다.</li>
+      <li><code>ms.pData</code>: GPU가 내어 준 쓰기 대상 메모리의 시작 주소. <code>uint8_t*</code>로 캐스팅해 바이트 단위로 다룹니다.</li>
+      <li><code>ms.RowPitch</code>: <strong>한 행이 차지하는 실제 바이트 수</strong>입니다. 여기가 함정입니다 — GPU는 정렬을 위해 각 행 끝에 <em>패딩</em>을 넣을 수 있어, <code>RowPitch</code>가 <code>width × 4</code>보다 <strong>클 수 있습니다</strong>. 예: 폭 300이면 <code>width×4 = 1200</code>인데 <code>RowPitch</code>가 1280일 수 있습니다.</li>
+    </ul>
+    <p>
+      그래서 <strong>버퍼 전체를 한 번에 <code>memcpy</code>하면 안 되고, 반드시 한 행씩</strong> 복사합니다:
+    </p>
+    <ul>
+      <li>목적지: <code>dstBase + y * ms.RowPitch</code> — GPU의 y번째 행 시작(패딩 포함 간격).</li>
+      <li>원본: <code>srcPx + y * fb.width()</code> — 우리 배열의 y번째 행 시작(<code>uint32_t</code> 포인터라 <code>+ width</code>가 한 행). 우리 쪽엔 패딩이 없습니다.</li>
+      <li>복사량: <code>fb.width() * 4</code> — 실제 픽셀 데이터만(패딩 부분은 건드리지 않음).</li>
+    </ul>
+    <p>
+      <code>context-&gt;Unmap(tex.Get(), 0);</code>로 잠금을 풀면 GPU가 갱신된 텍스처를 쓸 수 있게 됩니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>RowPitch</code>를 무시하고 <code>memcpy(ms.pData, srcPx, width*height*4)</code> 한 방으로 복사하면,
+      패딩이 있는 GPU에선 <strong>이미지가 대각선으로 밀려 찢어지거나(skew)</strong> 색이 어긋나 보입니다.
+      "행 단위 복사"는 D3D/Vulkan 텍스처 업로드의 철칙입니다.
+    </div>
+
+    <h3>4-5. 풀스크린 삼각형 출력 (정점 버퍼 없이)</h3>
+    <p>
+      마지막 블록은 "정점 버퍼 하나 없이" 화면을 덮는 삼각형을 그려, 그 위에 우리 텍스처를 입히는 부분입니다.
+    </p>
+    <ul>
+      <li><code>IASetInputLayout(nullptr)</code>: 입력 레이아웃 없음 — 정점 데이터를 안 쓴다는 선언.</li>
+      <li><code>IASetPrimitiveTopology(...TRIANGLELIST)</code>: 정점 3개를 삼각형 하나로 해석.</li>
+      <li><code>VSSetShader / PSSetShader</code>: 정점·픽셀 셰이더를 파이프라인에 장착.</li>
+      <li><code>PSSetShaderResources(0, 1, srv.GetAddressOf())</code>: 슬롯 t0에 우리 텍스처 뷰를 바인딩(픽셀 셰이더가 읽을 수 있게).</li>
+      <li><code>PSSetSamplers(0, 1, samp.GetAddressOf())</code>: 슬롯 s0에 샘플러 바인딩.</li>
+      <li><code>Draw(3, 0)</code>: 정점 <strong>3개</strong>를 그리라는 명령. 정점 데이터가 없는데도 되는 이유는 셰이더가 <code>SV_VertexID</code>로 좌표를 <em>계산</em>해 내기 때문입니다(아래 HLSL).</li>
+    </ul>
+    <p>
+      정점 버퍼 없이 <code>SV_VertexID</code> 3개만으로 클립 공간의 큰 삼각형을 만들어 화면 전체를 덮습니다.
+      픽셀 셰이더는 이 삼각형의 UV로 우리 텍스처를 샘플링해 그대로 출력합니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>blit.hlsl (정점 · 픽셀 셰이더)</span><span class="lang">HLSL</span></div>
+      <pre><code class="language-hlsl">// ── 정점 셰이더: 정점 버퍼 없이 화면을 덮는 삼각형 생성 ──
+struct VSOut {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+};
+
+// id = 0,1,2 세 정점으로 클립 공간 [-1,3]의 큰 삼각형을 만든다.
+// 잘려서 화면([-1,1])을 정확히 덮고, UV는 좌상단(0,0)~우하단(1,1).
+VSOut VSMain(uint id : SV_VertexID) {
+    VSOut o;
+    float2 uv = float2((id &lt;&lt; 1) &amp; 2, id &amp; 2); // (0,0),(2,0),(0,2)
+    o.uv  = uv;
+    o.pos = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    return o;
+}
+
+// ── 픽셀 셰이더: 프레임버퍼 텍스처를 그대로 샘플링 ──
+Texture2D    srcTex : register(t0);
+SamplerState samp   : register(s0);
+
+float4 PSMain(VSOut i) : SV_Target {
+    return srcTex.Sample(samp, i.uv);
+}</code></pre>
+    </div>
+
+    <h3>4-6. 정점 셰이더 해부 — 한 줄로 화면을 덮는 트릭</h3>
+    <p>
+      <code>struct VSOut</code>는 정점 셰이더가 픽셀 셰이더로 넘길 데이터입니다.
+    </p>
+    <ul>
+      <li><code>float4 pos : SV_Position;</code>: <strong>클립 공간 위치</strong>. <code>SV_</code>로 시작하는 <strong>시스템 값 시맨틱</strong>이라, 래스터라이저가 이걸 읽어 화면 좌표로 바꿉니다(필수 출력). <code>float4</code>인 이유는 동차좌표 (x, y, z, w)를 담기 때문입니다.</li>
+      <li><code>float2 uv : TEXCOORD0;</code>: 이 정점의 텍스처 좌표. 삼각형 내부에서 픽셀마다 <em>자동 보간</em>되어 픽셀 셰이더에 전달됩니다.</li>
+    </ul>
+    <p><code>VSMain</code>의 핵심 두 줄:</p>
+    <p style="text-align:center; color:var(--text-dim);">
+      <code>float2 uv = float2((id &lt;&lt; 1) &amp; 2, id &amp; 2);</code>
+    </p>
+    <p>
+      이 비트 트릭으로 <code>id</code> 0·1·2에서 UV (0,0)·(2,0)·(0,2)를 만들어 냅니다. 표로 검증합니다:
+    </p>
+    <table class="impl">
+      <tr><th>id</th><th><code>id&lt;&lt;1</code></th><th><code>(id&lt;&lt;1)&amp;2</code> = uv.x</th><th><code>id&amp;2</code> = uv.y</th></tr>
+      <tr><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+      <tr><td>1</td><td>2</td><td>2</td><td>0</td></tr>
+      <tr><td>2</td><td>4</td><td>0 (4&amp;2=0)</td><td>2</td></tr>
+    </table>
+    <p>
+      즉 UV 좌표는 (0,0), (2,0), (0,2) 세 점 — <strong>[0,1] 사각형의 두 배 크기</strong>인 큰 직각삼각형입니다.
+      이 삼각형은 화면보다 커서, 화면 영역([0,1]에 해당하는 부분)을 <em>남김없이</em> 덮고 나머지는 잘려 나갑니다.
+      두 개의 삼각형(사각형)보다 하나의 큰 삼각형이 GPU에 살짝 더 효율적이라 흔히 쓰는 관용구입니다.
+    </p>
+    <p style="text-align:center; color:var(--text-dim);">
+      <code>o.pos = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);</code>
+    </p>
+    <p>
+      UV [0,2]를 <strong>클립 공간 [-1,3]</strong>으로 매핑합니다. 성분별로:
+    </p>
+    <ul>
+      <li><code>x = uv.x * 2 - 1</code>: UV의 0 → -1(화면 왼쪽), 1 → +1(화면 오른쪽). UV가 오른쪽으로 갈수록 클립 x도 오른쪽으로.</li>
+      <li><code>y = 1 - uv.y * 2</code>: UV의 0 → +1(화면 <em>위</em>), 1 → -1(화면 <em>아래</em>). <strong>부호가 뒤집힌 것이 핵심</strong>입니다. 우리 프레임버퍼/텍스처 UV는 v가 위→아래로 증가하지만, 클립 공간 y는 아래→위로 증가하기 때문에, y를 뒤집어야 이미지가 상하반전 없이 똑바로 나옵니다.</li>
+      <li><code>z = 0.0</code>: 깊이(왼손 좌표계, 클립 z는 [0,1] 범위 — 0은 가장 가까움). 풀스크린이라 깊이는 아무 값이나 무방.</li>
+      <li><code>w = 1.0</code>: 동차좌표. 원근 나눗셈에서 그대로 두면 좌표가 안 변하므로 1.</li>
+    </ul>
+
+    <h3>4-7. 픽셀 셰이더 해부 — 텍스처 그대로 출력</h3>
+    <ul>
+      <li><code>Texture2D srcTex : register(t0);</code>: 2D 텍스처를 t0 슬롯에 바인딩(C++의 <code>PSSetShaderResources(0, ...)</code>와 짝).</li>
+      <li><code>SamplerState samp : register(s0);</code>: 샘플러를 s0 슬롯에(C++의 <code>PSSetSamplers(0, ...)</code>와 짝).</li>
+      <li><code>float4 PSMain(VSOut i) : SV_Target</code>: 반환값이 <strong>렌더 타깃(화면)의 최종 색</strong>임을 <code>SV_Target</code> 시맨틱으로 표시.</li>
+      <li><code>return srcTex.Sample(samp, i.uv);</code>: 보간된 UV로 텍스처를 샘플링해 그 색을 그대로 출력. 우리가 CPU로 그린 픽셀이 여기서 화면에 나타납니다.</li>
+    </ul>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      Direct3D 11의 텍스처 UV는 좌상단이 원점이라 좌상단 원점 프레임버퍼가 방향까지 그대로 맞습니다
+      (OpenGL이라면 좌하단 원점이라 상하가 뒤집혀 v를 <code>1-v</code>로 매핑해야 했습니다).
+      또 <code>Map</code>이 돌려주는 <code>RowPitch</code>는 <code>width×4</code>보다 클 수 있으니, 버퍼 전체를 한 번에
+      <code>memcpy</code>하지 말고 반드시 <strong>행 단위</strong>로 복사하세요.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="wrapup">
+    <h2>5. 정리 — 여기서 얻은 것</h2>
+    <p>
+      이 페이지에서 우리는 렌더링의 가장 밑바닥을 손으로 만졌습니다.
+    </p>
+    <ul>
+      <li><strong>색 = 숫자.</strong> RGBA8 색은 <code>uint32_t</code> 하나이고, 패킹/언패킹은 시프트(<code>&lt;&lt;</code> <code>&gt;&gt;</code>)와 마스크(<code>&amp; 0xFF</code>)의 조합일 뿐입니다.</li>
+      <li><strong>이미지 = 1차원 배열 + 인덱스 공식.</strong> <code>index = y*width + x</code>(행 우선)로 2D를 1D에 담습니다.</li>
+      <li><strong>"픽셀을 찍는다" = 배열 한 칸에 대입.</strong> <code>setPixel</code>이 하는 일의 전부입니다. 경계 검사가 곧 클리핑입니다.</li>
+      <li><strong>결과 확인.</strong> 학습엔 PPM, 실무엔 PNG(stb) 또는 D3D11 동적 텍스처 업로드.</li>
+      <li><strong>CPU 버퍼 ↔ GPU 텍스처.</strong> 포맷(<code>R8G8B8A8_UNORM</code>)과 바이트 순서를 맞추고, <code>RowPitch</code>를 존중해 행 단위로 복사하면 그대로 화면에 뜹니다.</li>
+    </ul>
+    <p>
+      다음 페이지에서는 이 프레임버퍼 위에 <strong>선과 삼각형</strong>을 실제로 그립니다 — 브레젠험 직선과
+      에지 함수·무게중심 좌표로 삼각형을 채우면서, GPU 래스터라이저가 내부에서 하는 일을 그대로 재현합니다.
+    </p>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      실무에서 CPU 소프트웨어 렌더링은 대부분 GPU로 대체되지만, 이 프레임버퍼 개념은 <strong>포스트프로세싱 스테이징,
+      디버그 오버레이, 절차적 텍스처 생성, 폰트 아틀라스 굽기</strong> 등에서 여전히 쓰입니다. 무엇보다,
+      GPU가 "마법처럼" 하는 일이 결국 <em>거대한 병렬 <code>setPixel</code></em>임을 이해하면 셰이더가 훨씬 덜 무섭게 느껴집니다.
+    </div>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./02-raster2d.html">← 2장 허브</a>
+    <a href="./02-raster.html">래스터라이제이션 — 선과 삼각형 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

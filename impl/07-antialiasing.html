@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 안티앨리어싱 (Anti-aliasing) — C++/DirectX 11</title>
+<meta name="description" content="MSAA·FXAA·TAA를 Direct3D 11/HLSL로 한 줄 한 줄 직접 구현하며, API·수식·기하 직관을 입문자 눈높이로 해부하는 구현 가이드." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./07-techniques.html">7장. 실전 렌더링 기법</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">안티앨리어싱 (Anti-aliasing)</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 7</span>
+  <h1>안티앨리어싱 (Anti-aliasing) — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    기하가 픽셀 격자에 스냅되면서 생기는 <em>계단 현상(jaggies)</em>을 부드럽게 만드는 기법입니다.
+    이 페이지에서는 Direct3D 11에서 가장 흔한 세 갈래 — <strong>MSAA</strong>(하드웨어 멀티샘플),
+    <strong>FXAA</strong>(후처리 셰이더), <strong>TAA</strong>(시간 누적) — 를 코드 한 줄, API 인자 하나까지
+    해부합니다. 목적과 비용이 다르므로 왜 그렇게 짜는지, 각 줄이 GPU에서 무엇을 시키는지를
+    수학 원리 → 기하 직관 → 코드 매핑의 3단으로 풀어 설명합니다.
+  </p>
+
+  <!-- ================================================================= -->
+  <section id="why-aliasing">
+    <h2>0. 앨리어싱은 왜 생기나 — 근본 원인부터</h2>
+    <p>
+      코드를 보기 전에 "무엇을 고치려는지"부터 정확히 이해하고 갑시다. 화면은 결국
+      <strong>정수 좌표에 놓인 픽셀 격자</strong>입니다. 반면 삼각형의 실제 경계선은 연속적인
+      수학적 직선이라, 임의의 실수 위치를 지납니다. 래스터라이저는 각 픽셀의 <em>중심점 한 점</em>이
+      삼각형 안에 있는지만 검사해서 "칠한다 / 안 칠한다"를 이진(binary)으로 결정합니다.
+    </p>
+    <p>
+      비스듬한 경계선 위에서는, 실제로는 픽셀의 40%만 삼각형에 덮여 있는데도 중심이 안에 있으면
+      100% 색으로, 밖에 있으면 0%로 칠해집니다. 이 <strong>이진 근사</strong>가 바로 계단 현상의 정체입니다.
+      신호처리 용어로는, 경계선이라는 <em>고주파 성분</em>을 픽셀이라는 <em>낮은 샘플링 레이트</em>로
+      찍어서 생기는 <strong>앨리어싱(aliasing)</strong>입니다. 원본 신호의 정보가 샘플 격자로 정확히
+      표현되지 못해 계단·지글거림 같은 가짜 무늬로 "접혀 들어오는(alias)" 현상이지요.
+    </p>
+    <p>
+      해결의 큰 방향은 두 가지입니다. (1) <strong>더 촘촘히 찍는다</strong> — 픽셀 하나를 여러 하위
+      위치에서 샘플링해 평균 내면 이진이 아니라 "40% 덮임 → 40% 섞인 색"이 됩니다. MSAA·TAA·SSAA가
+      이 계열입니다. (2) <strong>다 찍은 뒤 흐릿한 곳을 후처리로 뭉갠다</strong> — 이미 완성된 이미지에서
+      밝기 차이가 급한 곳(엣지)을 찾아 이웃과 섞습니다. FXAA가 이 계열입니다. 아래에서 세 기법을
+      이 관점으로 하나씩 뜯어봅니다.
+    </p>
+    <table class="impl">
+      <tr><th>기법</th><th>원리</th><th>알파/셰이더 엣지</th><th>비용</th><th>대표적 부작용</th></tr>
+      <tr><td>MSAA</td><td>지오메트리 엣지에서 픽셀당 여러 서브샘플의 커버리지 평균</td><td>기본은 못 잡음(A2C 필요)</td><td>중간</td><td>메모리 증가</td></tr>
+      <tr><td>FXAA</td><td>완성 이미지에서 luma 대비로 엣지 찾아 블렌드</td><td>모두 잡음</td><td>매우 낮음</td><td>전체적으로 약간 흐릿</td></tr>
+      <tr><td>TAA</td><td>프레임마다 지터 + 이전 프레임 재투영 누적</td><td>모두 잡음</td><td>중간(구현 복잡)</td><td>움직일 때 유령상(ghosting)</td></tr>
+    </table>
+  </section>
+
+  <!-- ================================================================= -->
+  <section id="msaa-swapchain">
+    <h2>1. MSAA — 가장 쉬운 길 (스왑체인 백버퍼)</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 후처리 파이프라인이 없다면, 스왑체인과 깊이 버퍼를 만들 때
+      <code>SampleDesc.Count</code>만 올리면 안티앨리어싱이 끝납니다. 별도의 셰이더 코드 없이 하드웨어가
+      엣지를 다중 샘플링해 줍니다.
+    </p>
+    <p>
+      <strong>왜 필요한가:</strong> MSAA(Multisample Anti-Aliasing)는 GPU 고정 기능이 알아서
+      "픽셀 안에 서브샘플 위치를 4개 두고, 삼각형이 그중 몇 개를 덮는지"를 세어서 커버리지를
+      만들어 줍니다. 즉 0장에서 말한 (1)번 "더 촘촘히 찍기"를 <em>하드웨어가</em> 해 주는 것이라,
+      우리가 짤 코드는 "버퍼를 멀티샘플로 만들어라"는 선언 몇 줄뿐입니다.
+    </p>
+
+    <h3>1-1. 큰 흐름</h3>
+    <ol class="steps">
+      <li>스왑체인의 <code>DXGI_SAMPLE_DESC.Count</code>를 4로 요청한다.</li>
+      <li>깊이/스텐실 텍스처도 <em>동일한</em> 샘플 수로 만든다(불일치 시 렌더 타깃 바인딩 실패).</li>
+      <li>평소처럼 그린다 — 하드웨어가 알아서 엣지를 다중 샘플링한다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>msaa_swapchain.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">using Microsoft::WRL::ComPtr;
+const int W = 1280, H = 720, SAMPLES = 4;
+
+// ── 스왑체인을 4x MSAA로 요청 ──
+DXGI_SWAP_CHAIN_DESC scd = {};
+scd.BufferDesc.Width  = W;
+scd.BufferDesc.Height = H;
+scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+scd.SampleDesc.Count   = SAMPLES;   // 픽셀당 4 샘플
+scd.SampleDesc.Quality = 0;         // 표준 MSAA 패턴
+scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+scd.BufferCount = 1;
+scd.OutputWindow = hwnd;
+scd.Windowed = TRUE;
+// (D3D11CreateDeviceAndSwapChain 로 device/context/swapChain 생성)
+
+// 백버퍼로 RTV 생성
+ComPtr&lt;ID3D11Texture2D&gt; backBuffer;
+swapChain->GetBuffer(0, IID_PPV_ARGS(&amp;backBuffer));
+ComPtr&lt;ID3D11RenderTargetView&gt; rtv;
+device->CreateRenderTargetView(backBuffer.Get(), nullptr, &amp;rtv);
+
+// ── 깊이/스텐실 텍스처도 반드시 같은 샘플 수로 ──
+D3D11_TEXTURE2D_DESC dd = {};
+dd.Width = W; dd.Height = H; dd.MipLevels = 1; dd.ArraySize = 1;
+dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+dd.SampleDesc.Count = SAMPLES;      // ← 렌더타깃과 일치해야 함
+dd.Usage = D3D11_USAGE_DEFAULT;
+dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+ComPtr&lt;ID3D11Texture2D&gt; depthTex;
+device->CreateTexture2D(&amp;dd, nullptr, &amp;depthTex);
+ComPtr&lt;ID3D11DepthStencilView&gt; dsv;
+device->CreateDepthStencilView(depthTex.Get(), nullptr, &amp;dsv);
+
+// ── 렌더 루프: 별도 코드 없이 엣지가 부드러워진다 ──
+MSG msg = {};
+while (msg.message != WM_QUIT) {
+    if (PeekMessage(&amp;msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&amp;msg); DispatchMessage(&amp;msg); continue;
+    }
+    const float clear[4] = { 0.06f, 0.07f, 0.10f, 1.0f };
+    context->OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());
+    context->ClearRenderTargetView(rtv.Get(), clear);
+    context->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    drawScene();
+    swapChain->Present(1, 0);
+}</code></pre>
+    </div>
+
+    <h3>1-2. 줄 단위 해부 — 스왑체인 서술자</h3>
+    <p>
+      <code>using Microsoft::WRL::ComPtr;</code> — WRL의 <code>ComPtr</code>은 COM 객체(D3D 리소스)를 위한
+      <strong>스마트 포인터</strong>입니다. D3D11의 모든 인터페이스(<code>ID3D11...</code>)는 참조 카운트로
+      수명을 관리하는 COM 객체라, 직접 <code>Release()</code>를 부르면 실수하기 쉽습니다. <code>ComPtr</code>은
+      스코프를 벗어나면 자동으로 <code>Release()</code>를 호출해 누수를 막아 줍니다. <code>using</code>은
+      매번 <code>Microsoft::WRL::ComPtr</code>이라 길게 쓰지 않으려는 별칭 선언입니다.
+    </p>
+    <p>
+      <code>DXGI_SWAP_CHAIN_DESC scd = {};</code> — 스왑체인의 모든 속성을 담는 구조체입니다.
+      <code>= {}</code>는 <strong>값 초기화(value-initialization)</strong>로, 모든 멤버를 0으로 채웁니다.
+      D3D의 서술자(desc) 구조체는 멤버가 수십 개라, 이렇게 0으로 밀어 두고 필요한 것만 덮어쓰는 것이
+      정석입니다. 초기화를 빠뜨린 멤버에 쓰레기 값이 들어가면 디바이스 생성이 조용히 실패하거나
+      정의되지 않은 동작을 하니, <code>= {}</code>는 습관처럼 붙이세요.
+    </p>
+    <p>
+      <code>scd.SampleDesc.Count = SAMPLES;</code> — 이 <strong>한 줄이 MSAA의 핵심</strong>입니다.
+      <code>SampleDesc</code>는 <code>DXGI_SAMPLE_DESC</code> 타입으로 멤버가 <code>Count</code>와
+      <code>Quality</code> 둘뿐입니다. <code>Count = 4</code>는 "픽셀 하나마다 서브샘플을 4개 둬라"는 뜻입니다.
+      래스터라이저는 삼각형 커버리지를 <em>이 4개 서브샘플 위치에서</em> 판정하고, 깊이 테스트도
+      서브샘플별로 합니다. 그래서 경계 픽셀은 "4개 중 2개가 삼각형 안 → 커버리지 50%"처럼
+      <strong>계조(gradation)</strong>를 갖게 됩니다.
+    </p>
+    <p>
+      <code>scd.SampleDesc.Quality = 0;</code> — 같은 샘플 수 안에서도 하드웨어가 여러 서브샘플
+      <em>배치 패턴</em>(품질 레벨)을 제공할 수 있습니다. 0은 표준(가장 널리 지원되는) 패턴입니다.
+      실무에서는 <code>ID3D11Device::CheckMultisampleQualityLevels(format, count, &amp;numLevels)</code>로
+      "이 포맷에서 4x가 지원되는지, Quality를 몇까지 쓸 수 있는지"를 먼저 물어보고 정해야 합니다.
+      지원 안 되는 조합을 넣으면 생성이 실패합니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>Count</code>는 <strong>2의 거듭제곱(1, 2, 4, 8)</strong>만 의미가 있고, 하드웨어가 지원하는
+      값이어야 합니다. 대부분의 데스크톱 GPU가 4x는 확실히 지원하지만 8x는 포맷에 따라 다릅니다.
+      또 스왑체인을 MSAA로 만들면 <strong>플립 모델(<code>DXGI_SWAP_EFFECT_FLIP_*</code>)과는 함께 못 씁니다</strong>.
+      최신 데스크톱 앱에서 플립 모델을 쓰려면 뒤(2절)의 오프스크린 MSAA 방식을 택하고 백버퍼는
+      단일샘플로 둬야 합니다.
+    </div>
+
+    <h3>1-3. 줄 단위 해부 — 깊이 버퍼는 왜 같은 샘플 수여야 하나</h3>
+    <p>
+      <code>dd.SampleDesc.Count = SAMPLES;</code> — 여기가 가장 흔히 실수하는 지점입니다.
+      D3D11은 <strong>렌더 타깃(컬러)과 깊이/스텐실의 샘플 수가 정확히 같아야</strong> 둘을 동시에
+      바인딩할 수 있습니다. 이유는 물리적입니다. MSAA에서 깊이 테스트는 <em>서브샘플 단위</em>로
+      일어나야 커버리지가 제대로 나오는데, 그러려면 깊이 버퍼도 픽셀당 4개의 깊이 값을 저장할
+      공간, 즉 4x 멀티샘플 텍스처여야 합니다. 컬러는 4샘플인데 깊이가 1샘플이면 서브샘플별
+      깊이 비교가 불가능하므로 API가 바인딩을 거부합니다.
+    </p>
+    <p>
+      <code>dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;</code> — 24비트 정규화 깊이 + 8비트 스텐실을
+      한 텍셀에 담는 표준 깊이 포맷입니다. <code>dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;</code>로
+      "이 텍스처는 깊이/스텐실로 쓴다"고 선언해야 <code>CreateDepthStencilView</code>가 성공합니다.
+      <code>MipLevels = 1</code>인 이유는 깊이 버퍼에는 밉 체인이 필요 없기 때문입니다(화면 크기 한 장이면 됨).
+    </p>
+
+    <h3>1-4. 줄 단위 해부 — 렌더 루프</h3>
+    <p>
+      루프 본문에서 MSAA를 위해 <strong>추가로 하는 일은 전혀 없습니다.</strong> 이것이 MSAA의 매력입니다.
+      <code>OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get())</code>로 멀티샘플 RTV와 DSV를 묶어 걸고,
+      평소처럼 <code>drawScene()</code>을 호출하면 커버리지 계산은 고정 기능이 처리합니다.
+      <code>rtv.GetAddressOf()</code>는 <code>ID3D11RenderTargetView* const*</code>(포인터의 주소)를
+      돌려줍니다. 이 함수가 RTV 배열을 받기 때문에, RTV가 하나라도 "그 하나의 주소"를 넘겨야 합니다.
+    </p>
+    <p>
+      <code>swapChain->Present(1, 0);</code> — 첫 인자 <code>1</code>은 <strong>SyncInterval</strong>로,
+      "수직 동기 1회를 기다렸다 표시"(=VSync 켜짐)를 뜻합니다. 0을 넣으면 즉시 표시(테어링 가능,
+      최대 프레임레이트)입니다. 화면에 <em>보여지는</em> 순간에 백버퍼가 <em>그대로</em> 나가는데,
+      백버퍼 자체가 이미 MSAA로 해상된(resolved) 결과입니다 — 스왑체인 백버퍼의 경우
+      Present 시점에 하드웨어가 자동으로 멀티샘플을 단일샘플로 리졸브해 스캔아웃합니다.
+    </p>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      MSAA는 <strong>지오메트리 엣지에만</strong> 효과가 있고, 픽셀 셰이더는 픽셀당 한 번만 돕니다
+      (샘플당이 아님 — 이것이 SSAA 대비 싸게 먹히는 이유입니다). 그래서 비용 대비 화질이 좋지만,
+      알파 텍스처의 잘린 엣지(나뭇잎 등)에는 효과가 없습니다 — 그건 블렌드 스테이트의
+      <code>AlphaToCoverageEnable</code>이나 FXAA가 필요합니다. 메모리는 컬러+깊이가 대략 샘플 수배로
+      늘어나므로(4x면 약 4배) 고해상도에서는 VRAM을 크게 먹습니다.
+    </div>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      <strong>AlphaToCoverage(A2C)</strong>는 MSAA와 함께 쓰는 저비용 기법으로, 픽셀 셰이더가 낸 알파를
+      MSAA 커버리지 마스크로 변환해 나뭇잎 같은 알파 컷아웃 엣지도 부드럽게 만듭니다.
+      블렌드 서술자에서 <code>bd.AlphaToCoverageEnable = TRUE;</code> 한 줄로 켭니다. 단, MSAA가
+      켜져 있을 때만(멀티샘플 렌더 타깃) 의미가 있습니다.
+    </div>
+  </section>
+
+  <!-- ================================================================= -->
+  <section id="msaa-offscreen">
+    <h2>2. MSAA — 오프스크린 렌더 타깃에 직접 (후처리와 함께)</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> HDR·블룸 같은 후처리를 하려면 오프스크린 렌더 타깃에 그려야 하는데,
+      그 텍스처도 멀티샘플이어야 합니다. 그런데 <strong>멀티샘플 텍스처는 셰이더에서 바로
+      <code>Sample()</code>할 수 없습니다.</strong> 그래서 <em>멀티샘플 텍스처에 그린 뒤, 단일샘플
+      텍스처로 <strong>리졸브</strong>(<code>ResolveSubresource</code>)</em>하는 2단계 패턴을 씁니다.
+    </p>
+    <p>
+      <strong>왜 이렇게까지 하나:</strong> 셰이더의 <code>Texture2D.Sample()</code>은 픽셀당 색 하나가 있는
+      일반 텍스처를 전제로 합니다. 멀티샘플 텍스처는 픽셀당 값이 4개(<code>Texture2DMS</code>)라
+      "어느 서브샘플을 읽으라는 건지" 정의가 안 됩니다. <em>리졸브</em>는 이 4개를 평균 내
+      픽셀당 1개로 합쳐, 후처리가 다룰 수 있는 평범한 텍스처로 바꾸는 과정입니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>msaa_offscreen.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">using Microsoft::WRL::ComPtr;
+const int W = 1280, H = 720, SAMPLES = 4;
+const DXGI_FORMAT FMT = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+// ── (A) 멀티샘플 컬러 텍스처: 여기에 씬을 그린다 ──
+D3D11_TEXTURE2D_DESC cd = {};
+cd.Width = W; cd.Height = H; cd.MipLevels = 1; cd.ArraySize = 1;
+cd.Format = FMT;
+cd.SampleDesc.Count = SAMPLES;          // 멀티샘플
+cd.Usage = D3D11_USAGE_DEFAULT;
+cd.BindFlags = D3D11_BIND_RENDER_TARGET;
+ComPtr&lt;ID3D11Texture2D&gt; msColor;
+device->CreateTexture2D(&amp;cd, nullptr, &amp;msColor);
+ComPtr&lt;ID3D11RenderTargetView&gt; msRTV;
+device->CreateRenderTargetView(msColor.Get(), nullptr, &amp;msRTV);
+
+// 멀티샘플 깊이/스텐실 (같은 샘플 수)
+D3D11_TEXTURE2D_DESC dd = cd;
+dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+ComPtr&lt;ID3D11Texture2D&gt; msDepth;
+device->CreateTexture2D(&amp;dd, nullptr, &amp;msDepth);
+ComPtr&lt;ID3D11DepthStencilView&gt; msDSV;
+device->CreateDepthStencilView(msDepth.Get(), nullptr, &amp;msDSV);
+
+// ── (B) 단일샘플 텍스처: 리졸브 결과를 담아 셰이더에서 샘플링 ──
+D3D11_TEXTURE2D_DESC rd = {};
+rd.Width = W; rd.Height = H; rd.MipLevels = 1; rd.ArraySize = 1;
+rd.Format = FMT;
+rd.SampleDesc.Count = 1;                // ← 단일샘플
+rd.Usage = D3D11_USAGE_DEFAULT;
+rd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+ComPtr&lt;ID3D11Texture2D&gt; resolved;
+device->CreateTexture2D(&amp;rd, nullptr, &amp;resolved);
+ComPtr&lt;ID3D11ShaderResourceView&gt; screenSRV;
+device->CreateShaderResourceView(resolved.Get(), nullptr, &amp;screenSRV);
+
+// ── 렌더 루프 ──
+void renderFrame() {
+    // 1) 멀티샘플 렌더 타깃에 씬 그리기
+    const float clear[4] = { 0.06f, 0.07f, 0.10f, 1.0f };
+    context->OMSetRenderTargets(1, msRTV.GetAddressOf(), msDSV.Get());
+    context->ClearRenderTargetView(msRTV.Get(), clear);
+    context->ClearDepthStencilView(msDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    drawScene();
+
+    // 2) 멀티샘플 → 단일샘플 리졸브
+    context->ResolveSubresource(resolved.Get(), 0, msColor.Get(), 0, FMT);
+
+    // 3) 이제 screenSRV를 후처리 셰이더 입력으로 사용해 화면에 출력
+    context->OMSetRenderTargets(1, backRTV.GetAddressOf(), nullptr);
+    context->PSSetShaderResources(0, 1, screenSRV.GetAddressOf());
+    drawFullscreenQuad(postShaders);
+}</code></pre>
+    </div>
+
+    <h3>2-1. 줄 단위 해부 — 세 개의 텍스처, 각자의 역할</h3>
+    <p>
+      이 코드에는 텍스처가 세 개 등장합니다. 역할을 <code>BindFlags</code>와 <code>SampleDesc.Count</code>로
+      구분하는 것이 핵심입니다.
+    </p>
+    <table class="impl">
+      <tr><th>텍스처</th><th>SampleDesc.Count</th><th>BindFlags</th><th>역할</th></tr>
+      <tr><td>msColor</td><td>4</td><td>RENDER_TARGET</td><td>씬을 그려 넣는 멀티샘플 캔버스</td></tr>
+      <tr><td>msDepth</td><td>4</td><td>DEPTH_STENCIL</td><td>서브샘플별 깊이 테스트용(컬러와 샘플 수 일치)</td></tr>
+      <tr><td>resolved</td><td>1</td><td>SHADER_RESOURCE</td><td>리졸브 결과, 후처리가 Sample() 가능</td></tr>
+    </table>
+    <p>
+      <code>cd.BindFlags = D3D11_BIND_RENDER_TARGET;</code> — <code>msColor</code>는 오직 그리기 대상이라
+      RENDER_TARGET만 켭니다. 여기에 SHADER_RESOURCE까지 켜고 싶어질 수 있지만, 멀티샘플 텍스처를
+      셰이더에서 읽으려면 <code>Texture2DMS</code>로 선언하고 서브샘플을 명시적으로 <code>Load()</code>해야
+      하므로 일반 후처리에는 맞지 않습니다. 그래서 별도의 단일샘플 <code>resolved</code>를 두는 것입니다.
+    </p>
+    <p>
+      <code>D3D11_TEXTURE2D_DESC dd = cd;</code> — 깊이 서술자를 컬러 서술자에서 <strong>복사해</strong>
+      시작합니다. 이렇게 하면 <code>Width</code>, <code>Height</code>, <code>SampleDesc.Count</code>가
+      자동으로 컬러와 같아져 "샘플 수 일치" 실수를 원천 차단합니다. 그다음 <code>Format</code>과
+      <code>BindFlags</code>만 깊이용으로 덮어씁니다. 이런 "복사 후 두 필드만 수정" 패턴은 실무에서
+      샘플 수 불일치 버그를 줄이는 좋은 습관입니다.
+    </p>
+    <p>
+      <code>rd.SampleDesc.Count = 1;</code> — 리졸브 대상은 반드시 단일샘플입니다. 그리고
+      <code>rd.BindFlags = D3D11_BIND_SHADER_RESOURCE;</code>로 셰이더 입력임을 선언해
+      <code>CreateShaderResourceView</code>가 성공하게 합니다. 이 SRV(<code>screenSRV</code>)가
+      3단계에서 후처리 셰이더의 <code>t0</code>에 들어갑니다.
+    </p>
+
+    <h3>2-2. 줄 단위 해부 — ResolveSubresource</h3>
+    <p>
+      <code>context->ResolveSubresource(resolved.Get(), 0, msColor.Get(), 0, FMT);</code> — 이 한 줄이
+      멀티샘플 → 단일샘플 변환의 전부입니다. 인자를 하나씩 봅시다.
+    </p>
+    <ol class="steps">
+      <li><code>resolved.Get()</code> — <strong>대상</strong>(dst) 리소스. 단일샘플 텍스처.</li>
+      <li><code>0</code> — 대상의 서브리소스 인덱스(밉 0, 배열 0). 밉이 하나뿐이니 0.</li>
+      <li><code>msColor.Get()</code> — <strong>소스</strong>(src) 리소스. 멀티샘플 텍스처.</li>
+      <li><code>0</code> — 소스의 서브리소스 인덱스.</li>
+      <li><code>FMT</code> — 리졸브에 사용할 포맷. 소스·대상과 호환되어야 함.</li>
+    </ol>
+    <p>
+      GPU는 이 호출에서 <code>msColor</code>의 픽셀마다 4개 서브샘플 색을 <strong>평균</strong>해
+      <code>resolved</code>의 한 텍셀로 씁니다. 바로 이 평균이 커버리지 50% 엣지 픽셀을 "반쯤 섞인 색"으로
+      만들어 계단을 매끈하게 하는 것입니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>ResolveSubresource</code>는 소스와 대상의 <strong>크기·포맷이 같아야</strong> 하며,
+      대상은 반드시 <em>단일샘플</em>(<code>SampleDesc.Count == 1</code>) 텍스처여야 합니다.
+      리사이즈나 포맷 변환을 겸할 수는 없습니다 — 그런 처리는 별도의 후처리 패스로 하세요.
+      또 HDR 파이프라인에서는 이 리졸브가 <strong>평균을 선형 공간에서 하느냐</strong>가 중요합니다.
+      sRGB 인코딩된 값을 그냥 평균하면 물리적으로 틀리므로, 컬러 포맷을 <code>..._SRGB</code>로 두거나
+      HDR(float) 포맷으로 두고 리졸브해야 엣지 색이 정확합니다.
+    </div>
+
+    <h3>2-3. 줄 단위 해부 — 후처리로 넘기기</h3>
+    <p>
+      <code>context->OMSetRenderTargets(1, backRTV.GetAddressOf(), nullptr);</code> — 이제 출력 대상을
+      <strong>실제 화면 백버퍼</strong>(<code>backRTV</code>)로 바꿉니다. 깊이는 후처리 풀스크린 쿼드에는
+      필요 없으므로 <code>nullptr</code>을 넘겨 DSV를 떼어냅니다.
+    </p>
+    <p>
+      <code>context->PSSetShaderResources(0, 1, screenSRV.GetAddressOf());</code> — 리졸브된 텍스처를
+      픽셀 셰이더의 <strong>슬롯 0(<code>t0</code>)</strong>에 바인딩합니다. 첫 인자 <code>0</code>이 시작
+      슬롯, 둘째 <code>1</code>이 개수입니다. 이후 <code>drawFullscreenQuad</code>가 화면을 덮는 삼각형/쿼드를
+      그리며 이 텍스처를 샘플링해 후처리(톤매핑·블룸·그리고 다음 절의 FXAA)를 적용합니다.
+    </p>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      다음 프레임에 <code>msColor</code>를 렌더 타깃으로 다시 걸기 <em>전에</em>, 그것을 SRV로 물고 있던
+      바인딩을 반드시 풀어야 합니다(반대도 마찬가지). D3D11은 같은 리소스를 입력(SRV)과 출력(RTV)으로
+      동시에 바인딩하는 것을 금지하며, 디버그 레이어가 경고를 뿜고 해당 스테이지를 무력화합니다.
+      실무에서는 프레임 끝에 <code>PSSetShaderResources</code>로 <code>nullptr</code>을 바인딩해 슬롯을
+      비워 둡니다.
+    </div>
+  </section>
+
+  <!-- ================================================================= -->
+  <section id="fxaa">
+    <h2>3. FXAA — 후처리 셰이더 (luma 기반 엣지 블렌딩)</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> FXAA(Fast Approximate Anti-Aliasing)는 이미 렌더된 이미지를
+      입력으로 받아, <strong>밝기(luma) 차이로 엣지를 찾고</strong> 그 방향으로 이웃 픽셀을 섞는 순수
+      화면공간 기법입니다. MSAA와 달리 알파 엣지·셰이더 앨리어싱까지 부드럽게 하지만, 약간
+      흐릿해집니다. 아래는 개념을 담은 간결한 자작 버전입니다(실무 FXAA 3.11은 훨씬 정교합니다).
+    </p>
+    <p>
+      <strong>왜 필요한가:</strong> MSAA는 커버리지 정보를 <em>렌더 중에만</em> 알 수 있어 지오메트리
+      엣지에만 통합니다. 반면 FXAA는 완성된 픽셀 값만 보고 판단하므로, 그 픽셀이 삼각형 엣지든
+      알파 컷아웃이든 노멀맵 스페큘러 반짝임이든 가리지 않고 "밝기가 급변하는 곳"을 모두 처리합니다.
+      비용도 픽셀 셰이더 패스 한 번이라 매우 쌉니다. 대가는 실제 커버리지를 모른 채 추정하므로
+      전체적으로 살짝 뿌예진다는 점입니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>fxaa.hlsl (Pixel Shader)</span><span class="lang">HLSL</span></div>
+      <pre><code class="language-hlsl">Texture2D    uScene : register(t0);   // 리졸브된(또는 후처리 전) 씬 컬러
+SamplerState uSamp  : register(s0);
+
+cbuffer FXAAParams : register(b0) {
+    float2 uTexel;     // 1.0 / 화면해상도
+    float2 _pad;
+};
+
+struct PSIn {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+};
+
+// RGB → 인지 밝기(luma)
+float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+
+float4 main(PSIn i) : SV_Target {
+    float2 vUV = i.uv;
+    // 중앙과 상하좌우 4방향의 밝기 샘플
+    float3 rgbM = uScene.Sample(uSamp, vUV).rgb;
+    float lM = luma(rgbM);
+    float lN = luma(uScene.Sample(uSamp, vUV + float2(0.0, -uTexel.y)).rgb);
+    float lS = luma(uScene.Sample(uSamp, vUV + float2(0.0,  uTexel.y)).rgb);
+    float lW = luma(uScene.Sample(uSamp, vUV + float2(-uTexel.x, 0.0)).rgb);
+    float lE = luma(uScene.Sample(uSamp, vUV + float2( uTexel.x, 0.0)).rgb);
+
+    // 국소 대비: 엣지가 아니면 그대로 통과 (성능 + 흐림 방지)
+    float lMin = min(lM, min(min(lN, lS), min(lW, lE)));
+    float lMax = max(lM, max(max(lN, lS), max(lW, lE)));
+    float contrast = lMax - lMin;
+    if (contrast &lt; max(0.0312, lMax * 0.125)) {
+        return float4(rgbM, 1.0);
+    }
+
+    // 엣지 방향 추정: 수직/수평 밝기 기울기 비교
+    float gradV = abs(lN + lS - 2.0 * lM);   // 수직 방향 변화
+    float gradH = abs(lW + lE - 2.0 * lM);   // 수평 방향 변화
+    bool horizontal = gradH &gt;= gradV;
+    float2 dir = horizontal ? float2(uTexel.x, 0.0) : float2(0.0, uTexel.y);
+
+    // 엣지를 가로질러 양쪽 이웃과 평균 → 계단 완화
+    float3 a = uScene.Sample(uSamp, vUV + dir).rgb;
+    float3 b = uScene.Sample(uSamp, vUV - dir).rgb;
+    float3 blended = (rgbM + a + b) / 3.0;
+
+    // 대비가 클수록 강하게 섞는다
+    float amount = clamp(contrast * 2.0, 0.0, 1.0);
+    return float4(lerp(rgbM, blended, amount), 1.0);
+}</code></pre>
+    </div>
+
+    <h3>3-1. 리소스 선언 해부</h3>
+    <p>
+      <code>Texture2D uScene : register(t0);</code> — 입력 씬 컬러 텍스처를 <strong>텍스처 레지스터
+      0번(<code>t0</code>)</strong>에 바인딩합니다. C++ 쪽 <code>PSSetShaderResources(0, 1, ...)</code>의
+      슬롯 0과 이 <code>t0</code>가 <strong>1:1로 짝</strong>이 됩니다. HLSL의 <code>register(tN)</code>은
+      "이 리소스가 몇 번 슬롯에서 온다"는 계약입니다.
+    </p>
+    <p>
+      <code>SamplerState uSamp : register(s0);</code> — 샘플러는 별도 레지스터 공간 <code>s</code>를
+      씁니다. C++ <code>PSSetSamplers(0, 1, ...)</code>와 짝입니다. FXAA에서는 텍셀 정확히를 읽는 게
+      중요할 때도 있지만, 여기서는 이웃과의 부드러운 섞임을 위해 보통 <strong>선형(bilinear)</strong>
+      샘플러를 씁니다.
+    </p>
+    <p>
+      <code>cbuffer FXAAParams : register(b0) { float2 uTexel; float2 _pad; };</code> — 상수 버퍼입니다.
+      <code>uTexel</code>은 <strong>1픽셀의 UV 크기</strong>, 즉 <code>(1/width, 1/height)</code>입니다.
+      UV는 0~1로 정규화된 좌표라, "옆 픽셀"로 가려면 <code>1/width</code>만큼 움직여야 하기 때문입니다.
+      <code>float2 _pad;</code>는 <strong>16바이트 정렬 패딩</strong>입니다 — D3D11 상수 버퍼는 16바이트
+      경계 규칙이 있어, <code>float2</code>(8바이트) 하나만 두면 나머지 8바이트를 어차피 채워야 합니다.
+      명시적으로 <code>_pad</code>를 두면 C++ 구조체와 크기가 어긋날 위험이 줄어듭니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>uTexel</code>을 잘못 넣으면(예: 해상도를 그대로 넣거나 폭/높이를 뒤바꾸면) 이웃 샘플이
+      엉뚱한 곳을 찍어 FXAA가 화면을 흐리기만 하고 엣지는 못 잡습니다. 반드시
+      <code>uTexel = (1.0f / renderWidth, 1.0f / renderHeight)</code>로, <strong>FXAA를 도는 실제 해상도</strong>
+      기준으로 넣으세요(하프해상도 후처리라면 그 하프 해상도로).
+    </div>
+
+    <h3>3-2. luma — 왜 RGB가 아니라 밝기인가</h3>
+    <p>
+      <code>float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }</code>
+    </p>
+    <p>
+      <strong>수학적 의미:</strong> 이것은 RGB 3차원 벡터를 밝기라는 1차원 스칼라로 사영하는
+      <strong>내적(dot product)</strong>입니다. <code>dot(c, w) = c.r*w.r + c.g*w.g + c.b*w.b</code>이므로,
+      결과 = <code>0.299·R + 0.587·G + 0.114·B</code>입니다. 이 가중치는 사람 눈이 초록에 가장
+      민감하고(0.587) 파랑에 가장 둔감하다(0.114)는 실측(ITU-R BT.601)에서 온 값입니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> RGB 색공간을 3차원 공간으로 보면, 이 내적은 모든 색을
+      "밝기 축(회색 방향에 가까운 특정 방향)"으로 <em>그림자처럼 투영한 길이</em>를 재는 것입니다.
+      두 색이 밝기 축 상에서 멀리 떨어져 있으면 사람 눈에 뚜렷한 엣지로 보입니다.
+    </p>
+    <p>
+      <strong>왜 밝기로 엣지를 찾나:</strong> 엣지는 결국 "밝기가 급변하는 선"입니다. 색상(hue)만
+      다르고 밝기가 같은 경계(예: 같은 밝기의 빨강↔초록)는 사람 눈에 덜 두드러지고, 계단도 덜 보입니다.
+      그래서 세 채널을 다 비교하는 대신 밝기 하나로 줄이면 <strong>계산이 1/3로 줄고</strong> 인지적으로도
+      타당한 엣지 검출이 됩니다. 이것이 FXAA가 luma를 쓰는 이유입니다.
+    </p>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      FXAA는 <strong>sRGB로 인코딩된(감마 적용된) 컬러</strong> 위에서 돌리는 것이 원칙입니다.
+      luma가 <em>인지</em> 밝기 기준이라야 엣지가 잘 잡히기 때문입니다. 즉 톤매핑·감마 보정
+      <em>이후</em>의 이미지를 입력으로 넣으세요. 선형 HDR 값 위에서 돌리면 밝은 영역의 대비가
+      과장되고 어두운 영역은 엣지를 놓칩니다.
+    </div>
+
+    <h3>3-3. 십자 샘플과 국소 대비 — 조기 종료</h3>
+    <p>
+      중앙(M)과 상하좌우(N/S/W/E) 다섯 지점의 luma를 뽑습니다. 이웃 좌표를 만들 때
+      <code>vUV + float2(0.0, -uTexel.y)</code>처럼 <code>uTexel</code>을 더하는 것이 바로 "1픽셀 이동"입니다.
+      <strong>텍스처 V가 위→아래로 증가</strong>하는 D3D 규약이라, <code>-uTexel.y</code>가 화면상 <em>위쪽(N)</em>,
+      <code>+uTexel.y</code>가 <em>아래쪽(S)</em>입니다. 이 방향 감각을 헷갈리면 엣지 방향 판정이 틀어집니다.
+    </p>
+    <p>
+      <code>float contrast = lMax - lMin;</code>는 십자 이웃 중 가장 밝은 것과 어두운 것의 차,
+      즉 <strong>이 픽셀 주변의 국소 대비</strong>입니다. 그다음:
+    </p>
+    <p>
+      <code>if (contrast &lt; max(0.0312, lMax * 0.125)) return float4(rgbM, 1.0);</code> — 대비가 문턱값보다
+      작으면 <strong>엣지가 아니라고 보고 원본을 그대로 반환</strong>합니다. 문턱값이 두 겹인 이유가 중요합니다.
+    </p>
+    <ol class="steps">
+      <li><code>0.0312</code>(절대 문턱): 아주 어두운 영역에서 미세한 노이즈를 엣지로 착각해 뭉개는 것을 막는 바닥값.</li>
+      <li><code>lMax * 0.125</code>(상대 문턱): 밝은 영역일수록 눈이 대비에 둔감하므로, 밝기에 비례해 문턱을 올림.</li>
+      <li><code>max(...)</code>로 둘 중 큰 값을 택해, 두 조건을 동시에 만족(=진짜 엣지)할 때만 처리.</li>
+    </ol>
+    <p>
+      이 조기 종료는 성능(대부분의 픽셀은 엣지가 아니라 곧장 반환)과 화질(엣지 아닌 곳을 흐리지 않음)을
+      동시에 잡는 핵심 트릭입니다. 화면의 평평한 면 90%는 여기서 빠져나갑니다.
+    </p>
+
+    <h3>3-4. 엣지 방향 추정 — 2차 미분(라플라시안)의 직관</h3>
+    <p>
+      <code>float gradV = abs(lN + lS - 2.0 * lM);</code><br>
+      <code>float gradH = abs(lW + lE - 2.0 * lM);</code>
+    </p>
+    <p>
+      <strong>수학적 의미:</strong> <code>lN + lS - 2·lM</code>은 세로 방향의 <strong>2차 차분(discrete second
+      derivative)</strong>입니다. 연속함수의 2계도함수 f''를 격자에서 근사한
+      <code>f(x-1) - 2f(x) + f(x+1)</code> 공식 그대로입니다. 밝기가 세로로 꺾이는(엣지가 가로로 누운) 곳에서
+      이 값의 절댓값이 커집니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> 만약 위-중앙-아래 luma가 <code>0.1, 0.5, 0.9</code>처럼 <em>일정하게 증가</em>하면
+      2차 차분은 <code>0.1 + 0.9 - 1.0 = 0</code> — 완만한 그라디언트는 엣지가 아닙니다. 반대로
+      <code>0.9, 0.9, 0.1</code>처럼 한쪽에서 급히 꺾이면 <code>0.9 + 0.1 - 1.8 = -0.8</code>, 절댓값이 커
+      "여기 세로로 급변이 있다 = 가로 엣지"로 잡힙니다.
+    </p>
+    <p>
+      <code>bool horizontal = gradH &gt;= gradV;</code> — 수평 방향 변화(<code>gradH</code>)가 더 크면,
+      밝기가 <em>가로로</em> 급변하는 것이므로 엣지는 <strong>세로선</strong>에 가깝습니다. 이때 계단을
+      완화하려면 <em>가로로</em> 이웃을 섞어야 하므로 <code>dir = (uTexel.x, 0)</code>(수평 방향)을 고릅니다.
+      반대면 수직 방향을 고릅니다. 즉 "변화가 큰 축을 가로질러 평균한다"가 원리입니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      변수명 <code>horizontal</code>과 실제 이동 방향의 관계를 헷갈리기 쉽습니다. 여기서
+      <code>horizontal == true</code>는 "밝기의 <em>수평</em> 기울기가 크다 → 엣지는 세로 → 이웃을 <em>수평</em>으로
+      섞는다"는 뜻입니다. 이름을 "섞는 방향"으로 읽으면 맞고, "엣지 방향"으로 읽으면 반대라 혼동합니다.
+    </div>
+
+    <h3>3-5. 블렌딩 — 얼마나 섞을지</h3>
+    <p>
+      <code>float3 blended = (rgbM + a + b) / 3.0;</code> — 중앙과, 엣지를 가로지르는 양쪽 이웃 <code>a</code>,
+      <code>b</code>의 <strong>단순 평균</strong>입니다. 이 평균이 커버리지 정보 없이도 계단을 "번지게" 해
+      매끈해 보이게 만듭니다. MSAA의 서브샘플 평균을 <em>사후에 근사</em>하는 셈입니다.
+    </p>
+    <p>
+      <code>float amount = clamp(contrast * 2.0, 0.0, 1.0);</code> — 얼마나 섞을지를 국소 대비에 비례시킵니다.
+      대비가 크면(뚜렷한 엣지) 강하게, 약하면 약하게. <code>clamp(.., 0, 1)</code>로 0~1 범위에 가둬
+      과도한 섞임을 막습니다. <code>* 2.0</code>은 감도(강도) 조절 상수로, 화질을 보며 튜닝하는 값입니다.
+    </p>
+    <p>
+      <code>return float4(lerp(rgbM, blended, amount), 1.0);</code> — 최종적으로 원본 <code>rgbM</code>과
+      평균 <code>blended</code>를 <code>amount</code> 비율로 <strong>선형 보간(lerp)</strong>합니다.
+      <code>lerp(x, y, t) = x*(1-t) + y*t</code>이므로, <code>amount=0</code>이면 원본 그대로,
+      <code>amount=1</code>이면 완전 평균입니다. 알파는 불투명 <code>1.0</code>으로 출력합니다.
+    </p>
+    <p>
+      <strong>손계산 예:</strong> 검은(0.0)과 흰(1.0)이 만나는 세로 엣지 위 픽셀에서 <code>rgbM=1.0</code>,
+      한쪽 이웃 <code>a=1.0</code>(흰), 반대쪽 <code>b=0.0</code>(검정)이라 하면 <code>blended=(1+1+0)/3≈0.667</code>.
+      대비 <code>contrast≈1.0</code>이라 <code>amount=clamp(2.0,0,1)=1.0</code>. 결과 =
+      <code>lerp(1.0, 0.667, 1.0)=0.667</code> — 새하얗던 계단 픽셀이 중간 회색으로 부드러워집니다.
+    </p>
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      이 자작 FXAA는 픽셀당 최대 7번의 텍스처 샘플(중앙+십자 4 + 대각 방향 2)로, 풀스크린 패스 하나면
+      끝나 매우 쌉니다. 실무 FXAA 3.11은 여기에 <strong>엣지를 따라 여러 스텝을 탐색</strong>해 서브픽셀
+      정밀도를 높인 로직이 더해져 화질이 좋지만, 원리는 같습니다(luma 대비 → 방향 → 블렌드).
+      MSAA와 달리 메모리를 거의 안 먹는 것이 큰 장점입니다.
+    </div>
+  </section>
+
+  <!-- ================================================================= -->
+  <section id="taa">
+    <h2>4. TAA — 시간적 안티앨리어싱 (개념)</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> TAA(Temporal Anti-Aliasing)는 매 프레임 카메라 투영에 서브픽셀
+      크기의 <strong>지터(jitter)</strong>를 주어 샘플 위치를 흩뿌린 뒤, 이전 프레임 결과를 현재 화면에
+      <strong>재투영(reprojection)</strong>해 지수 이동평균으로 누적합니다. 즉 "여러 프레임에 걸친
+      슈퍼샘플링"이라, 정지 화면에서는 MSAA보다 훨씬 매끈하고 셰이더 앨리어싱까지 잡습니다.
+    </p>
+    <p>
+      <strong>왜 강력한가:</strong> MSAA가 한 프레임 안에서 4개 서브샘플로 커버리지를 재는 대신,
+      TAA는 <em>시간축</em>으로 샘플을 모읍니다. 프레임마다 카메라를 픽셀보다 작게 미세하게 흔들면(지터),
+      같은 표면이 매 프레임 조금씩 다른 하위 위치에서 샘플링됩니다. 이 결과들을 여러 프레임에 걸쳐
+      평균하면 사실상 무한에 가까운 서브샘플 슈퍼샘플링 효과가 납니다. 지오메트리 엣지뿐 아니라
+      스페큘러 반짝임·알파 엣지 같은 셰이더 앨리어싱까지 잡는 이유입니다.
+    </p>
+
+    <h3>4-1. 세 가지 필수 요소</h3>
+    <ol class="steps">
+      <li><strong>지터(jitter)</strong>: 서브픽셀 오프셋(예: Halton 수열)을 <em>투영 행렬</em>에 더해 매 프레임 샘플 위치를 흩뿌린다.</li>
+      <li><strong>모션 벡터(motion vector)</strong>: 픽셀별로 "이 표면이 이전 프레임 어디에 있었나"를 저장해, 히스토리 텍스처의 정확한 위치를 찾는다.</li>
+      <li><strong>히스토리 클램프(neighborhood clamp)</strong>: 이동/디스오클루전 시 유령상(ghosting)을 막기 위해, 재투영해 온 이전 색을 현재 이웃 색상 범위(AABB)로 제한한다.</li>
+    </ol>
+
+    <h3>4-2. 지터는 왜 투영 행렬에 더하나</h3>
+    <p>
+      <strong>수학적 의미:</strong> 클립공간에서 x, y는 뒤에 원근분할될 <code>w</code>에 스케일된 좌표입니다.
+      투영 행렬의 마지막 행(행벡터 규약에서 <code>_31, _32</code> 부근, 정확히는 클립 x/y에 <code>w</code>를
+      더하는 성분)에 <code>jitterX·2/width</code>, <code>jitterY·2/height</code>를 더하면, NDC로 환산됐을 때
+      화면상 서브픽셀만큼 장면 전체가 평행이동합니다. 즉 <em>기하는 그대로 두고 샘플 격자만 흔드는</em>
+      효과입니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> 카메라를 물리적으로 옮기는 게 아니라, "픽셀 격자를 0.25픽셀 오른쪽,
+      다음 프레임엔 0.5픽셀 위로…" 하는 식으로 <em>격자만</em> 미끄러뜨리는 것입니다. 그래야 같은
+      엣지가 프레임마다 다른 하위 위치에서 커버리지 판정을 받고, 그 결과를 평균하면 계조가 생깁니다.
+      지터 수열로 <strong>Halton(2,3)</strong> 같은 저불일치(low-discrepancy) 수열을 쓰는 이유는, 랜덤보다
+      샘플이 골고루 퍼져 적은 프레임으로도 균일한 커버리지를 얻기 때문입니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      지터를 <strong>UI·텍스트·후처리 UV</strong>에까지 흘리면 안 됩니다. 지터는 오직 3D 씬의 투영에만
+      적용하고, 재투영·블렌딩 후에는 히스토리 좌표에서 지터를 <em>다시 빼서</em> 정합을 맞춰야 합니다.
+      또 지터 오프셋을 상수 버퍼로 셰이더에 넘겨 모션 벡터 계산에서 반영해야 정확한 재투영이 됩니다.
+    </div>
+
+    <h3>4-3. 재투영과 히스토리 클램프 — 유령상을 막는 법</h3>
+    <p>
+      <strong>재투영:</strong> 현재 픽셀의 모션 벡터 <code>mv</code>를 이용해 <code>histUV = curUV - mv</code>로
+      이전 프레임에서 같은 표면의 위치를 찾아 히스토리 텍스처를 샘플링합니다. 카메라나 물체가
+      움직여도 "같은 표면 점"을 계속 추적해 평균에 누적할 수 있게 해 줍니다.
+    </p>
+    <p>
+      <strong>지수 이동평균:</strong> 최종 색 = <code>lerp(history, current, α)</code>로, <code>α</code>는
+      보통 0.1 안팎입니다. 즉 매 프레임 현재 색을 10%만 섞고 90%는 과거를 유지해, 여러 프레임에 걸쳐
+      샘플이 누적되며 매끈해집니다.
+    </p>
+    <p>
+      <strong>히스토리 클램프:</strong> 문제는 물체가 빠르게 움직이거나 가려졌다 드러날 때(디스오클루전),
+      재투영해 온 과거 색이 현재 장면과 안 맞아 <em>잔상(ghosting)</em>이 생긴다는 것입니다. 이를 막기 위해,
+      현재 픽셀의 3×3 이웃 색으로 만든 <strong>색공간 AABB(min~max 박스)</strong> 안으로 히스토리 색을
+      <code>clamp</code>합니다. 과거 색이 현재 이웃 범위를 벗어나면(=장면이 바뀜) 그 범위 경계로 끌어당겨
+      잔상을 잘라 냅니다.
+    </p>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      TAA는 구현 난도가 높고(모션 벡터 G-버퍼, 히스토리 핑퐁 텍스처, 클램프·샤프닝 튜닝) 움직임에서
+      번짐·잔상이 생기기 쉬워, 실무에서는 대개 <strong>엔진이 제공하는 TAA를 튜닝</strong>해 씁니다.
+      직접 구현은 학습 목적이 크며, 프로덕션에서는 검증된 구현(엔진 내장, 또는 TAAU/DLSS/FSR 같은
+      상위 기법)을 쓰는 것이 안전합니다.
+    </div>
+  </section>
+
+  <!-- ================================================================= -->
+  <section id="dxmath-map">
+    <h2>5. 지터 오프셋을 DirectXMath로 — API 1:1 대응</h2>
+    <p>
+      TAA 지터를 직접 짤 때 실제로 만지는 것은 <strong>투영 행렬</strong>입니다. DirectXMath로 어떻게
+      더하는지, 규약 통일 관점에서 정확히 짚어 봅니다. 규약은 <strong>행벡터 <code>v' = v·M</code></strong>,
+      <strong>행 우선 저장</strong>, <strong>왼손 좌표계</strong>, <strong>클립 z [0,1]</strong>입니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>taa_jitter.cpp</span><span class="lang">cpp</span></div>
+      <pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+
+// Halton(base) 수열의 index번째 값 (0~1). 지터 샘플 위치 생성용.
+float halton(int index, int base) {
+    float f = 1.0f, r = 0.0f;
+    while (index &gt; 0) {
+        f /= (float)base;
+        r += f * (float)(index % base);
+        index /= base;
+    }
+    return r;
+}
+
+// 프레임마다 서브픽셀 지터를 더한 투영 행렬을 만든다.
+XMMATRIX jitteredProjection(float fovY, float aspect, float zn, float zf,
+                            int frame, int width, int height) {
+    // 왼손 좌표계 · 클립 z [0,1] 표준 투영
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(fovY, aspect, zn, zf);
+
+    // Halton(2,3)로 [-0.5, 0.5) 픽셀 범위의 서브픽셀 오프셋 생성
+    float jx = halton(frame + 1, 2) - 0.5f;   // 픽셀 단위
+    float jy = halton(frame + 1, 3) - 0.5f;
+
+    // 픽셀 오프셋 → NDC 오프셋 (화면 폭/높이가 NDC로 2에 대응)
+    float ndcX = jx * 2.0f / (float)width;
+    float ndcY = jy * 2.0f / (float)height;
+
+    // 행벡터 규약: 클립 x += w*ndcX 는 투영 행렬의 (row3, col0/1)에 더함
+    XMFLOAT4X4 m;
+    XMStoreFloat4x4(&amp;m, proj);
+    m._31 += ndcX;   // 클립.x 에 w*ndcX 를 더하는 성분
+    m._32 += ndcY;   // 클립.y 에 w*ndcY 를 더하는 성분
+    return XMLoadFloat4x4(&amp;m);
+}</code></pre>
+    </div>
+
+    <h3>5-1. 줄 단위 해부 — Halton과 지터 변환</h3>
+    <p>
+      <code>halton(index, base)</code>는 저불일치 수열 값을 만드는 표준 루틴입니다. <code>index</code>를
+      <code>base</code> 진법으로 뒤집어 소수부로 만드는 것으로, base 2·3을 쓰면 두 축의 샘플이 골고루
+      퍼집니다. <code>frame + 1</code>을 넣는 이유는 index 0이 항상 0을 뱉어(지터 없음) 첫 프레임이
+      흔들리지 않는 것을 피하기 위해서입니다. 실무에서는 8~16 프레임 주기로 순환시킵니다.
+    </p>
+    <p>
+      <code>XMMatrixPerspectiveFovLH(fovY, aspect, zn, zf)</code> — 이름의 <strong>LH</strong>가 왼손 좌표계,
+      DirectXMath의 이 함수가 만드는 클립 z 범위가 <strong>[0,1]</strong>이라 우리 규약과 정확히 맞습니다
+      (GL 계열의 <code>[-1,1]</code>과 다릅니다). 반환은 <strong>행벡터 규약</strong>의 행렬이라, 셰이더에서
+      <code>mul(v, M)</code>로 곱하면 됩니다.
+    </p>
+    <p>
+      <code>float ndcX = jx * 2.0f / width;</code> — <strong>수학적 의미:</strong> NDC의 x는 화면 왼쪽 끝
+      <code>-1</code>부터 오른쪽 끝 <code>+1</code>까지, 즉 <em>폭 전체가 2에 대응</em>합니다. 따라서 "1픽셀"은
+      NDC로 <code>2/width</code>이고, <code>jx</code>픽셀만큼 흔들려면 <code>jx·2/width</code>를 더해야 합니다.
+      y도 같은 논리로 <code>2/height</code>입니다.
+    </p>
+
+    <h3>5-2. 왜 _31, _32에 더하나 — 행벡터 규약의 핵심</h3>
+    <p>
+      <strong>수학 → 코드 매핑:</strong> 행벡터 규약에서 정점은 <code>clip = v · M</code>으로 변환됩니다.
+      여기서 입력 <code>v = (x, y, z, 1)</code>의 마지막 성분(<code>w=1</code>)에 곱해지는 것이 행렬의
+      <strong>3행(0-기준, <code>_31 _32 _33 _34</code>)</strong>입니다(행벡터·행 우선 저장 규약).
+      원근 투영에서 클립 <code>w</code>는 대략 뷰공간 깊이에 비례하므로, <code>clip.x</code>에
+      <code>w·ndcX</code>를 더하려면 3행의 x열, 즉 <code>m._31</code>에 <code>ndcX</code>를 더하면 됩니다.
+      원근분할(<code>clip.xy / clip.w</code>) 후 정확히 <code>ndcX</code>만큼의 NDC 평행이동이 남습니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> "장면 전체를 화면상 <code>jx</code>픽셀만큼 옆으로 민다"는 것을, 카메라를
+      옮기지 않고 투영 단계에서 상수 오프셋으로 처리하는 것입니다. 깊이에 무관하게 화면상 <em>동일한</em>
+      픽셀 수만큼 이동하도록 <code>w</code>에 비례한 항으로 넣는 것이 포인트입니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <strong>열벡터 규약(<code>v' = M·v</code>, GLM 기본)</strong>에서는 같은 오프셋을 <code>_13, _23</code>
+      (마지막 <em>열</em>)에 더합니다. 규약을 헷갈려 엉뚱한 성분에 더하면 지터가 깊이에 따라 어긋나거나
+      전혀 안 흔들립니다. 이 페이지의 규약은 <strong>행벡터·행 우선</strong>이므로 <code>_31, _32</code>가 맞습니다.
+      또 cbuffer로 올릴 때는 <strong>전치(transpose)</strong>가 필요할 수 있습니다(HLSL <code>column_major</code>
+      기본과의 정합).
+    </div>
+
+    <h3>5-3. DirectXMath 함수 ↔ 원본 개념 대응표</h3>
+    <table class="impl">
+      <tr><th>DirectXMath / D3D</th><th>원본 개념</th><th>비고</th></tr>
+      <tr><td><code>XMMatrixPerspectiveFovLH</code></td><td>왼손 · 클립 z [0,1] 원근 투영</td><td>행벡터 규약 행렬 반환</td></tr>
+      <tr><td><code>XMStoreFloat4x4</code> / <code>XMLoadFloat4x4</code></td><td>SIMD <code>XMMATRIX</code> ↔ 저장용 <code>XMFLOAT4X4</code></td><td><code>_ij</code> 성분 직접 접근하려면 Store 필요</td></tr>
+      <tr><td><code>m._31, m._32</code></td><td>클립 x/y에 <code>w·offset</code>을 더하는 성분</td><td>행 우선 저장(<code>_rc</code> = row r, col c)</td></tr>
+      <tr><td><code>ResolveSubresource</code></td><td>멀티샘플 → 단일샘플 평균</td><td>MSAA 오프스크린 리졸브</td></tr>
+      <tr><td><code>CheckMultisampleQualityLevels</code></td><td>MSAA 샘플/품질 지원 조회</td><td>생성 전 반드시 확인</td></tr>
+      <tr><td>HLSL <code>dot(c, (0.299,0.587,0.114))</code></td><td>RGB → luma 사영</td><td>BT.601 가중치</td></tr>
+      <tr><td>HLSL <code>lerp(x, y, t)</code></td><td>선형 보간 <code>x(1-t)+yt</code></td><td>FXAA/TAA 블렌딩 공통</td></tr>
+    </table>
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      직접 지터·리졸브를 짜는 것은 <strong>학습용</strong>입니다. 실무에서는 DirectXMath/검증된 라이브러리와
+      엔진 제공 AA(내장 MSAA/TAA, 또는 DLSS·FSR·XeSS 같은 상위 기법)를 쓰는 것이 안정적입니다.
+      이 페이지 코드는 각 단계가 GPU에서 무엇을 시키는지 이해하기 위한 최소 원형으로 읽어 주세요.
+    </div>
+  </section>
+
+  <!-- ================================================================= -->
+  <section id="wrap">
+    <h2>6. 정리 — 언제 무엇을 쓰나</h2>
+    <ol class="steps">
+      <li>후처리가 없고 지오메트리 엣지만 문제다 → <strong>MSAA 스왑체인</strong>(1절). 가장 간단.</li>
+      <li>HDR·블룸 등 후처리가 있다 → <strong>오프스크린 MSAA + 리졸브</strong>(2절) 후 후처리 체인.</li>
+      <li>메모리가 빡빡하거나 알파/셰이더 엣지까지 싸게 잡고 싶다 → <strong>FXAA</strong>(3절)를 후처리 끝에.</li>
+      <li>정지·저속 화면 품질을 극대화하고 셰이더 앨리어싱까지 잡아야 한다 → <strong>TAA</strong>(4절), 단 엔진 제공 권장.</li>
+      <li>실무 조합: <em>MSAA(또는 TAA) + 톤매핑 후 FXAA 살짝</em>이 흔한 절충입니다.</li>
+    </ol>
+    <p>
+      세 기법 모두 뿌리는 같습니다 — <strong>"이진 커버리지를 계조로 바꾼다"</strong>. MSAA는 공간에서
+      서브샘플로, TAA는 시간에서 지터로, FXAA는 사후에 luma 대비로 그 계조를 만들어 냅니다.
+      이 관점을 잡고 있으면 어떤 AA 기법을 만나도 "이건 계조를 어디서 얻지?"라는 한 질문으로
+      구조를 빠르게 파악할 수 있습니다.
+    </p>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./07-techniques.html">← 7장 허브</a>
+    <a href="./07-gamma.html">감마 · 선형 색공간 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

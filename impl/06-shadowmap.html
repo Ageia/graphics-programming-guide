@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 섀도우 맵 (Shadow Mapping) — C++/DirectX 11</title>
+<meta name="description" content="광원 시점 깊이 렌더 → 본 렌더에서 깊이 비교로 그림자를 만드는 섀도우 맵을 C++/DirectX 11로 한 줄씩 해부합니다. 비교 샘플러, PCF, bias, peter-panning까지." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">섀도우 맵 (Shadow Mapping)</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6</span>
+  <h1>섀도우 맵 (Shadow Mapping) — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead">
+    그림자는 장면에 깊이감과 공간감을 주는 가장 강력한 시각 단서입니다. 그리고 그림자를 만드는 가장 보편적인 실시간 기법이 바로
+    <strong>섀도우 맵(shadow mapping)</strong>입니다. 아이디어는 놀랄 만큼 단순합니다 —
+    <strong>빛의 눈으로 세상을 한 번 바라보고, "빛이 처음 부딪히는 거리"를 텍스처에 저장</strong>합니다. 그다음 본 렌더에서
+    각 픽셀이 그 저장된 거리보다 <em>멀리</em> 있으면, 그 픽셀은 빛에게 가려진 것이므로 그림자입니다.
+    이 페이지에서는 원본 예제의 C++(Direct3D 11)와 HLSL 코드를 <strong>한 줄, 한 성분씩</strong> 해부하면서,
+    수학 원리 → 기하 직관 → 코드 매핑의 3단으로 처음부터 끝까지 따라갑니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">규약</span>
+    이 페이지 전체에서 <strong>행벡터 규약</strong>을 씁니다: 벡터를 행렬 <em>왼쪽</em>에 두고 <code>v' = v * M</code>,
+    HLSL에서는 <code>mul(v, M)</code>. 행렬은 행 우선(row-major)으로 저장하고, <strong>왼손 좌표계(LH)</strong>,
+    <strong>클립 공간 z는 [0,1]</strong> 범위(OpenGL의 [-1,1]이 아님), 텍스처 <strong>V축은 위→아래</strong>입니다.
+    실무에서는 손으로 짠 행렬 대신 <code>DirectXMath</code>(검증된 SIMD 라이브러리)를 쓰는 것을 강력히 권장합니다 —
+    이 페이지의 손계산은 어디까지나 <em>내부에서 무슨 일이 일어나는지</em> 이해하기 위한 학습용입니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>0. 큰 그림 — 왜 두 번 그리는가</h2>
+  <p>
+    화면에 그림자를 찍기 위해, 섀도우 맵은 장면을 <strong>두 번</strong> 렌더합니다. 낭비처럼 보이지만, 첫 번째 렌더는
+    색을 전혀 계산하지 않고 <em>깊이만</em> 기록하므로 매우 가볍습니다.
+  </p>
+  <ol class="steps">
+    <li><strong>깊이 전용 타깃을 만든다.</strong> 하나의 텍스처를 <code>DepthStencilView</code>(쓰기용)로도, <code>ShaderResourceView</code>(읽기용)로도 사용합니다. 컬러 타깃은 아예 붙이지 않습니다.</li>
+    <li><strong>1패스 — 광원 시점 깊이 렌더.</strong> 방향광은 광선이 평행하므로 <strong>직교 투영(orthographic)</strong>으로 light-space 행렬 <code>lightView * lightProj</code>을 만들고, 그 시점에서 장면을 그려 "빛이 처음 닿는 거리"를 깊이맵에 남깁니다.</li>
+    <li><strong>2패스 — 본 렌더.</strong> 각 픽셀의 월드 좌표를 광원 공간으로 변환해 [0,1] 텍스처 좌표로 바꾸고, 저장된 깊이와 현재 깊이를 <strong>비교 샘플러(SamplerComparisonState)</strong>로 비교합니다. 여기에 작은 <strong>bias</strong>를 더해 자기그림자 줄무늬를 막습니다.</li>
+    <li><strong>가장자리를 부드럽게.</strong> 한 텍셀 단위로 딱딱하게 끊기는 계단(aliasing)을 없애려고 <strong>PCF(Percentage-Closer Filtering, 3×3 평균)</strong>로 여러 이웃 텍셀의 비교 결과를 평균 냅니다.</li>
+  </ol>
+
+  <p>
+    핵심 통찰 하나를 먼저 못 박아 둡시다. 섀도우 맵은 결국 <strong>"거리 비교"</strong>입니다. 깊이맵에 저장된 값은
+    <em>광원에서 가장 가까운 표면까지의 거리</em>이고, 본 렌더에서 우리가 들고 있는 값은 <em>지금 그리는 이 픽셀까지의 거리</em>입니다.
+    이 둘을 같은 좌표계(광원 공간)에서 비교해서, 지금 픽셀이 더 멀면 그 앞에 뭔가가 있다는 뜻이니 그림자입니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>1. 1패스 준비 — 깊이 텍스처와 비교 샘플러 만들기</h2>
+  <p>
+    첫 번째 코드 블록은 순수하게 <strong>리소스 준비</strong>입니다. GPU에게 "이런 텍스처 하나 만들고, 그걸 깊이로 쓸 뷰,
+    셰이더에서 읽을 뷰, 그리고 깊이끼리 비교하는 특수한 샘플러를 준비해 줘"라고 요청합니다. 여기서 가장 낯선 개념이
+    <strong>같은 텍스처를 두 얼굴(DSV/SRV)로 쓰기 위한 TYPELESS 포맷</strong>과 <strong>비교 샘플러</strong>입니다. 코드 먼저 보고
+    한 줄씩 뜯어봅니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>shadow_target.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">const UINT SHADOW_W = 2048, SHADOW_H = 2048;
+using Microsoft::WRL::ComPtr;
+
+// 깊이 텍스처는 DSV와 SRV 두 뷰로 쓰므로 TYPELESS 포맷으로 생성
+ComPtr&lt;ID3D11Texture2D&gt;           depthTex;
+ComPtr&lt;ID3D11DepthStencilView&gt;    depthDSV;
+ComPtr&lt;ID3D11ShaderResourceView&gt;  depthSRV;
+
+D3D11_TEXTURE2D_DESC td = {};
+td.Width = SHADOW_W; td.Height = SHADOW_H;
+td.MipLevels = 1; td.ArraySize = 1;
+td.Format = DXGI_FORMAT_R24G8_TYPELESS;   // DSV/SRV가 각기 다른 포맷으로 해석
+td.SampleDesc.Count = 1;
+td.Usage = D3D11_USAGE_DEFAULT;
+td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+device->CreateTexture2D(&amp;td, nullptr, &amp;depthTex);
+
+D3D11_DEPTH_STENCIL_VIEW_DESC dsvd = {};
+dsvd.Format        = DXGI_FORMAT_D24_UNORM_S8_UINT;   // 깊이로 기록
+dsvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+device->CreateDepthStencilView(depthTex.Get(), &amp;dsvd, &amp;depthDSV);
+
+D3D11_SHADER_RESOURCE_VIEW_DESC srvd = {};
+srvd.Format        = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; // 깊이로 읽기
+srvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+srvd.Texture2D.MipLevels = 1;
+device->CreateShaderResourceView(depthTex.Get(), &amp;srvd, &amp;depthSRV);
+
+// 비교 샘플러: SampleCmp에서 저장 깊이와 참조 깊이를 비교(PCF는 HW 보간)
+ComPtr&lt;ID3D11SamplerState&gt; shadowSampler;
+D3D11_SAMPLER_DESC ssd = {};
+ssd.Filter         = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+ssd.AddressU = ssd.AddressV = ssd.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;
+ssd.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+float border[4] = { 1, 1, 1, 1 };   // 맵 밖은 "그림자 아님(깊이 1.0)"
+memcpy(ssd.BorderColor, border, sizeof(border));
+device->CreateSamplerState(&amp;ssd, &amp;shadowSampler);
+
+// --- 1패스: 광원 시점 깊이 렌더 ---
+using namespace DirectX;
+// DirectXMath는 행벡터: model*view*proj 순서. 직교 투영은 LH 사용
+XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(-10, 10, -10, 10, 1.0f, 25.f);
+XMMATRIX lightView = XMMatrixLookAtLH(lightPos, XMVectorZero(), XMVectorSet(0,1,0,0));
+XMMATRIX lightSpace = lightView * lightProj;   // 행벡터 곱 순서
+
+D3D11_VIEWPORT vp = { 0, 0, (float)SHADOW_W, (float)SHADOW_H, 0.0f, 1.0f };
+ctx->RSSetViewports(1, &amp;vp);
+ctx->OMSetRenderTargets(0, nullptr, depthDSV.Get());   // 컬러 출력 없음
+ctx->ClearDepthStencilView(depthDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+ctx->RSSetState(cullFrontRS.Get());   // 앞면 컬링 → peter-panning 완화 트릭
+renderSceneDepthOnly(lightSpace);
+ctx->RSSetState(cullBackRS.Get());
+// --- 2패스: 본 렌더 (lightSpace 상수, depthSRV/비교 샘플러를 셰이더로 넘김) ---</code></pre>
+  </div>
+
+  <h3>1-1. 해상도 상수와 ComPtr</h3>
+  <p>
+    <code>const UINT SHADOW_W = 2048, SHADOW_H = 2048;</code> — 섀도우 맵의 크기를 2048×2048로 정합니다.
+    <code>UINT</code>는 부호 없는 32비트 정수(<code>unsigned int</code>)로, Direct3D API가 크기·개수를 이걸로 받기 때문에 맞춰 줍니다.
+    이 <strong>해상도가 곧 그림자의 정밀도</strong>입니다. 화면에서 그림자 경계가 뭉개져 보인다면 가장 먼저 이 값을 올려 봅니다.
+    다만 2048²는 텍셀 400만 개, 24비트 깊이면 약 12MB — 4096²로 올리면 4배가 되니 메모리와 대역폭을 함께 고려해야 합니다.
+  </p>
+  <p>
+    <code>using Microsoft::WRL::ComPtr;</code> — <code>ComPtr&lt;T&gt;</code>는 COM 객체용 <strong>스마트 포인터</strong>입니다.
+    Direct3D 11의 모든 인터페이스(<code>ID3D11...</code>)는 COM 객체라 참조 카운트로 수명을 관리하는데, <code>ComPtr</code>이
+    소멸될 때 <code>Release()</code>를 자동으로 불러 줍니다. 즉 <code>delete</code>를 직접 부를 필요가 없고 누수를 막아 줍니다.
+    <code>.Get()</code>은 안에 든 원시 포인터를, <code>&amp;depthTex</code>(주소 연산자)는 "여기에 새 객체를 담아라"는 출력 슬롯을 넘길 때 씁니다.
+  </p>
+
+  <h3>1-2. 왜 TYPELESS 포맷인가 — 한 텍스처, 두 얼굴</h3>
+  <p>
+    <code>td.Format = DXGI_FORMAT_R24G8_TYPELESS;</code> 이 한 줄이 섀도우 맵 리소스의 핵심 트릭입니다.
+    우리는 <strong>같은 텍스처</strong>를 두 가지 용도로 써야 합니다:
+  </p>
+  <ul>
+    <li>1패스에서는 GPU의 깊이 유닛이 여기에 <strong>깊이값을 기록</strong>합니다 → 이때는 "깊이 포맷"으로 해석돼야 합니다 (<code>D24_UNORM_S8_UINT</code>).</li>
+    <li>2패스에서는 픽셀 셰이더가 여기서 <strong>값을 읽습니다</strong> → 이때는 "빨강 채널 실수 텍스처"처럼 해석돼야 합니다 (<code>R24_UNORM_X8_TYPELESS</code>).</li>
+  </ul>
+  <p>
+    문제는 하나의 뷰(view)로는 이 두 해석을 동시에 못 한다는 점입니다. 그래서 텍스처 자체는 <strong>타입을 정하지 않은
+    TYPELESS</strong>(형식 없음)로 만들어 두고, "<strong>뷰</strong>"를 만들 때마다 그때그때 구체적인 포맷을 지정합니다.
+    비유하자면 텍스처는 24+8비트짜리 <em>날 것의 비트 통</em>이고, DSV/SRV는 그 통을 각각 다른 렌즈(포맷)로 들여다보는
+    안경입니다. TYPELESS로 안 만들고 처음부터 <code>D24_UNORM_S8_UINT</code>로 만들면, SRV를 만들 때 "이 깊이 포맷은
+    셰이더에서 못 읽어"라며 실패합니다.
+  </p>
+  <table class="impl">
+    <tr><th>구분</th><th>포맷</th><th>24비트 (R24)</th><th>8비트 (G8/X8)</th></tr>
+    <tr><td>텍스처(저장)</td><td><code>R24G8_TYPELESS</code></td><td>형식 미정</td><td>형식 미정</td></tr>
+    <tr><td>DSV(쓰기)</td><td><code>D24_UNORM_S8_UINT</code></td><td>깊이(0~1 정규화)</td><td>스텐실(정수)</td></tr>
+    <tr><td>SRV(읽기)</td><td><code>R24_UNORM_X8_TYPELESS</code></td><td>빨강 채널(0~1 실수)</td><td>버림(X=무시)</td></tr>
+  </table>
+  <p>
+    각 필드도 짚어 봅니다. <code>td.MipLevels = 1;</code> — 밉맵은 깊이맵에 필요 없으니 1단계만. 밉맵으로 축소하면
+    깊이값을 평균 내 버려 의미가 망가집니다. <code>td.ArraySize = 1;</code> — 텍스처 배열이 아닌 단일 텍스처.
+    <code>td.SampleDesc.Count = 1;</code> — MSAA 없음(깊이맵은 멀티샘플하지 않습니다). <code>td.Usage = D3D11_USAGE_DEFAULT;</code>
+    — GPU 전용 메모리에 두고 CPU는 접근하지 않는 가장 빠른 용도. <code>td.BindFlags = D3D11_BIND_DEPTH_STENCIL |
+    D3D11_BIND_SHADER_RESOURCE;</code> — 이 <strong>비트 OR(|)</strong>가 "깊이 타깃으로도, 셰이더 리소스로도 쓸 거야"라고
+    두 용도를 동시에 켭니다. 이 두 플래그를 함께 켜는 것이 "같은 텍스처를 두 얼굴로" 쓰는 것을 API 레벨에서 허용하는 지점입니다.
+  </p>
+  <p>
+    <code>device->CreateTexture2D(&amp;td, nullptr, &amp;depthTex);</code> — 첫 인자는 방금 채운 서술자 구조체의 <strong>주소</strong>(<code>&amp;td</code>),
+    두 번째 <code>nullptr</code>은 "초기 데이터 없음"(깊이맵은 매 프레임 새로 그리니 초기값이 필요 없습니다), 세 번째 <code>&amp;depthTex</code>는
+    만들어진 텍스처를 담아 돌려줄 출력 슬롯입니다.
+  </p>
+
+  <h3>1-3. DSV — 깊이로 쓰는 뷰</h3>
+  <p>
+    <code>dsvd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;</code> — 이 뷰를 통해 볼 때는 앞 24비트를 <strong>깊이(D, 0~1로 정규화된
+    UNORM)</strong>, 뒤 8비트를 <strong>스텐실(정수)</strong>로 해석하라는 뜻입니다. <code>dsvd.ViewDimension =
+    D3D11_DSV_DIMENSION_TEXTURE2D;</code>는 "이건 2D 텍스처야"라고 차원을 알려 줍니다. <code>CreateDepthStencilView(depthTex.Get(),
+    &amp;dsvd, &amp;depthDSV);</code>에서 첫 인자로 아까 만든 원본 텍스처(<code>.Get()</code>으로 원시 포인터), 두 번째로 이 서술자,
+    세 번째로 결과를 받을 <code>depthDSV</code>를 넘깁니다. 이제 <code>depthDSV</code>는 그 비트 통을 "깊이/스텐실" 렌즈로 보는 안경입니다.
+  </p>
+
+  <h3>1-4. SRV — 셰이더에서 읽는 뷰</h3>
+  <p>
+    <code>srvd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;</code> — 같은 통을 이번엔 "앞 24비트를 <strong>빨강 채널(R, 0~1 실수)</strong>로,
+    뒤 8비트는 <strong>X(무시)</strong>"로 봅니다. 그래서 HLSL에서 <code>shadowMap.SampleCmp(...)</code>로 읽으면 그 값이 곧 저장된 깊이가 됩니다.
+    <code>srvd.Texture2D.MipLevels = 1;</code>은 사용할 밉 단계 수(1개), <code>ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D</code>는 2D.
+    이렇게 <strong>DSV와 SRV라는 두 개의 서로 다른 안경</strong>이 하나의 텍스처를 각각 쓰기용/읽기용으로 봅니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    한 텍스처를 동시에 <strong>DSV로 쓰면서 SRV로 바인딩</strong>해 두면 Direct3D가 그 SRV를 자동으로 언바인드하고 디버그 레이어가
+    경고를 뿜습니다("resource being set to ... is still bound on ... as a DepthStencil"). 1패스가 끝나 깊이맵을 다 그린 <em>다음에만</em>
+    2패스에서 SRV로 붙여야 합니다. 반대로 2패스가 끝나면 다음 프레임의 1패스 전에 SRV를 <code>ctx->PSSetShaderResources</code>로
+    <code>nullptr</code>을 넣어 풀어 주세요. 안 그러면 다음 프레임 DSV 바인딩 때 또 경고가 납니다.
+  </div>
+
+  <h3>1-5. 비교 샘플러 — 그림자 전용 특수 샘플러</h3>
+  <p>
+    보통 <code>SamplerState</code>는 텍스처에서 색을 <em>읽어</em> 옵니다. 하지만 그림자에 쓰는
+    <strong>비교 샘플러(comparison sampler)</strong>는 다릅니다 — 값을 읽어 오는 게 아니라, "내가 준 <em>참조 깊이</em>가
+    저장된 텍셀 깊이보다 <strong>가까운가?</strong>"라는 질문에 <strong>0 또는 1</strong>로 답합니다. 그리고 결정적으로,
+    3×3처럼 여러 텍셀에 걸치면 그 0/1 비교 결과들을 <strong>하드웨어가 이중선형으로 보간</strong>해 0~1 사이 부드러운 값을
+    돌려줍니다. 이게 PCF(가장자리 부드럽게)를 GPU가 공짜로 해 주는 핵심입니다.
+  </p>
+  <p>
+    <code>ssd.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;</code> — 이름을 풀면
+    "MIN/MAG(축소/확대)는 <strong>LINEAR</strong>(이중선형), MIP은 POINT, 그리고 <strong>COMPARISON</strong>(비교 모드)"입니다.
+    <code>COMPARISON</code>이 붙어야 <code>SampleCmp</code>를 쓸 수 있고, <code>LINEAR</code>가 있어야 비교 결과가 텍셀 사이에서 보간됩니다.
+    이 둘이 합쳐져 "3×3 하드웨어 PCF"가 됩니다.
+  </p>
+  <p>
+    <code>ssd.AddressU = ssd.AddressV = ssd.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;</code> — UV가 [0,1] 밖으로 나갔을 때
+    어떻게 할지입니다. <code>BORDER</code>는 "가장자리 밖은 <strong>테두리 색</strong>으로 채워라". 그 테두리 색이 바로 다음 줄
+    <code>float border[4] = { 1, 1, 1, 1 };</code> — 깊이 <strong>1.0</strong>입니다. 깊이 1.0은 "무한히 멀다 = 아무것도 그 앞을
+    가리지 않는다"는 뜻이라, <strong>섀도우 맵 절두체(범위) 밖은 항상 빛(그림자 아님)</strong>으로 처리됩니다. 만약 여기를
+    0.0으로 두면 맵 밖 세상이 통째로 그림자에 잠겨 버립니다.
+  </p>
+  <p>
+    <code>ssd.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;</code> — 비교 연산의 방향입니다. "<strong>참조 깊이 ≤ 저장 깊이</strong>이면
+    통과(=빛, 결과 1)". 왜 ≤일까요? 저장 깊이는 광원이 처음 만난 표면까지의 거리이고, 참조 깊이는 지금 이 픽셀까지의 거리입니다.
+    지금 픽셀이 그 저장값보다 <em>같거나 가까우면</em> 그 픽셀이 곧 광원이 처음 만나는 표면이라는 뜻이니 빛을 받습니다. 더 멀면(>) 그 앞에
+    다른 게 있다는 뜻이니 그림자입니다. <code>memcpy(ssd.BorderColor, border, sizeof(border));</code>는 테두리 색 배열을 서술자에 복사하는 것뿐입니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">개념</span>
+    비교 샘플러의 반환값을 문장으로 기억하세요: <strong>1 = "이 픽셀은 빛을 받음(통과)"</strong>,
+    <strong>0 = "가려짐(그림자)"</strong>. 3×3 PCF에서는 9개 텍셀 비교의 하드웨어 보간 평균이라 0.0~1.0 사이 값이 나옵니다.
+    예를 들어 6개는 빛, 3개는 그림자라면 대략 0.66 정도가 나와 경계가 부드러워집니다.
+  </div>
+
+  <h3>1-6. 광원 공간 행렬 — 빛의 눈으로 보는 변환</h3>
+  <p>
+    이제 "빛의 카메라"를 세웁니다. 카메라를 정의하는 두 행렬 — <strong>뷰 행렬</strong>(어디서 어디를 보는가)과
+    <strong>투영 행렬</strong>(어떤 모양으로 화면에 눌러 담는가) — 을 광원 기준으로 만듭니다.
+  </p>
+  <p>
+    <code>XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(-10, 10, -10, 10, 1.0f, 25.f);</code> —
+    <strong>직교 투영(orthographic)</strong> 행렬입니다. 방향광(태양처럼 광선이 모두 <em>평행</em>한 빛)은 원근이 없으므로,
+    원근 투영이 아니라 직교 투영을 씁니다. 인자는 순서대로 <code>(left, right, bottom, top, nearZ, farZ)</code>:
+    가로로 x=−10~10, 세로로 y=−10~10 범위의 상자를, 깊이로 z=1.0~25.0 범위를 담습니다. <code>OffCenter</code>는 좌우·상하
+    범위를 각각 따로 줄 수 있다는 뜻이고, <code>LH</code>는 왼손 좌표계입니다. 이 상자(절두체)가 바로 <strong>그림자가 계산되는 영역</strong>이며,
+    앞서 border=1.0이 담당하는 "맵 밖"이 바로 이 상자 바깥입니다.
+  </p>
+  <p>
+    <code>XMMATRIX lightView = XMMatrixLookAtLH(lightPos, XMVectorZero(), XMVectorSet(0,1,0,0));</code> —
+    광원 위치 <code>lightPos</code>에서 원점 <code>XMVectorZero()</code>(0,0,0)를 바라보는 뷰 행렬입니다.
+    세 번째 인자 <code>XMVectorSet(0,1,0,0)</code>은 위쪽 방향(up)으로 +y축을 씁니다. 즉 "빛이 이 위치에 서서 장면 중앙을 내려다본다"는 카메라입니다.
+  </p>
+  <p>
+    <code>XMMATRIX lightSpace = lightView * lightProj;</code> — 두 변환을 합칩니다. <strong>행벡터 규약이라 곱 순서가 중요</strong>합니다.
+    월드 좌표에 이 행렬을 곱하면(<code>mul(worldPos, lightSpace)</code>) → 먼저 <code>lightView</code>가 적용돼 광원 시점 좌표로,
+    이어서 <code>lightProj</code>가 적용돼 클립 공간으로 갑니다. 곱은 <em>왼쪽→오른쪽</em> 순으로 벡터에 적용되므로
+    <code>view * proj</code>가 맞습니다. 열벡터(OpenGL식) 규약이었다면 <code>proj * view</code>로 뒤집혔을 것입니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    직교 절두체의 <strong>범위를 장면에 딱 맞게 좁힐수록 그림자 품질이 좋아집니다.</strong> 넓게 잡으면 같은 2048²
+    텍셀이 더 넓은 면적을 덮어 그림자 해상도(단위 면적당 텍셀 밀도)가 떨어지고, near/far가 벌어지면 깊이 정밀도도 낮아져
+    shadow acne가 심해집니다. 실무에서는 카메라 절두체를 감싸는 최소 상자를 매 프레임 계산하는 "tight-fit" 기법을 씁니다.
+  </div>
+
+  <h3>1-7. 1패스 실행 — 깊이만 그리기</h3>
+  <p>
+    <code>D3D11_VIEWPORT vp = { 0, 0, (float)SHADOW_W, (float)SHADOW_H, 0.0f, 1.0f };</code> — 뷰포트를 <strong>깊이맵 해상도에 맞춰</strong>
+    2048×2048로 설정합니다. 화면 뷰포트가 아니라 섀도우 맵 크기여야 텍셀 전체를 채웁니다. 필드는
+    <code>(TopLeftX, TopLeftY, Width, Height, MinDepth, MaxDepth)</code>이고, 깊이 범위는 [0,1]입니다.
+    <code>ctx->RSSetViewports(1, &amp;vp);</code>로 이 뷰포트 하나를 적용합니다.
+  </p>
+  <p>
+    <code>ctx->OMSetRenderTargets(0, nullptr, depthDSV.Get());</code> — 이 줄이 "<strong>컬러 없이 깊이만</strong>"의 실체입니다.
+    첫 인자 <code>0</code>은 컬러 렌더 타깃 개수 0개, 두 번째 <code>nullptr</code>은 RTV 배열 없음, 세 번째만 <code>depthDSV</code>를 넘깁니다.
+    컬러 타깃이 없으면 픽셀 셰이더의 컬러 계산이 통째로 생략돼 매우 빠릅니다 — 우리는 깊이만 있으면 되니까요.
+    <code>ctx->ClearDepthStencilView(depthDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);</code>는 깊이 버퍼를 <strong>1.0(가장 먼 값)</strong>으로,
+    스텐실을 0으로 초기화합니다. 매 프레임 지난 그림자를 지우는 시작점입니다.
+  </p>
+  <p>
+    <code>ctx->RSSetState(cullFrontRS.Get());</code> — 깊이 패스 동안만 <strong>앞면 컬링(front-face culling)</strong>으로 바꿉니다.
+    보통은 뒷면을 버리지만, 여기서는 반대로 <em>앞면</em>을 버려 물체의 <strong>뒷면 깊이</strong>를 기록합니다. 이렇게 하면 저장 깊이가
+    실제 표면보다 살짝 안쪽(뒤)으로 밀려, 본 렌더에서 자기 표면과 비교할 때 여유가 생겨 <strong>peter-panning은 줄이고 acne도 억제</strong>하는
+    널리 쓰이는 트릭입니다. <code>renderSceneDepthOnly(lightSpace);</code>로 <code>lightSpace</code> 행렬을 상수로 넘겨 장면을 그린 뒤,
+    <code>ctx->RSSetState(cullBackRS.Get());</code>로 2패스를 위해 <strong>다시 뒷면 컬링</strong>으로 되돌립니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    앞면 컬링 트릭은 <strong>닫힌(watertight) 메시</strong>에서만 안전합니다. 벽처럼 <em>한 겹짜리 평면(뒷면이 없는 얇은 지오메트리)</em>은
+    앞면을 버리면 깊이가 아예 안 그려져 그림자가 통째로 사라집니다. 그런 경우엔 컬링을 끄거나(<code>D3D11_CULL_NONE</code>) bias만으로
+    처리하는 편이 낫습니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. 2패스 셰이더 — 깊이 비교로 그림자량 계산</h2>
+  <p>
+    이제 본 렌더의 픽셀 셰이더 안에서 각 픽셀이 그림자인지 판정합니다. 함수 <code>shadowCalc</code>는
+    <strong>0.0(완전히 빛) ~ 1.0(완전한 그림자)</strong> 사이의 "그림자량"을 돌려줍니다. 코드부터 봅니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>lighting_shadow.hlsl (그림자 부분)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D              shadowMap : register(t4);
+SamplerComparisonState shadowSampler : register(s1);  // 비교 샘플러
+
+// FragPosLightSpace = mul(worldPos, lightSpace) (정점에서 계산해 보간)
+
+// 0.0 = 완전히 빛, 1.0 = 완전한 그림자
+float shadowCalc(float4 fragPosLS, float3 N, float3 L) {
+    // 원근 분할 후 [-1,1] → [0,1] 텍스처 좌표로
+    float3 proj = fragPosLS.xyz / fragPosLS.w;
+    // D3D는 clip-space z가 이미 [0,1]. xy만 [0,1]로 매핑, v는 뒤집는다
+    float2 uv = proj.xy * float2(0.5, -0.5) + 0.5;
+    float current = proj.z;             // 이 픽셀의 광원 기준 깊이
+    if (current &gt; 1.0) return 0.0;      // 절두체 밖은 그림자 아님
+
+    // 경사에 따라 bias를 키워 shadow acne 억제
+    float bias = max(0.05 * (1.0 - dot(N, L)), 0.005);
+
+    // PCF 3x3: SampleCmp가 (참조깊이 &lt;= 저장깊이)를 텍셀마다 비교, HW 이중선형 보간
+    float shadow = 0.0;
+    float2 texel;
+    shadowMap.GetDimensions(texel.x, texel.y);
+    texel = 1.0 / texel;
+    [unroll] for (int x = -1; x &lt;= 1; ++x)
+    [unroll] for (int y = -1; y &lt;= 1; ++y) {
+        // SampleCmp: 결과 1=빛(통과), 0=그림자 → (1-결과)로 그림자량 누적
+        float lit = shadowMap.SampleCmp(shadowSampler,
+                        uv + float2(x, y) * texel, current - bias);
+        shadow += 1.0 - lit;
+    }
+    return shadow / 9.0;
+}
+// 사용: float3 color = ambient + (1.0 - shadowCalc(...)) * (diffuse + specular);</code></pre>
+  </div>
+
+  <h3>2-1. 리소스 바인딩과 함수 시그니처</h3>
+  <p>
+    <code>Texture2D shadowMap : register(t4);</code> — 1패스에서 만든 <code>depthSRV</code>를 셰이더의 <strong>텍스처 슬롯 t4</strong>에
+    붙입니다(C++에서 <code>ctx->PSSetShaderResources(4, 1, depthSRV.GetAddressOf())</code>로). 숫자 4는 다른 텍스처(알베도 t0 등)와
+    겹치지 않게 고른 것뿐입니다. <code>SamplerComparisonState shadowSampler : register(s1);</code> — 일반 <code>SamplerState</code>가 아니라
+    <strong>비교 샘플러 전용 타입</strong>입니다. 이 타입이어야 <code>SampleCmp</code>를 호출할 수 있습니다. 슬롯 s1에 1패스에서 만든
+    비교 샘플러를 붙입니다.
+  </p>
+  <p>
+    주석 <code>// FragPosLightSpace = mul(worldPos, lightSpace)</code>은 <strong>정점 셰이더에서</strong> 각 정점의 월드 좌표에
+    <code>lightSpace</code>를 곱해 광원 클립 좌표를 만들고, 그걸 <code>float4</code>로 픽셀 셰이더에 넘겨 보간한다는 뜻입니다.
+    보간은 래스터라이저가 삼각형 내부 픽셀마다 자동으로 해 줍니다.
+  </p>
+  <p>
+    <code>float shadowCalc(float4 fragPosLS, float3 N, float3 L)</code> — 반환은 그림자량(<code>float</code>), 인자는:
+    <code>fragPosLS</code>(광원 클립 공간에서의 이 픽셀 좌표, 원근 분할 전이라 <code>float4</code>로 w 성분까지 들고 옴),
+    <code>N</code>(표면 법선, 정규화됨), <code>L</code>(표면→광원 방향, 정규화됨). N과 L은 뒤에서 <strong>경사 기반 bias</strong>에 쓰입니다.
+  </p>
+
+  <h3>2-2. 원근 분할과 [0,1] 텍스처 좌표 매핑</h3>
+  <p>
+    <code>float3 proj = fragPosLS.xyz / fragPosLS.w;</code> — <strong>원근 분할(perspective divide)</strong>입니다. 클립 공간 좌표를
+    w로 나눠 정규화 장치 좌표(NDC)로 바꿉니다. 직교 투영이면 w가 1이라 사실상 변화가 없지만, 원근 투영(점광원 그림자 등)도
+    지원하려고 항상 나눠 줍니다. 결과 <code>proj</code>는 x,y가 [−1,1], z가 [0,1] 범위(D3D 규약)입니다.
+  </p>
+  <p>
+    <code>float2 uv = proj.xy * float2(0.5, -0.5) + 0.5;</code> — NDC의 xy(−1~1)를 <strong>텍스처 좌표(0~1)</strong>로 옮깁니다.
+    성분별로 손계산해 봅시다:
+  </p>
+  <ul>
+    <li><strong>u = x·0.5 + 0.5</strong>: x=−1 → 0, x=0 → 0.5, x=+1 → 1. 왼쪽→오른쪽 그대로 매핑.</li>
+    <li><strong>v = y·(−0.5) + 0.5</strong>: y=+1 → 0(<em>화면 위</em>), y=0 → 0.5, y=−1 → 1(<em>화면 아래</em>). <strong>부호가 음수라서 뒤집힙니다.</strong></li>
+  </ul>
+  <p>
+    왜 v만 뒤집을까요? NDC는 y가 <em>위로</em> 증가하지만, 텍스처 좌표 V는 규약상 <em>위→아래</em>로 증가하기(위가 0, 아래가 1) 때문입니다.
+    이 <code>−0.5</code> 하나가 그 상하 반전을 담당합니다. OpenGL에서 왔다면 여기서 흔히 실수하는 지점이니(OpenGL은 V가 아래→위)
+    부호를 꼭 확인하세요.
+  </p>
+  <p>
+    <code>float current = proj.z;</code> — z가 곧 <strong>이 픽셀의 광원 기준 깊이</strong>입니다. D3D는 클립 z가 이미 [0,1]이라
+    별도 변환이 필요 없습니다(OpenGL이라면 z가 [−1,1]이라 <code>z*0.5+0.5</code>가 추가로 필요합니다). 이 <code>current</code>가
+    나중에 저장 깊이와 비교할 "참조 깊이"입니다.
+  </p>
+  <p>
+    <code>if (current &gt; 1.0) return 0.0;</code> — z가 1.0을 넘으면 광원 절두체의 far 평면 바깥이라 깊이맵에 정보가 없습니다.
+    그런 픽셀은 그냥 <strong>빛(그림자량 0)</strong>으로 처리해 이상한 그림자가 안 생기게 합니다.
+  </p>
+
+  <h3>2-3. 경사 기반 bias — acne를 막는 작은 여유</h3>
+  <p>
+    <code>float bias = max(0.05 * (1.0 - dot(N, L)), 0.005);</code> — <strong>shadow acne</strong>(표면이 자기 자신에 드리우는
+    줄무늬 그림자)를 막는 핵심 줄입니다. 원인부터: 깊이맵은 유한한 텍셀·유한한 정밀도라, 저장된 깊이와 현재 픽셀 깊이가
+    <em>정확히 같아야 할</em> 곳에서도 미세한 오차로 "현재가 살짝 더 멀다"고 오판해 자기 그림자가 지그재그로 생깁니다.
+    해결책은 비교할 때 현재 깊이에서 작은 값을 빼 <strong>여유(bias)</strong>를 주는 것입니다.
+  </p>
+  <p>
+    왜 <strong>경사(slope)에 따라</strong> bias를 키울까요? 빛이 표면에 <em>비스듬히</em> 닿을수록 하나의 깊이 텍셀이 덮는
+    실제 깊이 범위가 넓어져 오차가 커지기 때문입니다. <code>dot(N, L)</code>은 법선과 광원 방향이 이루는 각의 코사인입니다:
+  </p>
+  <ul>
+    <li>빛이 <strong>정면(수직)</strong>으로 닿으면 <code>N·L = 1</code> → <code>1 − 1 = 0</code> → bias = <code>max(0, 0.005) = 0.005</code> (최소값).</li>
+    <li>빛이 <strong>45°</strong>로 닿으면 <code>N·L ≈ 0.707</code> → <code>0.05 × 0.293 ≈ 0.0146</code>.</li>
+    <li>빛이 <strong>거의 스치듯(90°)</strong> 닿으면 <code>N·L ≈ 0</code> → <code>0.05 × 1 = 0.05</code> (최대값).</li>
+  </ul>
+  <p>
+    <code>max(..., 0.005)</code>가 <strong>바닥값</strong>을 보장합니다 — 정면으로 닿아 bias가 0이 되면 acne가 다시 나므로,
+    최소 0.005는 항상 확보합니다. 이 값들(0.05, 0.005)은 <strong>장면 스케일과 깊이 정밀도에 맞춰 튜닝</strong>하는 상수입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    bias는 <strong>양날의 검</strong>입니다. 너무 작으면 <strong>acne(줄무늬)</strong>, 너무 크면 <strong>peter-panning</strong>(그림자가
+    물체에서 떨어져 물체가 공중에 뜬 것처럼 보이는 현상)이 생깁니다. 경사 기반 bias + 1패스의 앞면 컬링을 함께 쓰면 둘 사이 균형이
+    좋아집니다. 그래도 안 되면 near/far를 좁혀 깊이 정밀도를 올리는 게 근본 처방입니다.
+  </div>
+
+  <h3>2-4. PCF 3×3 — 계단 없애기</h3>
+  <p>
+    <code>float shadow = 0.0;</code> — 그림자량 누적 변수. <code>float2 texel;</code> <code>shadowMap.GetDimensions(texel.x, texel.y);</code> —
+    깊이맵의 픽셀 크기(2048, 2048)를 받아 옵니다. <code>texel = 1.0 / texel;</code> — 역수를 취해 <strong>한 텍셀의 UV 폭</strong>
+    (1/2048 ≈ 0.000488)을 구합니다. 이 값이 이웃 텍셀로 한 칸 이동하는 UV 단위입니다.
+  </p>
+  <p>
+    <code>[unroll] for (int x = -1; x &lt;= 1; ++x)</code> / <code>[unroll] for (int y = -1; y &lt;= 1; ++y)</code> —
+    x,y가 각각 −1,0,1을 돌아 <strong>3×3 = 9개 이웃</strong>을 훑습니다. <code>[unroll]</code>은 컴파일러에게 이 루프를 펼쳐서
+    (분기 없이) 9번 직렬 코드로 만들라는 지시입니다. 반복 횟수가 고정이라 분기 오버헤드를 없애 GPU에서 더 빠릅니다.
+  </p>
+  <p>
+    <code>float lit = shadowMap.SampleCmp(shadowSampler, uv + float2(x, y) * texel, current - bias);</code> —
+    이 페이지에서 가장 중요한 한 줄입니다. <code>SampleCmp</code>의 세 인자:
+  </p>
+  <ol class="steps">
+    <li><code>shadowSampler</code>: 아까 만든 비교 샘플러(<code>LESS_EQUAL</code>, LINEAR).</li>
+    <li><code>uv + float2(x, y) * texel</code>: 중심 UV에서 (x,y)만큼 텍셀 단위로 이동한 <strong>샘플 위치</strong>.</li>
+    <li><code>current - bias</code>: 비교에 쓸 <strong>참조 깊이</strong>. bias만큼 당겨(작게 해) 여유를 줬습니다.</li>
+  </ol>
+  <p>
+    하드웨어는 각 위치에서 "<code>(current − bias) ≤ 저장깊이</code>?"를 판정해 통과하면 1, 아니면 0을 내는데,
+    LINEAR 필터 덕에 그 0/1을 인접 텍셀끼리 <strong>이중선형 보간</strong>해 부드러운 소수값을 돌려줍니다.
+    <code>lit</code>은 "이 위치가 얼마나 빛을 받는가"(1=빛, 0=그림자).
+  </p>
+  <p>
+    <code>shadow += 1.0 - lit;</code> — 우리가 원하는 건 그림자<em>량</em>이라 <code>1 − lit</code>(=그림자 정도)로 뒤집어 누적합니다.
+    9번 돌고 나면 <code>return shadow / 9.0;</code>으로 <strong>평균</strong>을 냅니다. 9개 중 몇 개가 그림자였느냐의 비율이라,
+    경계에서 0/1이 아니라 0.11, 0.44, 0.78 같은 중간값이 나와 <strong>계단이 사라지고 부드러워집니다</strong>.
+  </p>
+  <p>
+    마지막 주석 <code>float3 color = ambient + (1.0 - shadowCalc(...)) * (diffuse + specular);</code>이 사용 예입니다.
+    <code>shadowCalc</code>가 1(완전 그림자)이면 <code>1 − 1 = 0</code>이 되어 diffuse·specular가 0으로 꺼지고 ambient만 남습니다.
+    반대로 0(완전 빛)이면 diffuse·specular가 온전히 더해집니다. <strong>ambient는 항상 남겨</strong> 그림자 속이 완전 검정이 되지 않게 합니다.
+  </p>
+
+  <h3>2-5. 손계산 예제 — 값이 실제로 어떻게 흐르는가</h3>
+  <p>
+    구체적인 수치로 한 픽셀을 따라가 봅시다. 어떤 픽셀의 광원 클립 좌표가
+    <code>fragPosLS = (0.4, 0.6, 0.73, 1.0)</code>이고, 법선과 광원 방향의 내적 <code>N·L = 0.8</code>이라고 합시다.
+  </p>
+  <ol class="steps">
+    <li>원근 분할: w=1이므로 <code>proj = (0.4, 0.6, 0.73)</code>.</li>
+    <li>UV 매핑: <code>u = 0.4×0.5 + 0.5 = 0.7</code>, <code>v = 0.6×(−0.5) + 0.5 = 0.2</code>. → 샘플 중심 (0.7, 0.2).</li>
+    <li>참조 깊이: <code>current = 0.73</code>. 1.0 이하이므로 계속 진행.</li>
+    <li>bias: <code>max(0.05×(1−0.8), 0.005) = max(0.01, 0.005) = 0.01</code>. → 비교값 <code>current − bias = 0.72</code>.</li>
+    <li>PCF: 9개 이웃 각각에서 "0.72 ≤ 저장깊이?"를 판정. 저장깊이가 대부분 0.72라면(같은 표면), 여유 0.01 덕에 통과(빛)가 많아 acne가 안 생김. 만약 앞에 물체가 있어 저장깊이가 0.5라면 0.72 > 0.5라 대부분 그림자 → shadow ≈ 1.0에 가까워짐.</li>
+  </ol>
+  <p>
+    예컨대 9개 중 3개만 그림자였다면 <code>shadow = 3/9 ≈ 0.33</code>. 최종 색은
+    <code>ambient + (1 − 0.33)×(diffuse+specular) = ambient + 0.67×(diffuse+specular)</code>로, 부분 그림자(반그늘)가 됩니다.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>3. C++ ↔ HLSL ↔ DirectXMath 대응표</h2>
+  <p>
+    지금까지 나온 조각들이 어느 API에 대응하는지 한눈에 정리합니다. 실무에서는 아래 오른쪽 열(DirectXMath/D3D API)을 그대로 씁니다.
+  </p>
+  <table class="impl">
+    <tr><th>개념 / 원본 코드</th><th>대응 API</th><th>역할</th></tr>
+    <tr><td>깊이 텍스처 (양면 뷰)</td><td><code>CreateTexture2D</code> + TYPELESS 포맷</td><td>DSV·SRV로 동시에 쓸 통</td></tr>
+    <tr><td>깊이 쓰기 뷰</td><td><code>CreateDepthStencilView</code> (D24_UNORM_S8_UINT)</td><td>1패스 깊이 기록 타깃</td></tr>
+    <tr><td>깊이 읽기 뷰</td><td><code>CreateShaderResourceView</code> (R24_UNORM_X8_TYPELESS)</td><td>2패스에서 셰이더가 읽음</td></tr>
+    <tr><td>비교 샘플러</td><td><code>D3D11_FILTER_COMPARISON_...</code> + <code>LESS_EQUAL</code></td><td><code>SampleCmp</code> + HW PCF 보간</td></tr>
+    <tr><td>직교 투영 (방향광)</td><td><code>XMMatrixOrthographicOffCenterLH</code></td><td>평행광용 light-space proj</td></tr>
+    <tr><td>광원 뷰 행렬</td><td><code>XMMatrixLookAtLH</code></td><td>빛의 위치·시선</td></tr>
+    <tr><td><code>lightView * lightProj</code></td><td>행벡터 곱 (transpose 후 cbuffer 업로드)</td><td>월드→광원 클립 변환</td></tr>
+    <tr><td>깊이만 렌더</td><td><code>OMSetRenderTargets(0, nullptr, dsv)</code></td><td>컬러 PS 생략, 고속</td></tr>
+    <tr><td>앞면 컬링 트릭</td><td><code>RasterizerState.CullMode = D3D11_CULL_FRONT</code></td><td>peter-panning 완화</td></tr>
+    <tr><td>비교 샘플 (HLSL)</td><td><code>Texture2D.SampleCmp</code></td><td>참조깊이 ≤ 저장깊이 → 0/1 보간</td></tr>
+  </table>
+
+  <div class="callout">
+    <span class="tag">규약</span>
+    <strong>cbuffer 업로드 시 transpose 주의.</strong> <code>DirectXMath</code>는 행벡터·행 우선이지만 HLSL의 <code>mul(v, M)</code>이
+    기대하는 상수 버퍼 레이아웃과 맞추려면, C++에서 <code>lightSpace</code>를 <code>XMMatrixTranspose(lightSpace)</code>로 뒤집어
+    업로드하는 것이 일반적입니다(프로젝트 관례에 따라 다름). 셰이더에서 그림자가 엉뚱한 방향으로 찍힌다면 가장 먼저 이 transpose와
+    곱 순서를 의심하세요.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. 정리 — 섀도우 맵 체크리스트</h2>
+  <ol class="steps">
+    <li>깊이 텍스처는 <strong>TYPELESS</strong>로 만들고 DSV(D24_UNORM_S8_UINT)·SRV(R24_UNORM_X8_TYPELESS) 두 뷰를 만든다.</li>
+    <li>비교 샘플러는 <code>COMPARISON</code> 필터 + <code>LESS_EQUAL</code> + BORDER(1.0)로 설정한다.</li>
+    <li>방향광은 직교 투영으로 <code>lightView * lightProj</code>(행벡터 순서)를 만든다.</li>
+    <li>1패스는 <strong>컬러 없이 깊이만</strong>, 앞면 컬링으로 그린다. 끝나면 뒷면 컬링으로 복구.</li>
+    <li>2패스는 원근 분할 → [0,1] UV(v는 뒤집기) → <code>current = proj.z</code>.</li>
+    <li>경사 기반 <strong>bias</strong>로 acne를, 앞면 컬링으로 peter-panning을 잡는다.</li>
+    <li><strong>PCF 3×3</strong>로 경계를 부드럽게. <code>SampleCmp</code>의 HW 보간을 활용한다.</li>
+    <li>SRV를 DSV와 동시에 바인딩하지 않도록 패스 사이에 언바인드한다.</li>
+  </ol>
+  <p>
+    이걸 이해하면 <strong>큐브맵 섀도우(점광원 전방향 그림자)</strong>, <strong>캐스케이드 섀도우 맵(CSM, 카메라 거리별 다중 맵)</strong>,
+    <strong>VSM/ESM(분산·지수 섀도우 맵)</strong> 같은 고급 기법도 같은 골격 위에 얹은 변주임을 알게 됩니다.
+    다음 장의 디퍼드 렌더링에서는 이 그림자를 G-buffer 기반 라이팅 패스와 결합하는 흐름을 봅니다.
+  </p>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-hdr.html">← HDR · 톤 매핑</a>
+    <a href="./06-deferred.html">디퍼드 렌더링 (Deferred Rendering) →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 지형 텍스처 잔디 (원경 LOD) — C++/DirectX 11</title>
+<meta name="description" content="먼 거리는 평면에 잔디 텍스처 한 장으로 처리하는 지형 텍스처 LOD를, 픽셀 셰이더 절차적 value noise와 근경 blade 하이브리드까지 C++/DirectX 11/HLSL로 구현." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">지형 텍스처</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 4/10</span>
+  <h1>지형 텍스처 — 원경 LOD, 사실상 공짜</h1>
+  <p class="lead">
+    카메라에서 아주 멀어지면 잔디 한 포기는 화면에서 한 픽셀도 채우지 못합니다. 그런 원경에까지
+    <a href="./08-geometry.html">지오메트리</a>나 <a href="./08-shell.html">셸</a>을 쓰는 건 낭비입니다.
+    지형 텍스처는 먼 거리를 <strong>평면에 잔디 텍스처 한 장</strong>으로 처리합니다. 정점도, 오버드로우도
+    거의 0이라 <strong>LOD 스택의 가장 값싼 마지막 단계</strong>입니다. 입체감은 없지만 멀면 어차피 안 보입니다.
+    이 페이지에서는 픽셀 셰이더에서 <strong>절차적 value noise</strong>로 잔디 색을 변주해 텍스처를 만들고,
+    근경에만 실제 blade를 겹치는 하이브리드까지 D3D11로 구현합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
+    <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>지형 평면</strong> — 크게 스케일한 지면 쿼드 하나를 그립니다.</li>
+    <li><strong>절차적 잔디 텍스처</strong> — 픽셀 셰이더에서 value noise로 잔디 색을 생성합니다(텍스처 파일 불필요).</li>
+    <li><strong>value noise</strong> — 해시 + 격자 보간으로 부드러운 노이즈를, 여러 옥타브로 합성합니다.</li>
+    <li><strong>근경 blade 하이브리드</strong> — 카메라 가까운 곳에만 지오메트리 blade를 소량 겹칩니다.</li>
+    <li><strong>LOD 스택</strong> — 근경=지오메트리, 원경=텍스처의 실제 게임식 조합을 정리합니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 지형 평면 — 정점은 4개면 충분</h2>
+  <p>
+    원경 지형은 그냥 큰 평면 한 장입니다. 정규화 좌표 쿼드(4정점)를 만들어 셰이더에서 34배 스케일해 넓게 폅니다.
+    잔디의 “무늬”는 정점이 아니라 <strong>픽셀 셰이더</strong>에서 절차적으로 만들 것이므로, 지오메트리 부담은
+    사실상 없습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_terrain.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+// 지형 평면: 정규화 좌표 (x, z) ∈ [-1, 1], 4정점 삼각형 스트립
+struct GroundVertex { float x, z; };
+
+std::vector&lt;GroundVertex&gt; makeGround() {
+    return { { -1,-1 }, { +1,-1 }, { -1,+1 }, { +1,+1 } };
+}
+
+ComPtr&lt;ID3D11Buffer&gt; g_groundVB;
+
+void createGroundBuffer(ID3D11Device* dev) {
+    auto quad = makeGround();
+    D3D11_BUFFER_DESC bd = {};
+    bd.Usage = D3D11_USAGE_IMMUTABLE;
+    bd.ByteWidth = (UINT)(quad.size() * sizeof(GroundVertex));
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sd = { quad.data(), 0, 0 };
+    dev-&gt;CreateBuffer(&amp;bd, &amp;sd, g_groundVB.GetAddressOf());
+}</code></pre>
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>지형 버텍스 셰이더</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;   // view * proj
+};
+
+struct VSIn  { float2 p : GROUND0; };
+struct VSOut { float4 pos : SV_Position; float2 v : TEXCOORD0; };
+
+VSOut main(VSIn i) {
+    VSOut o;
+    o.v   = i.p;                                    // 노이즈 좌표로 전달
+    // 넓게 펴진 평면(34배). y=0 지면.
+    float3 wp = float3(i.p.x * 34.0, 0.0, i.p.y * 34.0);
+    o.pos = mul(float4(wp, 1.0), uVP);              // 행벡터 → mul(v, M)
+    return o;
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. value noise — 해시에서 부드러운 노이즈로</h2>
+  <p>
+    잔디 텍스처를 파일로 준비하는 대신, 픽셀 셰이더에서 <strong>value noise</strong>로 즉석에서 만듭니다.
+    먼저 셀 좌표를 결정론적 해시 <code>h</code>로 난수화하고, 격자의 네 모서리 값을 <strong>부드러운 보간</strong>
+    (<code>f·f·(3-2f)</code>, smoothstep)으로 섞습니다. 이렇게 하면 격자 티가 안 나는 매끈한 노이즈가 됩니다.
+  </p>
+  <p>
+    한 옥타브만으로는 밋밋하므로, 주파수를 3배·9배로 키운 노이즈를 <code>0.6 : 0.3 : 0.1</code> 가중으로 더해
+    큰 얼룩 위에 잔무늬가 얹힌 자연스러운 지면을 만듭니다(프랙탈 합성, fBm의 축약형).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>terrain_ps.hlsl (노이즈 함수)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">// 셀 좌표 → 결정론적 해시 (WebGL 데모와 동일 상수)
+float h(float2 c) {
+    return frac(sin(dot(c, float2(41.3, 289.1))) * 43758.5453);
+}
+
+// value noise: 격자 네 모서리 해시를 smoothstep 보간
+float noise(float2 p) {
+    float2 i = floor(p);
+    float2 f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);         // smoothstep 가중
+    float a = h(i);
+    float b = h(i + float2(1, 0));
+    float c = h(i + float2(0, 1));
+    float d = h(i + float2(1, 1));
+    return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 픽셀 셰이더 — 절차적 잔디 색</h2>
+  <p>
+    이제 노이즈로 잔디 색을 만듭니다. 세 옥타브를 합성한 값 <code>n</code>으로 <strong>어두운 녹색과 밝은 녹색을
+    보간</strong>하고, 더 잔 주파수(20배) 노이즈로 미세한 밝기 변화를 곱해 얼룩을 줍니다. 텍스처 파일이 전혀 없이,
+    지형 전체 색이 픽셀 셰이더 한 번으로 계산됩니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>terrain_ps.hlsl (본체)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">struct PSIn { float4 pos : SV_Position; float2 v : TEXCOORD0; };
+
+float4 main(PSIn i) : SV_Target {
+    float2 uv = i.v * 40.0;               // 노이즈 좌표 스케일
+
+    // 3옥타브 합성(큰 얼룩 0.6 + 중간 0.3 + 잔무늬 0.1)
+    float n = noise(uv)       * 0.6
+            + noise(uv * 3.0) * 0.3
+            + noise(uv * 9.0) * 0.1;
+
+    // 어두운 녹색 ↔ 밝은 녹색
+    float3 c = lerp(float3(0.10, 0.20, 0.08),
+                    float3(0.30, 0.50, 0.18), n);
+
+    // 아주 잔 노이즈로 미세 밝기 변주(얼룩)
+    c *= 0.8 + 0.2 * noise(uv * 20.0);
+    return float4(c, 1.0);
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">사실상 공짜</span>
+    지형 텍스처의 정점은 <strong>4개</strong>뿐이고, 픽셀 셰이더는 화면을 덮는 각 픽셀에 <strong>딱 한 번</strong>씩만
+    실행됩니다(오버드로우 없음, 겹치지 않는 단일 평면). 셸이 겪던 “레이어 수만큼의 오버드로우”도, 빌보드가 겪던
+    “카드 겹침”도 여기엔 없습니다. 그래서 LOD 스택에서 가장 먼 거리를 이걸로 채우면 <strong>대부분의 화면 면적을
+    최저 비용</strong>으로 그릴 수 있습니다. 절차적 노이즈 대신 미리 구운 텍스처 + 밉맵을 쓰면 원경 앨리어싱까지
+    잡을 수 있습니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 근경 blade 하이브리드</h2>
+  <p>
+    순수 텍스처 지형은 <strong>입체감이 없어</strong> 가까이서 보면 납작합니다. 그래서 실제 게임은 카메라 가까운
+    영역에만 <strong>실제 지오메트리 blade를 소량 겹칩니다</strong>. 원경은 텍스처(공짜), 근경은 blade(품질) —
+    이 조합이 “근경에 blade 겹치기”의 정체입니다. blade는 <a href="./08-geometry.html">지오메트리 잔디</a>의
+    메시·인스턴싱을 그대로 재사용하되, 필드 반경을 작게(예: 9) 잡아 <strong>가까운 곳에만 소량</strong> 뿌립니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>근경 blade 필드 (지오메트리 편 재사용)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 지오메트리 편의 BladeVertex / GrassInstance / scatterField를 그대로 사용.
+// 차이는 "반경을 작게" 잡아 카메라 근처에만 소량 뿌리는 것.
+struct BladeVertex  { float side, t; };
+struct GrassInstance{ float posX, posZ, angle, height, phase, colVar; };
+
+ComPtr&lt;ID3D11Buffer&gt; g_bladeVB, g_nearVB;
+UINT g_bladeVerts = 0, g_nearCount = 0;
+
+void createNearBlades(ID3D11Device* dev) {
+    // SEG=5 blade 스트립
+    std::vector&lt;BladeVertex&gt; blade;
+    const int SEG = 5;
+    for (int i = 0; i &lt;= SEG; ++i) {
+        float t = (float)i / SEG;
+        blade.push_back({ -1.0f, t });
+        blade.push_back({ +1.0f, t });
+    }
+    // 반경 9로 좁게 → 근경만. 개수도 9000개로 소량.
+    auto field = scatterField(9000, 9.0f, 55);   // 지오메트리 편 함수 재사용
+    g_bladeVerts = (UINT)blade.size();
+    g_nearCount  = (UINT)field.size();
+    /* ... 지오메트리 편과 동일하게 두 VB 생성 ... */
+}</code></pre>
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>근경 blade 셰이더 (경량판)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">// 지오메트리 편의 간소화 버전(색만, 알파 없음). 근경이라 SEG=5로 충분.
+cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;
+    float uTime; float3 _pad;
+};
+struct VSIn  { float2 aB : BLADE0; float4 iA : INSTA0; float2 iC : INSTB0; };
+struct VSOut { float4 pos : SV_Position; float3 col : COLOR0; };
+
+VSOut main(VSIn i) {
+    float t = i.aB.y, side = i.aB.x, h = i.iA.w, ang = i.iA.z;
+    float w = (1.0 - t) * 0.06;
+    float sway = sin(uTime * 1.6 + i.iC.x) * 0.3 * t * t;
+    float3 dir = float3(cos(ang), 0.0, sin(ang));
+    float3 p = float3(i.iA.x, 0.0, i.iA.y);
+    p += dir * side * w; p.y += t * h; p.x += sway;
+
+    VSOut o;
+    o.col = lerp(float3(0.09, 0.22, 0.08),
+                 float3(0.35, 0.62, 0.20), t) * lerp(0.4, 1.0, t);
+    o.pos = mul(float4(p, 1.0), uVP);
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    하이브리드에서 근경 blade와 지형 텍스처의 <strong>색 톤이 어긋나면</strong> 경계가 눈에 띕니다(가까운 곳만
+    갑자기 색이 다른 띠). 두 셰이더의 녹색 팔레트를 같은 값으로 맞추고(위 코드는 지형·blade 모두 유사 녹색 사용),
+    blade가 사라지는 거리 근처에서 <strong>알파나 스케일로 부드럽게 페이드아웃</strong>시키면 전환이 자연스럽습니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>5. 드로우 — 지형 먼저, 근경 blade는 옵션</h2>
+  <p>
+    항상 지형 평면을 먼저 그리고, LOD가 켜져 있으면 그 위에 근경 blade를 얹습니다. 둘 다 불투명이므로
+    <strong>깊이 테스트 ON · 블렌드 OFF</strong>. 지형이 먼저 깊이를 채워 두면 blade가 지형 뒤로 잠기는 일 없이
+    자연스럽게 위로 서 있습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void drawTerrain(ID3D11DeviceContext* ctx, bool lodNearBlades) {
+    // ① 지형 평면(원경 텍스처) — 항상
+    UINT gs = sizeof(GroundVertex), go = 0;
+    ctx-&gt;IASetInputLayout(g_terrLayout.Get());
+    ctx-&gt;IASetVertexBuffers(0, 1, g_groundVB.GetAddressOf(), &amp;gs, &amp;go);
+    ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    ctx-&gt;VSSetShader(g_terrVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_terrPS.Get(), nullptr, 0);
+    ctx-&gt;VSSetConstantBuffers(0, 1, g_frameCB.GetAddressOf());
+    ctx-&gt;PSSetConstantBuffers(0, 1, g_frameCB.GetAddressOf());
+    ctx-&gt;DrawInstanced(4, 1, 0, 0);           // 평면 한 장
+
+    // ② 근경 blade(하이브리드) — 옵션
+    if (lodNearBlades) {
+        UINT strides[2] = { sizeof(BladeVertex), sizeof(GrassInstance) };
+        UINT offsets[2] = { 0, 0 };
+        ID3D11Buffer* vbs[2] = { g_bladeVB.Get(), g_nearVB.Get() };
+        ctx-&gt;IASetInputLayout(g_bladeLayout.Get());
+        ctx-&gt;IASetVertexBuffers(0, 2, vbs, strides, offsets);
+        ctx-&gt;VSSetShader(g_bladeVS.Get(), nullptr, 0);
+        ctx-&gt;PSSetShader(g_bladePS.Get(), nullptr, 0);
+        ctx-&gt;DrawInstanced(g_bladeVerts, g_nearCount, 0, 0);   // 근경만 소량
+    }
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">LOD 스택의 마지막 단계</span>
+    실제 게임은 거리에 따라 기법을 갈아 끼웁니다. 가장 가까운 곳은 <a href="./08-geometry.html">지오메트리 blade</a>
+    (최고 품질), 중거리는 <a href="./08-billboard.html">빌보드</a>나 <a href="./08-shell.html">셸</a>, 그리고 원경은
+    <strong>이 지형 텍스처</strong>(최저 비용)입니다. 화면 면적의 대부분을 차지하는 원경을 가장 싼 기법으로 덮고,
+    비싼 지오메트리는 눈앞의 좁은 영역에만 쓰는 것 — 이것이 잔디 LOD 스택의 핵심 아이디어입니다.
+    거리 밴드 전환과 페이드는 <a href="./07-lod.html">7장 LOD·컬링</a>의 원리를 그대로 적용합니다.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>원경은 <strong>평면 한 장 + 픽셀 셰이더 절차적 노이즈</strong> — 정점·오버드로우 거의 0, 텍스처 파일도 불필요.</li>
+    <li>잔디 색은 <strong>value noise 3옥타브 합성</strong>으로 큰 얼룩 위에 잔무늬를 얹어 만든다.</li>
+    <li>납작함은 <strong>근경 blade 하이브리드</strong>로 보완 — 가까운 곳에만 지오메트리를 소량 겹친다.</li>
+    <li>둘 다 불투명 → <strong>깊이 ON · 블렌드 OFF</strong>, 지형을 먼저 그려 깊이를 채운다.</li>
+    <li>지형 텍스처는 <strong>LOD 스택의 가장 값싼 마지막 단계</strong> — 대부분의 화면 면적을 최저 비용으로 덮는다.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-shell.html">← 셸 텍스처링</a>
+    <a href="./08-raymarch.html">볼류메트릭 레이마칭 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

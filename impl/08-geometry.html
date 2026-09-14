@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 지오메트리 잔디 (GPU 인스턴싱) — C++/DirectX 11</title>
+<meta name="description" content="삼각형 스트립 blade 한 포기를 수만 개로 인스턴싱하고 버텍스 셰이더에서 sin 바람을 넣는 지오메트리 잔디를 C++/DirectX 11/HLSL로 한 줄 한 줄 구현." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">지오메트리 잔디</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 1/10</span>
+  <h1>지오메트리 잔디 — GPU 인스턴싱 + 버텍스 바람</h1>
+  <p class="lead">
+    가장 정직한 방법입니다. 잔디 한 포기(blade)를 <strong>진짜 삼각형 스트립 메시</strong>로 만들고,
+    똑같은 그 메시를 위치·키·방향만 바꿔 <strong>수만 개 인스턴싱</strong>해 <strong>드로우콜 한 번</strong>으로 그립니다.
+    바람은 텍스처를 읽지 않고 <strong>버텍스 셰이더에서 <code>sin</code></strong>으로 계산해 픽셀 부하 없이 흔듭니다.
+    품질이 가장 높지만 <em>정점 수가 곧 비용</em>이라 근거리에 적합합니다. 이 페이지에서 blade 메시 구성부터
+    인스턴스 정점 버퍼, 입력 레이아웃의 per-instance 분류, 바람 수식까지 <strong>성분 하나까지</strong> 풀어봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
+    <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>blade 메시</strong> — 잔디 한 포기를 (좌/우, 높이비율) 정점 쌍의 삼각형 스트립으로 만듭니다.</li>
+    <li><strong>인스턴스 데이터</strong> — 포기마다 위치·방향·키·위상을 담은 두 번째 정점 버퍼를 만듭니다.</li>
+    <li><strong>입력 레이아웃</strong> — 정점당 데이터와 인스턴스당 데이터를 두 슬롯으로 나눠 GPU에 알려줍니다.</li>
+    <li><strong>버텍스 바람</strong> — 뿌리는 고정, 끝으로 갈수록 크게 흔들리도록 <code>t²</code> 가중 <code>sin</code>을 더합니다.</li>
+    <li><strong>단일 드로우콜</strong> — <code>DrawInstanced</code> 한 번으로 수만 포기를 그리고, 거리 컬링으로 개수를 줄입니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. blade 한 포기 = 삼각형 스트립</h2>
+  <p>
+    잔디 한 포기는 아래가 넓고 위가 뾰족한 길쭉한 삼각형 띠입니다. 이걸 <strong>삼각형 스트립</strong>으로 만들면
+    정점이 최소로 듭니다. 세로로 <code>SEG</code>단을 나누고, 각 단마다 <strong>좌·우 두 정점</strong>을 찍습니다.
+    정점에는 실제 위치가 아니라 <strong>“좌(-1)냐 우(+1)냐”</strong>와 <strong>“밑(0)에서 끝(1)까지의 높이비율 t”</strong>
+    두 값만 넣습니다. 실제 3D 위치는 버텍스 셰이더에서 인스턴스 정보와 합쳐 계산합니다. 이렇게 하면 <em>메시는 딱 하나</em>고,
+    포기마다 다른 건 전부 인스턴스 데이터로 빠집니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_geometry.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+// 정점당 데이터: (side, t)
+//  side = -1(왼쪽) / +1(오른쪽),  t = 0(뿌리) .. 1(끝)
+struct BladeVertex { float side; float t; };
+
+// blade 한 포기의 삼각형 스트립 정점을 만든다.
+// SEG단이면 정점은 (SEG+1)*2개. 좌·우를 번갈아 찍으면 스트립이 지그재그로 채워진다.
+std::vector&lt;BladeVertex&gt; makeBlade(int SEG) {
+    std::vector&lt;BladeVertex&gt; v;
+    v.reserve((SEG + 1) * 2);
+    for (int i = 0; i &lt;= SEG; ++i) {
+        float t = (float)i / SEG;
+        v.push_back({ -1.0f, t });   // 왼쪽
+        v.push_back({ +1.0f, t });   // 오른쪽
+    }
+    return v;                        // 그릴 때 TRIANGLESTRIP 토폴로지로 그린다
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">왜 스트립인가</span>
+    삼각형 리스트라면 단마다 삼각형 2개 × 정점 3개가 필요하지만, 스트립은 새 정점 하나가 이전 두 정점과
+    자동으로 삼각형을 이룹니다. <code>SEG=6</code>이면 정점 14개로 blade 하나 완성 — 인스턴싱으로 수만 번 재생될
+    메시라 정점 하나가 아깝습니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. 포기마다 다른 것 = 인스턴스 데이터</h2>
+  <p>
+    이제 “어디에, 어느 방향으로, 얼마나 크게, 언제 흔들릴지”를 포기마다 정합니다. 이 값들은 <strong>정점마다가 아니라
+    포기(인스턴스)마다</strong> 하나씩 있으면 됩니다. 그래서 <strong>두 번째 정점 버퍼</strong>에 인스턴스당 한 개씩 담고,
+    GPU에게 “이건 정점이 바뀔 때가 아니라 <em>인스턴스가 바뀔 때</em> 넘어가는 데이터”라고 알려줄 겁니다(3절).
+  </p>
+  <p>
+    필드는 <strong>결정론적 난수</strong>로 원판 안에 흩뿌립니다. 같은 시드면 늘 같은 배치라 프레임마다 안 흔들립니다.
+    극좌표에서 반지름을 <code>sqrt(rand)</code>로 뽑는 이유는, 그냥 <code>rand</code>를 쓰면 중심에 몰리기 때문입니다
+    (면적은 반지름 제곱에 비례하므로 균일 분포를 원하면 제곱근을 취해야 합니다).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_geometry.hpp (이어서)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 인스턴스당 데이터 (6 float = 24바이트). HLSL 입력과 바이트 배치를 맞춘다.
+//  posXZ : 지면 위 위치(x, z)
+//  angle : blade가 향한 방위각
+//  height: 키
+//  phase : 바람 sin의 위상(포기마다 다르게 흔들리도록)
+//  colVar: 색 변주
+struct GrassInstance {
+    float posX, posZ;   // offset  0 : float4 앞 2개
+    float angle;        // offset  8
+    float height;       // offset 12
+    float phase;        // offset 16 : float2 앞
+    float colVar;       // offset 20
+};
+static_assert(sizeof(GrassInstance) == 24, "stride 24로 맞춰야 입력 레이아웃과 일치");
+
+std::vector&lt;GrassInstance&gt; scatterField(int count, float radius, uint32_t seed) {
+    // 해시 기반 결정론적 난수 (WebGL 데모의 field()와 동일한 감각)
+    float s = (float)seed;
+    auto rnd = [&amp;]() {
+        s = std::sin(s * 12.9898f + 78.233f) * 43758.5453f;
+        return s - std::floor(s);               // 0..1
+    };
+    std::vector&lt;GrassInstance&gt; out(count);
+    for (int i = 0; i &lt; count; ++i) {
+        float a = rnd() * 6.2831853f;            // 방위
+        float r = std::sqrt(rnd()) * radius;     // 균일 분포용 sqrt
+        out[i].posX   = std::cos(a) * r;
+        out[i].posZ   = std::sin(a) * r;
+        out[i].angle  = rnd() * 6.2831853f;
+        out[i].height = 0.8f + rnd() * 0.9f;     // 0.8 .. 1.7
+        out[i].phase  = rnd() * 6.2831853f;
+        out[i].colVar = rnd();
+    }
+    return out;
+}</code></pre>
+  </div>
+
+  <p>두 버퍼(정점·인스턴스)를 만드는 코드입니다. 둘 다 <code>IMMUTABLE</code>로 한 번만 올립니다.</p>
+  <div class="code">
+    <div class="code-head"><span>버퍼 생성</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">ComPtr&lt;ID3D11Buffer&gt; g_bladeVB;    // 슬롯 0: 정점당
+ComPtr&lt;ID3D11Buffer&gt; g_instVB;     // 슬롯 1: 인스턴스당
+UINT g_bladeVertexCount = 0;
+UINT g_instanceCount = 0;
+
+void createGrassBuffers(ID3D11Device* dev) {
+    auto blade = makeBlade(6);                 // SEG=6 → 14정점
+    auto field = scatterField(120000, 30.0f, 1234);  // 최대 12만 포기
+    g_bladeVertexCount = (UINT)blade.size();
+    g_instanceCount    = (UINT)field.size();
+
+    auto makeVB = [&amp;](const void* data, UINT bytes, ComPtr&lt;ID3D11Buffer&gt;&amp; out) {
+        D3D11_BUFFER_DESC bd = {};
+        bd.Usage = D3D11_USAGE_IMMUTABLE;
+        bd.ByteWidth = bytes;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA sd = { data, 0, 0 };
+        dev-&gt;CreateBuffer(&amp;bd, &amp;sd, out.GetAddressOf());
+    };
+    makeVB(blade.data(), (UINT)(blade.size() * sizeof(BladeVertex)), g_bladeVB);
+    makeVB(field.data(), (UINT)(field.size() * sizeof(GrassInstance)), g_instVB);
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 입력 레이아웃 — 정점당 vs 인스턴스당</h2>
+  <p>
+    핵심은 <code>D3D11_INPUT_ELEMENT_DESC</code>의 <strong>두 필드</strong>입니다.
+    <code>InputSlot</code>은 “이 데이터가 몇 번 정점 버퍼에서 오는가”(0=blade, 1=인스턴스)이고,
+    <code>InputSlotClass</code>가 <code>PER_VERTEX_DATA</code>냐 <code>PER_INSTANCE_DATA</code>냐를 가릅니다.
+    per-instance로 지정하고 <code>InstanceDataStepRate=1</code>로 두면 <strong>인스턴스가 하나 넘어갈 때마다</strong>
+    포인터가 24바이트 전진합니다. 정점이 바뀔 땐 그대로죠. 이게 인스턴싱의 전부입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>입력 레이아웃</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">D3D11_INPUT_ELEMENT_DESC layout[] = {
+    // ── 슬롯 0: blade 정점당 (side, t) ──
+    { "BLADE",    0, DXGI_FORMAT_R32G32_FLOAT,       0, 0,
+      D3D11_INPUT_PER_VERTEX_DATA,   0 },
+    // ── 슬롯 1: 인스턴스당 ──
+    // posXZ + angle + height 를 float4 하나로 (offset 0)
+    { "INSTA",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0,
+      D3D11_INPUT_PER_INSTANCE_DATA, 1 },     // StepRate=1
+    // phase + colVar 를 float2 로 (offset 16)
+    { "INSTB",    0, DXGI_FORMAT_R32G32_FLOAT,       1, 16,
+      D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+};
+dev-&gt;CreateInputLayout(layout, 3, vsBlob-&gt;GetBufferPointer(),
+                       vsBlob-&gt;GetBufferSize(), g_layout.GetAddressOf());</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    per-instance 원소의 <code>AlignedByteOffset</code>은 <strong>같은 슬롯 안</strong>에서의 바이트 위치입니다.
+    <code>INSTA</code>는 0, <code>INSTB</code>는 16. 이 숫자가 <code>GrassInstance</code> 구조체의 실제 오프셋과
+    어긋나면 잔디가 엉뚱한 곳에 서거나 색이 깨집니다. <code>static_assert(sizeof==24)</code>로 못 박아 둔 이유입니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 버텍스 셰이더 — blade를 세우고 바람을 넣는다</h2>
+  <p>
+    이제 정점당 <code>(side, t)</code>와 인스턴스당 <code>(pos, angle, height, phase, colVar)</code>를 받아
+    <strong>실제 월드 위치</strong>를 만듭니다. 폭은 <code>(1-t)*0.06</code>으로 위로 갈수록 좁혀 뾰족하게,
+    높이는 <code>t*height</code>로 세웁니다. 방위각 <code>angle</code>로 좌우 오프셋을 회전시켜 포기마다 방향을 다르게 합니다.
+  </p>
+  <p>
+    바람은 <strong><code>t²</code> 가중</strong>이 포인트입니다. 뿌리(<code>t=0</code>)는 흔들리면 안 되고 끝으로 갈수록 크게
+    휘어야 자연스럽습니다. 서로 다른 두 주파수의 <code>sin</code>을 섞고 <code>phase</code>로 포기마다 어긋나게 해
+    “밭 전체가 한 박자로 출렁이는” 인공적인 느낌을 없앱니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;   // view * proj (행벡터 관례)
+    float uTime;
+    float uWind;              // 바람 세기
+    float2 _pad;
+};
+
+struct VSIn {
+    float2 blade : BLADE0;    // (side, t)
+    float4 ia    : INSTA0;    // (posX, posZ, angle, height)
+    float2 ib    : INSTB0;    // (phase, colVar)
+};
+struct VSOut {
+    float4 pos : SV_Position;
+    float3 col : COLOR0;
+    float  t   : TEXCOORD0;
+};
+
+VSOut main(VSIn i) {
+    float side = i.blade.x;
+    float t    = i.blade.y;
+    float2 root = i.ia.xy;
+    float  ang  = i.ia.z;
+    float  h    = i.ia.w;
+    float  phase = i.ib.x;
+    float  colVar = i.ib.y;
+
+    float w = (1.0 - t) * 0.06;              // 위로 갈수록 좁아짐
+
+    // 두 주파수 sin을 섞고, 끝(t²)일수록 크게 흔든다
+    float sway = (sin(uTime * 1.6 + phase + root.x * 0.3)
+                + 0.4 * sin(uTime * 3.1 + phase * 1.7)) * 0.5 * uWind * t * t;
+
+    float3 dir = float3(cos(ang), 0.0, sin(ang));
+    float3 p = float3(root.x, 0.0, root.y);
+    p += dir * side * w;                      // 좌/우 폭
+    p.y += t * h;                             // 세우기
+    p.x += sway * 0.9;                        // 바람으로 휘기
+    p.z += sway * 0.5;
+
+    // 뿌리는 어둡고 끝은 밝게 + 포기별 색 변주
+    float3 c = lerp(float3(0.09, 0.22, 0.08), float3(0.35, 0.62, 0.20), t)
+             * lerp(0.8, 1.15, colVar);
+    VSOut o;
+    o.col = c * lerp(0.4, 1.0, t);           // 아래쪽 AO 느낌
+    o.t   = t;
+    o.pos = mul(float4(p, 1.0), uVP);        // 행벡터 → mul(v, M)
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>grass_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">struct PSIn {
+    float4 pos : SV_Position;
+    float3 col : COLOR0;
+    float  t   : TEXCOORD0;
+};
+
+float4 main(PSIn i) : SV_Target {
+    // 끝부분에 살짝 노란기를 더해 하이라이트
+    float3 tip = float3(0.04, 0.07, 0.02) * pow(i.t, 3.0);
+    return float4(i.col + tip, 1.0);
+}</code></pre>
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">SV_Position과 mul 순서</span>
+    행벡터 규약이므로 <code>mul(v, M)</code>입니다(열벡터 GL 자료의 <code>M*v</code>와 반대). cbuffer 행렬에
+    <code>row_major</code>를 붙이고 C++에서 <code>XMMatrixTranspose</code> 없이 그대로 올리거나, 기본
+    <code>column_major</code>를 쓸 거면 업로드 전에 전치해야 합니다. 이 시리즈는 <code>row_major</code>로 통일합니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>5. 드로우 — 단일 콜 + 거리 컬링</h2>
+  <p>
+    두 정점 버퍼를 한 번에 바인딩합니다. <code>IASetVertexBuffers</code>에 <strong>배열로</strong> 넘기면 슬롯 0·1에
+    각각 꽂힙니다. 토폴로지는 <code>TRIANGLESTRIP</code>. 그리고 <code>DrawInstanced</code> 한 번이면 끝 — 인스턴스가
+    12만 개여도 <strong>드로우콜은 1</strong>입니다. 스트립은 인스턴스 경계를 넘어 이어지지 않으니(인스턴스마다 정점
+    범위를 새로 재생) 포기들이 붙지 않습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void drawGrass(ID3D11DeviceContext* ctx, float wind, float cullRatio) {
+    UINT strides[2] = { sizeof(BladeVertex), sizeof(GrassInstance) };
+    UINT offsets[2] = { 0, 0 };
+    ID3D11Buffer* vbs[2] = { g_bladeVB.Get(), g_instVB.Get() };
+
+    ctx-&gt;IASetInputLayout(g_layout.Get());
+    ctx-&gt;IASetVertexBuffers(0, 2, vbs, strides, offsets);   // 슬롯 0,1 동시
+    ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    ctx-&gt;VSSetShader(g_vs.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_ps.Get(), nullptr, 0);
+    ctx-&gt;VSSetConstantBuffers(0, 1, g_frameCB.GetAddressOf());
+
+    // 거리 컬링: 먼 잔디는 안 그린다(여기선 개수만 줄이는 근사).
+    UINT n = (UINT)(g_instanceCount * cullRatio);
+
+    // DrawInstanced(정점수/인스턴스, 인스턴스수, 시작정점, 시작인스턴스)
+    ctx-&gt;DrawInstanced(g_bladeVertexCount, n, 0, 0);
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">진짜 컬링은 GPU에서</span>
+    위 예제는 “앞에서부터 n개만” 그리는 근사입니다. 실전에서는 <strong>컴퓨트 셰이더</strong>가 프러스텀·거리
+    테스트를 돌려 살아남은 인스턴스만 <code>AppendStructuredBuffer</code>에 모으고, 그 개수를
+    <code>DrawInstancedIndirect</code>로 넘깁니다(CPU가 개수를 몰라도 됨). 프러스텀 평면 추출은
+    <a href="./07-lod.html">7장 LOD·컬링</a>에서 다뤘습니다. 저사양 기기는 버텍스 SSBO가 불안정하니
+    RenderTexture(UAV) 우회를 씁니다.
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    깊이 테스트를 켜세요(<code>OMSetDepthStencilState</code> 기본 또는 depth-write ON). 잔디는 불투명이라
+    블렌딩이 필요 없고 <strong>Z버퍼로 앞뒤를 정리</strong>하는 게 정답입니다. 반대로 빌보드(2번 문서)는
+    알파 카드라 이야기가 달라집니다.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>메시는 <strong>하나</strong>(blade 스트립), 포기마다 다른 건 전부 <strong>인스턴스 버퍼</strong>로.</li>
+    <li>입력 레이아웃의 <strong><code>PER_INSTANCE_DATA</code> + StepRate 1</strong>이 인스턴싱의 심장.</li>
+    <li>바람은 <strong>버텍스에서 <code>t²·sin</code></strong> — 픽셀 부하 0, 뿌리 고정.</li>
+    <li>불투명이므로 <strong>Z버퍼 ON</strong>, 대량 컬링은 <strong>컴퓨트 + Indirect</strong>로.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-grass.html">← 8장 허브</a>
+    <a href="./08-billboard.html">빌보드 / 크로스쿼드 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 툰 / 스타일라이즈드 잔디 (Breath of the Wild 풍) — C++/DirectX 11</title>
+<meta name="description" content="라이팅을 2~3단계로 밴딩하고 뿌리는 어둡게(AO), 끝은 하이라이트를 얹는 툰 스타일라이즈드 잔디를 넓적한 잎 + 바람 sin과 함께 C++/DirectX 11/HLSL로 구현." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">툰 / 스타일라이즈드</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 8/10</span>
+  <h1>툰 / 스타일라이즈드 잔디 — Breath of the Wild 풍</h1>
+  <p class="lead">
+    사실적 라이팅 대신 <strong>납작한 툰 셰이딩</strong>을 얹습니다. 연속적인 밝기 값을 픽셀에서
+    <strong>2~3단계로 밴딩</strong>(<code>floor(x*bands)/bands</code>)해 만화 같은 계단 톤을 만들고,
+    뿌리는 어둡게(AO 그라디언트), 끝은 밝게 하이라이트를 줍니다. blade는 사실적 잔디보다
+    <strong>넓적한 잎</strong>으로 만들어 실루엣을 강조하고, 바람은 여전히 버텍스에서 <code>sin</code>으로 흔듭니다.
+    앞서 만든 <a href="./08-geometry.html">지오메트리 잔디</a>의 인스턴싱 파이프라인을 그대로 재사용하고,
+    <strong>blade 폭과 픽셀 셰이더의 밴딩</strong>만 갈아끼우면 되는 게 이 기법의 매력입니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
+    <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>넓적한 blade</strong> — 지오메트리 blade를 그대로 쓰되 버텍스에서 폭을 키워 넓은 잎을 만듭니다.</li>
+    <li><strong>밴딩용 값 전달</strong> — 픽셀 셰이더가 밴딩할 밝기 <code>t</code>와 색 변주 <code>colVar</code>를 넘깁니다.</li>
+    <li><strong>색 밴딩</strong> — 픽셀에서 <code>floor(g*bands)/(bands-1)</code>로 계단 톤을 만듭니다.</li>
+    <li><strong>AO · 하이라이트</strong> — 뿌리는 어둡게, 끝 근처는 하이라이트 색을 섞습니다.</li>
+    <li><strong>밴드 수 uniform</strong> — cbuffer로 밴드 개수를 넘겨 실시간으로 만화↔부드러움을 조절합니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 넓적한 잎 — 폭만 키운 blade</h2>
+  <p>
+    툰 스타일의 실루엣은 <strong>넓적한 잎</strong>에서 나옵니다. 메시 자체는 <a href="./08-geometry.html">지오메트리
+    잔디</a>에서 만든 삼각형 스트립 blade를 <strong>그대로 재사용</strong>합니다. 정점당 데이터는 여전히
+    <code>(side, t)</code> 두 값뿐이고, 인스턴스 버퍼도 동일합니다. 달라지는 건 버텍스 셰이더에서 폭을 계산하는
+    수식 하나입니다. 사실적 blade는 <code>(1-t)*0.06</code>으로 위로 갈수록 급히 좁아졌지만, 툰은
+    <code>(1 - t*0.6)*0.11</code>로 <strong>더 넓게, 덜 좁아지게</strong> 만들어 잎처럼 보이게 합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_toon.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+// 08-geometry.html 과 동일한 blade / 인스턴스 구조를 재사용한다.
+struct BladeVertex { float side; float t; };      // side=-1/+1, t=0..1
+
+// 인스턴스당 데이터 (6 float = 24바이트)
+struct GrassInstance {
+    float posX, posZ;   // offset  0
+    float angle;        // offset  8
+    float height;       // offset 12
+    float phase;        // offset 16
+    float colVar;       // offset 20
+};
+static_assert(sizeof(GrassInstance) == 24, "stride 24로 입력 레이아웃과 일치");
+
+// 넓적한 잎이라도 정점 수는 그대로. SEG=4면 충분(툰은 디테일보다 실루엣).
+std::vector&lt;BladeVertex&gt; makeBlade(int SEG) {
+    std::vector&lt;BladeVertex&gt; v;
+    v.reserve((SEG + 1) * 2);
+    for (int i = 0; i &lt;= SEG; ++i) {
+        float t = (float)i / SEG;
+        v.push_back({ -1.0f, t });
+        v.push_back({ +1.0f, t });
+    }
+    return v;                          // TRIANGLESTRIP 로 그린다
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">세그먼트를 줄여도 된다</span>
+    사실적 잔디는 곡선 실루엣 때문에 <code>SEG=6</code>을 썼지만, 툰은 색이 계단이라
+    <strong>구부러짐이 잘 안 보입니다</strong>. <code>SEG=4</code>(정점 10개)로 낮춰 대량 인스턴스의
+    정점 부하를 줄여도 실루엣 손해가 거의 없습니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. 필드 흩뿌리기 (지오메트리와 동일)</h2>
+  <p>
+    포기의 위치·방향·키·위상은 <a href="./08-geometry.html">지오메트리 잔디</a>와 같은 방식으로
+    <strong>결정론적 해시 난수</strong>로 원판 안에 흩뿌립니다. 반지름을 <code>sqrt(rand)</code>로 뽑아
+    중심 쏠림을 막는 것도 동일합니다. 재사용이므로 짧게만 싣습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_toon.hpp (이어서)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">std::vector&lt;GrassInstance&gt; scatterField(int count, float radius, uint32_t seed) {
+    float s = (float)seed;
+    auto rnd = [&amp;]() {
+        s = std::sin(s * 12.9898f + 78.233f) * 43758.5453f;
+        return s - std::floor(s);              // 0..1
+    };
+    std::vector&lt;GrassInstance&gt; out(count);
+    for (int i = 0; i &lt; count; ++i) {
+        float a = rnd() * 6.2831853f;
+        float r = std::sqrt(rnd()) * radius;   // 균일 분포
+        out[i].posX   = std::cos(a) * r;
+        out[i].posZ   = std::sin(a) * r;
+        out[i].angle  = rnd() * 6.2831853f;
+        out[i].height = 0.8f + rnd() * 0.9f;
+        out[i].phase  = rnd() * 6.2831853f;
+        out[i].colVar = rnd();                 // 툰에서 잎마다 밝기 변주로 씀
+    }
+    return out;
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. cbuffer — 밴드 수를 uniform으로</h2>
+  <p>
+    툰의 핵심 조절 값은 <strong>색 밴드 수</strong>입니다. 밴드를 2로 줄이면 극단적인 만화가 되고, 6으로 늘리면
+    거의 부드러운 그라디언트가 됩니다. 이 값을 픽셀 셰이더에서 써야 하므로 프레임 상수 버퍼에 담아 넘깁니다.
+    바람 세기 <code>uWind</code>도 같이 넣습니다. 행렬은 규약대로 <code>row_major</code>로 저장합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>toon_cbuffer.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// HLSL cbuffer 와 바이트 레이아웃을 맞춘다(16바이트 정렬 주의).
+struct ToonFrameCB {
+    XMFLOAT4X4 vp;      // view * proj (row_major)
+    float time;         // 애니메이션 시간
+    float wind;         // 바람 세기
+    float bands;        // 색 밴드 수(2..6). float로 넘겨 셰이더에서 나눗셈에 씀
+    float _pad;         // 16바이트 정렬용
+};
+static_assert(sizeof(ToonFrameCB) % 16 == 0, "cbuffer는 16바이트 배수여야 함");
+
+void updateToonCB(ID3D11DeviceContext* ctx, ID3D11Buffer* cb,
+                  const XMMATRIX&amp; viewProj, float time, float wind, int bands) {
+    ToonFrameCB data;
+    XMStoreFloat4x4(&amp;data.vp, viewProj);   // 전치 없이 그대로(row_major 규약)
+    data.time  = time;
+    data.wind  = wind;
+    data.bands = (float)bands;
+    data._pad  = 0.0f;
+    ctx-&gt;UpdateSubresource(cb, 0, nullptr, &amp;data, 0, 0);
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 버텍스 셰이더 — 넓은 잎 + 바람</h2>
+  <p>
+    구조는 지오메트리 잔디와 같지만 두 군데가 다릅니다. 첫째, 폭을 <code>(1 - t*0.6)*0.11</code>로 키워
+    <strong>넓적한 잎</strong>을 만듭니다. 둘째, 픽셀에서 밴딩할 것이므로 여기서는 색을 거의 계산하지 않고
+    <strong>밝기용 <code>t</code>와 색 변주 <code>colVar</code>만</strong> 픽셀 셰이더로 넘깁니다.
+    바람은 두 주파수 <code>sin</code>을 <code>t²</code> 가중으로 섞어 뿌리는 고정, 끝은 크게 흔듭니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>toon_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;   // view * proj
+    float uTime;
+    float uWind;
+    float uBands;             // 픽셀에서 쓸 밴드 수(여기선 미사용)
+    float _pad;
+};
+
+struct VSIn {
+    float2 blade : BLADE0;    // (side, t)
+    float4 ia    : INSTA0;    // (posX, posZ, angle, height)
+    float2 ib    : INSTB0;    // (phase, colVar)
+};
+struct VSOut {
+    float4 pos : SV_Position;
+    float  t   : TEXCOORD0;   // 밝기 밴딩용
+    float  v   : TEXCOORD1;   // 잎별 색 변주
+};
+
+VSOut main(VSIn i) {
+    float side = i.blade.x;
+    float t    = i.blade.y;
+    float2 root = i.ia.xy;
+    float  ang  = i.ia.z;
+    float  h    = i.ia.w * 1.15;         // 툰은 살짝 더 키를 준다
+    float  phase = i.ib.x;
+
+    float w = (1.0 - t * 0.6) * 0.11;    // 넓적한 잎 (덜 좁아짐)
+
+    // 두 주파수 sin, 끝(t²)일수록 크게
+    float sway = (sin(uTime * 1.4 + phase)
+                + 0.4 * sin(uTime * 2.8 + phase * 1.7)) * 0.5 * uWind * t * t;
+
+    float3 dir = float3(cos(ang), 0.0, sin(ang));
+    float3 p = float3(root.x, 0.0, root.y);
+    p += dir * side * w;                  // 넓은 좌/우 폭
+    p.y += t * h;                         // 세우기
+    p.x += sway;                          // 바람으로 휘기
+    p.z += sway * 0.4;
+
+    VSOut o;
+    o.t   = t;
+    o.v   = i.ib.y;                       // colVar
+    o.pos = mul(float4(p, 1.0), uVP);     // 행벡터 → mul(v, M)
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">색 계산은 픽셀로 미룬다</span>
+    사실적 잔디는 버텍스에서 색을 만들어 보간했지만, 툰은 <strong>밴딩이 비선형</strong>이라 버텍스에서
+    계산한 뒤 보간하면 계단 경계가 뭉개집니다. 그래서 밝기 <code>t</code>만 넘기고
+    <strong>밴딩은 반드시 픽셀 셰이더에서</strong> 해야 선명한 계단이 나옵니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>5. 픽셀 셰이더 — 색 밴딩 + AO + 하이라이트</h2>
+  <p>
+    툰의 심장입니다. 연속적인 밝기 <code>g</code>(= <code>t</code>)를 <code>floor(g*bands)/(bands-1)</code>로
+    <strong>계단화</strong>합니다. <code>bands</code>가 3이면 밝기가 0 · 0.5 · 1 세 단계로만 튑니다.
+    그 계단 값으로 어두운 뿌리색과 밝은 끝색을 <code>lerp</code>해 <strong>AO 그라디언트</strong>를 만들고,
+    끝(<code>g&gt;0.95</code>) 근처에는 <code>step</code>으로 <strong>하이라이트</strong>를 얹습니다.
+    마지막으로 잎별 <code>colVar</code>로 밝기를 살짝 흔들어 밭이 단조롭지 않게 합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>toon_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;
+    float uTime;
+    float uWind;
+    float uBands;            // 색 밴드 수
+    float _pad;
+};
+
+struct PSIn {
+    float4 pos : SV_Position;
+    float  t   : TEXCOORD0;  // 밝기(0=뿌리, 1=끝)
+    float  v   : TEXCOORD1;  // 잎별 변주
+};
+
+float4 main(PSIn i) : SV_Target {
+    float g = i.t;
+
+    // ── 핵심: 밝기를 bands 단계로 계단화 ──
+    float band = clamp(floor(g * uBands) / (uBands - 1.0), 0.0, 1.0);
+
+    float3 dark = float3(0.06, 0.20, 0.05);   // 뿌리(어둡게 = AO)
+    float3 lite = float3(0.55, 0.82, 0.32);   // 끝(밝게)
+    float3 c = lerp(dark, lite, band);
+
+    // 끝 근처만 하이라이트: step(0.95, g)가 1이면 밝은 톤으로
+    c = lerp(c, c * float3(1.05, 1.02, 0.85), step(0.95, g));
+
+    // 잎마다 밝기 변주로 단조로움 제거
+    c *= lerp(0.9, 1.1, i.v);
+    return float4(c, 1.0);
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>uBands</code>가 1이면 <code>(uBands - 1.0)</code>이 0이 되어 <strong>0으로 나눔</strong>이 생깁니다.
+    슬라이더 최소값을 2로 막거나 셰이더에서 <code>max(uBands, 2.0)</code>로 방어하세요. 예제 UI는
+    밴드 범위를 <strong>2~6</strong>으로 제한합니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>6. 드로우 — 지오메트리와 동일한 단일 콜</h2>
+  <p>
+    렌더 경로는 <a href="./08-geometry.html">지오메트리 잔디</a>와 완전히 같습니다. 두 정점 버퍼(blade·인스턴스)를
+    슬롯 0·1에 함께 바인딩하고, <code>TRIANGLESTRIP</code>으로 <code>DrawInstanced</code> 한 번.
+    셰이더만 툰 버전으로 바꾸고, 매 프레임 밴드 수를 cbuffer로 갱신하면 됩니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void drawToonGrass(ID3D11DeviceContext* ctx, const XMMATRIX&amp; viewProj,
+                   float time, float wind, int bands, UINT instanceCount) {
+    updateToonCB(ctx, g_frameCB.Get(), viewProj, time, wind, bands);
+
+    UINT strides[2] = { sizeof(BladeVertex), sizeof(GrassInstance) };
+    UINT offsets[2] = { 0, 0 };
+    ID3D11Buffer* vbs[2] = { g_bladeVB.Get(), g_instVB.Get() };
+
+    ctx-&gt;IASetInputLayout(g_layout.Get());
+    ctx-&gt;IASetVertexBuffers(0, 2, vbs, strides, offsets);
+    ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    ctx-&gt;VSSetShader(g_toonVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_toonPS.Get(), nullptr, 0);
+    ctx-&gt;VSSetConstantBuffers(0, 1, g_frameCB.GetAddressOf());
+    ctx-&gt;PSSetConstantBuffers(0, 1, g_frameCB.GetAddressOf());   // PS도 cbuffer 필요!
+
+    // blade 정점수, 인스턴스수, 시작정점, 시작인스턴스
+    ctx-&gt;DrawInstanced(g_bladeVertexCount, instanceCount, 0, 0);
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    사실적 잔디는 픽셀 셰이더가 cbuffer를 안 썼지만, 툰은 <strong>PS가 밴드 수를 읽어야</strong> 합니다.
+    <code>VSSetConstantBuffers</code>만 하고 <code>PSSetConstantBuffers</code>를 빠뜨리면 밴딩이 먹통이
+    되거나 쓰레기 값으로 색이 깨집니다. 슬롯 번호(b0)를 VS·PS 양쪽에서 맞춰 바인딩하세요.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>메시·인스턴싱은 <strong>지오메트리 잔디 그대로</strong> 재사용, 폭 수식만 넓은 잎으로.</li>
+    <li>밴딩은 <strong>반드시 픽셀 셰이더</strong>에서 <code>floor(g*bands)/(bands-1)</code>.</li>
+    <li>뿌리는 어둡게(AO), 끝 <code>&gt;0.95</code>는 <code>step</code>으로 하이라이트.</li>
+    <li>밴드 수를 <strong>cbuffer uniform</strong>으로 넘겨 실시간 조절, <code>bands≥2</code> 방어 필수.</li>
+    <li>PS도 cbuffer가 필요하므로 <strong><code>PSSetConstantBuffers</code>를 잊지 말 것</strong>.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-bezier.html">← 베지어 곡선 blade</a>
+    <a href="./08-wind.html">통합 바람 그리드 / vorticles →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 빌보드 / 크로스쿼드 잔디 — C++/DirectX 11</title>
+<meta name="description" content="잔디 다발을 4정점 쿼드에 텍스처로 압축하고 카메라를 향해 회전시키는 실린드리컬 빌보드를 C++/DirectX 11/HLSL로 구현. 알파 테스트와 오버드로우 비용까지." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">빌보드 / 크로스쿼드</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 2/10</span>
+  <h1>빌보드 / 크로스쿼드 — 카메라를 향하는 텍스처 카드</h1>
+  <p class="lead">
+    잔디 한 포기를 삼각형 스트립 메시로 만들었던 <a href="./08-geometry.html">지오메트리 방식</a>은 정점이 곧 비용이었습니다.
+    빌보드는 반대로 갑니다. 잔디 다발을 <strong>쿼드 한 장(4정점)</strong>에 텍스처로 압축해 정점을 극단적으로 줄이고,
+    대신 <strong>카메라를 향해 회전(빌보드)</strong>시켜 언제나 정면으로 보이게 합니다.
+    정점은 적지만 <strong>알파 카드가 서로 겹치는 오버드로우</strong>가 모바일에서 진짜 비용이 됩니다.
+    이 페이지에서는 실린드리컬 빌보드 수식, 절차적 카드 텍스처 생성, 알파 테스트(<code>clip</code>), 그리고 오버드로우를
+    눈으로 확인하는 히트맵까지 D3D11로 구현합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
+    <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>쿼드 메시</strong> — 잔디 카드 한 장을 x∈[-0.5,0.5], y∈[0,1]의 4정점 스트립으로 만듭니다.</li>
+    <li><strong>인스턴스 데이터</strong> — 카드마다 위치·키·위상·색변주를 담은 두 번째 정점 버퍼를 만듭니다.</li>
+    <li><strong>절차적 카드 텍스처</strong> — CPU에서 잔디 다발 이미지를 그려 <code>CreateTexture2D</code>로 업로드합니다.</li>
+    <li><strong>실린드리컬 빌보드</strong> — 카메라 right 벡터로 좌우만 확장하고 y는 월드업을 유지합니다.</li>
+    <li><strong>알파 테스트 + 히트맵</strong> — <code>clip(a-0.3)</code>으로 오버드로우를 줄이고, additive 블렌드로 겹침을 시각화합니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 카드 = 4정점 쿼드</h2>
+  <p>
+    빌보드의 메시는 지극히 단순합니다. 폭 방향은 <code>x ∈ [-0.5, 0.5]</code>, 높이 방향은 <code>y ∈ [0, 1]</code>인
+    정사각 쿼드 한 장이면 끝입니다. 이 두 값은 실제 3D 위치가 아니라 <strong>“카드 안에서의 정규화 좌표”</strong>일 뿐입니다.
+    실제 월드 위치는 버텍스 셰이더에서 인스턴스의 위치·카메라 방향과 합쳐 계산합니다. 정점을 <code>TRIANGLESTRIP</code>으로
+    그리면 4정점으로 삼각형 2개(=사각형 한 장)가 채워집니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_billboard.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+// 정점당 데이터: 카드 내부 정규화 좌표 (x, y)
+//  x = -0.5(왼쪽) .. +0.5(오른쪽),  y = 0(뿌리) .. 1(끝)
+struct QuadVertex { float x, y; };
+
+// 쿼드 한 장: 4정점 삼각형 스트립. WebGL 데모의 q 배열과 동일한 순서.
+std::vector&lt;QuadVertex&gt; makeQuad() {
+    return {
+        { -0.5f, 0.0f },   // 좌하
+        { +0.5f, 0.0f },   // 우하
+        { -0.5f, 1.0f },   // 좌상
+        { +0.5f, 1.0f },   // 우상
+    };                     // TRIANGLESTRIP → 삼각형 2개
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. 카드마다 다른 것 = 인스턴스 데이터</h2>
+  <p>
+    카드 하나가 서 있을 위치, 키, 흔들림 위상, 색 변주를 카드(인스턴스)마다 정합니다.
+    지오메트리 방식과 <strong>바이트 배치를 똑같이</strong> 맞춰 두면 입력 레이아웃 코드를 그대로 재사용할 수 있습니다.
+    빌보드는 카메라를 향해 자동으로 회전하므로 <code>angle</code>(방위각)이 필요 없지만, 24바이트 정렬을 유지하려고
+    같은 <code>float4 + float2</code> 배치를 씁니다.
+  </p>
+  <p>
+    필드는 지오메트리 편과 동일한 <strong>결정론적 해시 난수</strong>로 원판 안에 흩뿌립니다. 반지름을
+    <code>sqrt(rand)</code>로 뽑아 중심 쏠림을 막는 것도 같습니다(면적이 반지름 제곱에 비례하므로).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_billboard.hpp (이어서)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 인스턴스당 데이터 (6 float = 24바이트).
+//  posXZ : 지면 위 위치(x, z)
+//  _angle: 빌보드는 미사용(정렬 유지용). height: 키 계수
+//  phase : 바람 sin 위상,  colVar: 색 변주
+struct CardInstance {
+    float posX, posZ;   // offset  0 : float4 앞 2개
+    float angle;        // offset  8 (빌보드 미사용)
+    float height;       // offset 12
+    float phase;        // offset 16 : float2 앞
+    float colVar;       // offset 20
+};
+static_assert(sizeof(CardInstance) == 24, "stride 24로 입력 레이아웃과 일치");
+
+std::vector&lt;CardInstance&gt; scatterCards(int count, float radius, uint32_t seed) {
+    float s = (float)seed;
+    auto rnd = [&amp;]() {
+        s = std::sin(s * 12.9898f + 78.233f) * 43758.5453f;
+        return s - std::floor(s);               // 0..1
+    };
+    std::vector&lt;CardInstance&gt; out(count);
+    for (int i = 0; i &lt; count; ++i) {
+        float a = rnd() * 6.2831853f;
+        float r = std::sqrt(rnd()) * radius;     // 균일 분포용 sqrt
+        out[i].posX   = std::cos(a) * r;
+        out[i].posZ   = std::sin(a) * r;
+        out[i].angle  = 0.0f;                     // 빌보드는 카메라가 회전을 담당
+        out[i].height = 0.8f + rnd() * 0.9f;
+        out[i].phase  = rnd() * 6.2831853f;
+        out[i].colVar = rnd();
+    }
+    return out;
+}</code></pre>
+  </div>
+
+  <p>두 버퍼(쿼드·인스턴스)를 <code>IMMUTABLE</code>로 한 번만 올립니다.</p>
+  <div class="code">
+    <div class="code-head"><span>버퍼 생성</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">ComPtr&lt;ID3D11Buffer&gt; g_quadVB;   // 슬롯 0: 정점당
+ComPtr&lt;ID3D11Buffer&gt; g_cardVB;   // 슬롯 1: 인스턴스당
+UINT g_cardInstances = 0;
+
+void createCardBuffers(ID3D11Device* dev) {
+    auto quad  = makeQuad();
+    auto cards = scatterCards(40000, 30.0f, 77);  // 최대 4만 카드
+    g_cardInstances = (UINT)cards.size();
+
+    auto makeVB = [&amp;](const void* data, UINT bytes, ComPtr&lt;ID3D11Buffer&gt;&amp; out) {
+        D3D11_BUFFER_DESC bd = {};
+        bd.Usage = D3D11_USAGE_IMMUTABLE;
+        bd.ByteWidth = bytes;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA sd = { data, 0, 0 };
+        dev-&gt;CreateBuffer(&amp;bd, &amp;sd, out.GetAddressOf());
+    };
+    makeVB(quad.data(),  (UINT)(quad.size()  * sizeof(QuadVertex)),   g_quadVB);
+    makeVB(cards.data(), (UINT)(cards.size() * sizeof(CardInstance)), g_cardVB);
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 절차적 카드 텍스처 — CPU에서 그려 업로드</h2>
+  <p>
+    카드 한 장에는 <strong>잔디 여러 포기</strong>가 그려진 이미지를 붙입니다. WebGL 데모는 캔버스 2D로 그렸지만,
+    D3D11에서는 CPU 배열(RGBA8)에 직접 픽셀을 채워 <code>CreateTexture2D</code>로 올리면 됩니다.
+    각 blade는 아래가 넓고 위가 좁은 세로 스트로크로, 아래는 어둡고(<code>#173a12</code>) 위는 밝게(<code>#6bbf3a</code>)
+    그라디언트를 줍니다. blade가 없는 픽셀은 <strong>알파 0</strong>으로 남겨 두는 것이 핵심입니다 — 이 알파가 뒤에서
+    <code>clip</code>의 판정 기준이 됩니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_card_tex.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 128×128 RGBA8 카드 텍스처를 CPU에서 절차적으로 그린다.
+// 한 카드에 blade 여러 개를 채워 화면에서 빈틈이 덜 보이게 한다.
+ComPtr&lt;ID3D11ShaderResourceView&gt; makeGrassCardSRV(ID3D11Device* dev) {
+    const int N = 128;
+    std::vector&lt;uint32_t&gt; px(N * N, 0x00000000u);   // 전부 투명(알파 0)
+
+    float s = 12345.0f;
+    auto rnd = [&amp;]() { s = std::sin(s*12.9898f+78.233f)*43758.5453f;
+                       return s - std::floor(s); };
+
+    // blade 16개를 세로 곡선 스트로크로 채운다.
+    for (int b = 0; b &lt; 16; ++b) {
+        float bx   = 8.0f + rnd() * 112.0f;          // 밑동 x
+        float bw   = 6.0f + rnd() * 7.0f;            // 반폭
+        float bend = (rnd() - 0.5f) * 36.0f;         // 휘어짐
+
+        for (int y = 0; y &lt; N; ++y) {
+            float ty = 1.0f - (float)y / (N - 1);    // 0(밑)..1(위)
+            float cx = bx + bend * ty;               // 위로 갈수록 휘어짐
+            float w  = bw * (1.0f - 0.6f * ty);      // 위로 갈수록 좁아짐
+            // 아래(어두움)→위(밝음) 그라디언트
+            int R = (int)std::lerp(0x17, 0x6b, ty);
+            int G = (int)std::lerp(0x3a, 0xbf, ty);
+            int B = (int)std::lerp(0x12, 0x3a, ty);
+            for (int x = (int)(cx - w); x &lt;= (int)(cx + w); ++x) {
+                if (x &lt; 0 || x &gt;= N) continue;
+                px[y*N + x] = 0xFF000000u | (B&lt;&lt;16) | (G&lt;&lt;8) | R; // ABGR
+            }
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = td.Height = N;
+    td.MipLevels = 1;            // 밉맵 없음(이유는 아래 callout)
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA sd = { px.data(), (UINT)(N * 4), 0 };
+    ComPtr&lt;ID3D11Texture2D&gt; tex;
+    dev-&gt;CreateTexture2D(&amp;td, &amp;sd, tex.GetAddressOf());
+
+    ComPtr&lt;ID3D11ShaderResourceView&gt; srv;
+    dev-&gt;CreateShaderResourceView(tex.Get(), nullptr, srv.GetAddressOf());
+    return srv;
+}</code></pre>
+  </div>
+
+  <p>샘플러는 <strong>LINEAR + CLAMP</strong>로, 밉맵 없이 만듭니다.</p>
+  <div class="code">
+    <div class="code-head"><span>샘플러 상태</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">ComPtr&lt;ID3D11SamplerState&gt; makeCardSampler(ID3D11Device* dev) {
+    D3D11_SAMPLER_DESC sd = {};
+    sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;   // 선형 보간
+    sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;       // 가장자리 반복 금지
+    sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd.MinLOD = 0; sd.MaxLOD = 0;                    // 밉맵 사용 안 함
+    ComPtr&lt;ID3D11SamplerState&gt; s;
+    dev-&gt;CreateSamplerState(&amp;sd, s.GetAddressOf());
+    return s;
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    밉맵을 만들면 원거리에서 알파가 <strong>평균되어 낮아지고</strong>, <code>clip(a-0.3)</code> 임계값 아래로 떨어져
+    카드가 통째로 사라집니다(잔디밭이 멀리서 증발). 그래서 이 텍스처는 <strong>밉맵 없이 LINEAR</strong>로 씁니다.
+    실전에서 밉맵이 필요하면 알파-투-커버리지나 알파 임계 보정(mip마다 임계값 스케일)을 함께 써야 합니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 버텍스 셰이더 — 실린드리컬 빌보드</h2>
+  <p>
+    빌보드의 심장은 여기입니다. 카드를 카메라 쪽으로 돌리되, <strong>좌우로만</strong> 회전시키고 <strong>y축은
+    월드업을 유지</strong>하는 것이 “실린드리컬(원기둥) 빌보드”입니다. 잔디는 위로 서 있어야 자연스럽기 때문에,
+    완전히 카메라를 바라보는 스페리컬 빌보드는 잔디가 눕는 것처럼 보여 부적합합니다.
+  </p>
+  <p>
+    좌우 확장은 CPU가 넘겨주는 <strong>카메라 right 벡터</strong>로 합니다. 카드의 <code>x</code>(-0.5~0.5)에
+    <code>uRight</code>를 곱해 좌우로 펼치고, <code>y</code>는 순수하게 월드 y로 올립니다. 바람은 지오메트리 편과 같은
+    <strong><code>y²</code> 가중 sin</strong>으로 끝만 크게 휘게 합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>billboard_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;   // view * proj (행벡터 관례)
+    float3 uRight;            // 카메라 right (월드공간, 정규화됨)
+    float  uTime;
+    float  uWind;
+    float3 _pad;
+};
+
+struct VSIn {
+    float2 quad : QUAD0;      // 카드 내부 (x, y)
+    float4 ia   : INSTA0;     // (posX, posZ, angle, height)
+    float2 ib   : INSTB0;     // (phase, colVar)
+};
+struct VSOut {
+    float4 pos   : SV_Position;
+    float2 uv    : TEXCOORD0;
+    float  shade : TEXCOORD1;
+};
+
+VSOut main(VSIn i) {
+    float2 root  = i.ia.xy;
+    float  hgt   = i.ia.w * 1.6;        // 카드 높이
+    float  phase = i.ib.x;
+    float  colVar= i.ib.y;
+
+    // 카드 밑동 월드 위치
+    float3 c = float3(root.x, 0.0, root.y);
+
+    // y²(=quad.y²) 가중 sway: 뿌리 고정, 끝만 크게 흔들림
+    float sway = (sin(uTime * 1.5 + phase)
+                + 0.4 * sin(uTime * 3.0 + phase * 1.7))
+                * 0.5 * uWind * i.quad.y * i.quad.y;
+
+    // 실린드리컬 빌보드: 좌우는 카메라 right, 위는 월드업 고정
+    float3 p = c + uRight * i.quad.x * 0.9 + float3(0.0, i.quad.y * hgt, 0.0);
+    p.x += sway;
+
+    VSOut o;
+    // UV: 카드 x[-0.5,0.5]→[0,1], y는 위가 0이 되도록 뒤집음(텍스처 좌표계)
+    o.uv    = float2(i.quad.x + 0.5, 1.0 - i.quad.y);
+    o.shade = lerp(0.5, 1.0, i.quad.y) * lerp(0.85, 1.1, colVar);
+    o.pos   = mul(float4(p, 1.0), uVP);   // 행벡터 → mul(v, M)
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">카메라 right 벡터 만들기</span>
+    CPU에서 카메라 눈 위치 <code>eye</code>로부터 실린드리컬 right를 구합니다. 시선을 xz 평면에 투영한 뒤 월드업과
+    외적: <code>right = normalize(cross(up, normalize(float3(eye.x, 0, eye.z))))</code>. 이 값을 매 프레임 cbuffer의
+    <code>uRight</code>에 채워 넣습니다. 카메라가 원점을 바라본다는 전제의 데모용 근사이며, 자유 카메라에서는
+    시선 방향(forward)의 xz 성분으로 right를 뽑으세요.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>5. 픽셀 셰이더 — 알파 테스트와 히트맵</h2>
+  <p>
+    카드는 대부분이 투명한 알파 이미지입니다. 반투명 블렌딩으로 그리면 정렬(sorting) 문제와 오버드로우가 폭발하므로,
+    잔디는 보통 <strong>알파 테스트</strong>를 씁니다. 알파가 임계값(0.3) 미만인 픽셀을 <code>clip</code>으로 버리면
+    그 픽셀은 아예 기록되지 않아 <strong>깊이 버퍼가 정상 동작</strong>하고 블렌딩도 필요 없습니다.
+    HLSL에서 <code>clip(a - 0.3)</code>은 인자가 음수면 픽셀을 폐기하며, <code>if (a &lt; 0.3) discard;</code>와 같습니다.
+  </p>
+  <p>
+    두 번째 모드는 <strong>오버드로우 히트맵</strong>입니다. 픽셀이 몇 번 덧그려졌는지를 눈으로 보려고, 각 카드를
+    붉은색 상수로 칠하고 <strong>additive 블렌드(ONE, ONE)</strong>로 누적합니다. 같은 자리에 카드가 많이 겹칠수록
+    빨강이 포화되어 밝아집니다 — 그 밝은 영역이 모바일에서 프레임을 잡아먹는 곳입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>billboard_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">Texture2D    uTex : register(t0);
+SamplerState uSmp : register(s0);
+
+cbuffer Mode : register(b1) {
+    int  uHeat;     // 0 = 일반, 1 = 오버드로우 히트맵
+    int3 _pad;
+};
+
+struct PSIn {
+    float4 pos   : SV_Position;
+    float2 uv    : TEXCOORD0;
+    float  shade : TEXCOORD1;
+};
+
+float4 main(PSIn i) : SV_Target {
+    float4 t = uTex.Sample(uSmp, i.uv);
+
+    // 알파 테스트: 임계값 미만이면 픽셀 폐기(오버드로우/블렌딩 회피)
+    clip(t.a - 0.3);          // == if (t.a &lt; 0.3) discard;
+
+    if (uHeat == 1) {
+        // 히트맵: 살아남은 픽셀마다 붉은 상수. additive로 누적됨.
+        return float4(0.9, 0.15, 0.05, 1.0);
+    }
+    return float4(t.rgb * i.shade, 1.0);
+}</code></pre>
+  </div>
+
+  <p>모드에 따라 블렌드 상태를 갈아 끼웁니다. 일반은 블렌드 OFF, 히트맵만 additive입니다.</p>
+  <div class="code">
+    <div class="code-head"><span>블렌드 상태 두 종</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">ComPtr&lt;ID3D11BlendState&gt; g_blendOff;   // 불투명 알파테스트용
+ComPtr&lt;ID3D11BlendState&gt; g_blendAdd;   // 히트맵용 (ONE, ONE)
+
+void createBlendStates(ID3D11Device* dev) {
+    // 블렌드 OFF: 알파테스트로 폐기, 통과 픽셀은 그대로 덮어쓰기
+    D3D11_BLEND_DESC off = {};
+    off.RenderTarget[0].BlendEnable = FALSE;
+    off.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    dev-&gt;CreateBlendState(&amp;off, g_blendOff.GetAddressOf());
+
+    // ADDITIVE: dst = src*1 + dst*1 (겹칠수록 누적 → 히트맵)
+    D3D11_BLEND_DESC add = {};
+    auto&amp; rt = add.RenderTarget[0];
+    rt.BlendEnable    = TRUE;
+    rt.SrcBlend       = D3D11_BLEND_ONE;
+    rt.DestBlend      = D3D11_BLEND_ONE;
+    rt.BlendOp        = D3D11_BLEND_OP_ADD;
+    rt.SrcBlendAlpha  = D3D11_BLEND_ONE;
+    rt.DestBlendAlpha = D3D11_BLEND_ONE;
+    rt.BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+    rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    dev-&gt;CreateBlendState(&amp;add, g_blendAdd.GetAddressOf());
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">오버드로우가 모바일의 진짜 비용</span>
+    빌보드는 정점이 카드당 4개로 극히 적어 <strong>버텍스 비용은 무시할 수준</strong>입니다. 문제는 픽셀입니다.
+    화면 한 점을 여러 카드가 앞뒤로 덮으면 그 픽셀 셰이더가 <strong>겹친 횟수만큼</strong> 실행됩니다(오버드로우).
+    타일 기반 모바일 GPU는 이 반복 픽셀 셰이딩과 대역폭에서 프레임을 잃습니다. 그래서 반투명 블렌딩 대신
+    <strong>알파 테스트로 조기 폐기</strong>하고, 카드 밀도를 거리로 줄이는 것이 정석입니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>6. 드로우 — 단일 콜, 모드 전환</h2>
+  <p>
+    두 정점 버퍼를 슬롯 0·1에 함께 바인딩하고 <code>DrawInstanced</code> 한 번으로 그립니다.
+    일반 모드는 <strong>깊이 테스트 ON + 블렌드 OFF</strong>, 히트맵 모드는 <strong>깊이 테스트 OFF + additive</strong>로
+    상태를 바꿉니다(히트맵은 앞뒤 관계 없이 전부 누적해야 겹침을 볼 수 있으므로 깊이를 끕니다).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void drawBillboards(ID3D11DeviceContext* ctx, UINT count, bool heat) {
+    UINT strides[2] = { sizeof(QuadVertex), sizeof(CardInstance) };
+    UINT offsets[2] = { 0, 0 };
+    ID3D11Buffer* vbs[2] = { g_quadVB.Get(), g_cardVB.Get() };
+
+    ctx-&gt;IASetInputLayout(g_layout.Get());
+    ctx-&gt;IASetVertexBuffers(0, 2, vbs, strides, offsets);
+    ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    ctx-&gt;VSSetShader(g_vs.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_ps.Get(), nullptr, 0);
+    ctx-&gt;VSSetConstantBuffers(0, 1, g_frameCB.GetAddressOf());
+    ctx-&gt;PSSetConstantBuffers(1, 1, g_modeCB.GetAddressOf());
+    ctx-&gt;PSSetShaderResources(0, 1, g_cardSRV.GetAddressOf());
+    ctx-&gt;PSSetSamplers(0, 1, g_cardSmp.GetAddressOf());
+
+    float bf[4] = { 0, 0, 0, 0 };
+    if (heat) {
+        ctx-&gt;OMSetDepthStencilState(g_depthOff.Get(), 0);   // 깊이 OFF
+        ctx-&gt;OMSetBlendState(g_blendAdd.Get(), bf, 0xffffffff);
+    } else {
+        ctx-&gt;OMSetDepthStencilState(g_depthOn.Get(), 0);    // 깊이 ON
+        ctx-&gt;OMSetBlendState(g_blendOff.Get(), bf, 0xffffffff);
+    }
+
+    ctx-&gt;DrawInstanced(4, count, 0, 0);   // 4정점 × count 카드, 드로우콜 1
+
+    ctx-&gt;OMSetBlendState(nullptr, bf, 0xffffffff);          // 상태 원복
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    빌보드는 <a href="./08-geometry.html">지오메트리 잔디</a>와 달리 <strong>알파 카드</strong>라 “불투명이니 Z버퍼만 켜면
+    된다”가 그대로 통하지 않습니다. 알파 테스트로 폐기하면 통과 픽셀만 깊이에 기록되므로 대체로 깨끗하지만,
+    카드끼리 반쯤 겹쳐 알파 경계가 만나는 곳에서 정렬 아티팩트가 남을 수 있습니다. 부드러운 경계를 원하면
+    알파-투-커버리지(MSAA 필요)를 검토하세요.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>메시는 <strong>4정점 쿼드 하나</strong>, 나머지는 전부 <strong>인스턴스 버퍼 + 텍스처</strong>로.</li>
+    <li>잔디는 <strong>실린드리컬 빌보드</strong> — 좌우만 카메라 right로 확장, <strong>y는 월드업 고정</strong>.</li>
+    <li>반투명 대신 <strong>알파 테스트 <code>clip(a-0.3)</code></strong>로 오버드로우와 정렬 문제를 줄인다.</li>
+    <li>모바일의 진짜 비용은 <strong>픽셀 오버드로우</strong> — additive 히트맵으로 겹침을 눈으로 확인하고 거리 컬링으로 카드 수를 줄인다.</li>
+    <li>텍스처는 <strong>밉맵 없이 LINEAR</strong> — 밉맵은 알파를 평균해 원경 잔디를 증발시킨다.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-geometry.html">← 지오메트리 잔디</a>
+    <a href="./08-shell.html">셸 텍스처링 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

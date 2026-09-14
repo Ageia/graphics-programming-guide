@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: LOD 통합 씬 (근:지오메트리 · 중:빌보드 · 원:텍스처) — C++/DirectX 11</title>
+<meta name="description" content="카메라 거리에 따라 근거리는 지오메트리 blade, 중거리는 빌보드 카드, 원거리는 지형 텍스처로 자동 전환하고 경계에서 페이드해 팝핑을 없애는 실전 LOD 통합 잔디 씬을 C++/DirectX 11/HLSL로 구현하고 10가지 기법을 총정리." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">LOD 통합 씬</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 10/10</span>
+  <h1>LOD 통합 씬 — 근:지오메트리 · 중:빌보드 · 원:텍스처</h1>
+  <p class="lead">
+    8장의 마지막이자, 실제 게임이 실제로 하는 방식입니다. 앞서 따로 만든 세 기법을 <strong>한 씬에서
+    거리별로 동시에</strong> 씁니다. 카메라에서 <strong>가까우면 진짜 blade</strong>(<a href="./08-geometry.html">지오메트리</a>),
+    <strong>중간이면 빌보드 카드</strong>(<a href="./08-billboard.html">빌보드</a>),
+    <strong>멀면 지형 텍스처</strong>(<a href="./08-terrain.html">지형 텍스처</a>)로 자동 전환합니다.
+    핵심은 <strong>경계에서의 페이드</strong>입니다. 거리 구간별로 알파를 <code>smoothstep</code>으로 넘겨
+    지오→빌보드→텍스처가 겹치는 구간에서 부드럽게 교대해 <strong>팝핑(툭 튀는 전환)</strong>을 없앱니다.
+    이 페이지가 8장의 마지막이므로 끝에 <strong>10가지 기법 전체를 총정리</strong>합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
+    <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>거리 링 정의</strong> — <code>NEAR</code>/<code>FAR</code> 두 경계로 근·중·원 세 구간을 나눕니다.</li>
+    <li><strong>원거리 텍스처 지면</strong> — 노이즈로 칠한 지형을 깔아 멀리서 잔디처럼 보이게 합니다.</li>
+    <li><strong>중거리 빌보드</strong> — <code>NEAR</code>~<code>FAR</code>에서만 보이도록 페이드인/아웃합니다.</li>
+    <li><strong>근거리 지오메트리</strong> — <code>NEAR</code> 안쪽에서만 blade를 세우고 페이드 아웃합니다.</li>
+    <li><strong>렌더 순서 · 팝핑 방지</strong> — 세 패스를 겹쳐 그리고 경계 페이드로 자연스럽게 잇습니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 거리 링 — 하나의 진실</h2>
+  <p>
+    모든 페이드의 기준은 딱 두 숫자, <strong><code>NEAR</code>와 <code>FAR</code></strong>입니다.
+    카메라에서 각 잔디까지의 수평 거리 <code>dist</code>가 <code>NEAR</code>보다 가까우면 지오메트리,
+    <code>NEAR</code>~<code>FAR</code>이면 빌보드, <code>FAR</code>보다 멀면 텍스처 지면으로 처리합니다.
+    이 값을 C++에서 <strong>한 곳에 정의</strong>하고 세 셰이더에 cbuffer로 넘겨야 경계가 어긋나지 않습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>lod_scene.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+using namespace DirectX;
+
+// 거리 링 경계(월드 단위). 세 패스가 공유하는 유일한 진실.
+constexpr float NEAR_R = 18.0f;   // 이 안쪽: 지오메트리
+constexpr float FAR_R  = 34.0f;   // 이 바깥: 텍스처만
+
+// 세 패스가 공유하는 프레임 상수
+struct LodFrameCB {
+    XMFLOAT4X4 vp;      // view * proj (row_major)
+    XMFLOAT3   eye;     // 카메라 월드 위치(거리 계산용)
+    float      time;
+    float      nearR;   // = NEAR_R
+    float      farR;    // = FAR_R
+    int        rings;   // LOD 경계 색표시 토글(디버그)
+    float      _pad;
+};
+static_assert(sizeof(LodFrameCB) % 16 == 0, "cbuffer는 16바이트 배수");</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">거리 구간별로 인스턴스를 나눈다</span>
+    학습 예제는 세 패스가 <strong>같은 필드를 전부 그리되</strong> 셰이더에서 페이드로 걸러냅니다(간단함).
+    실전에서는 CPU/컴퓨트가 프레임마다 <strong>거리 링별로 인스턴스를 분류</strong>해, 근거리 인스턴스만
+    지오메트리 버퍼에, 중거리만 빌보드 버퍼에 <code>Append</code>합니다. 그러면 멀리 있는 blade의
+    버텍스를 아예 실행하지 않아 낭비가 사라집니다(<a href="./07-lod.html">7장 LOD·컬링</a> 참고).
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. 원거리 — 노이즈 텍스처 지면</h2>
+  <p>
+    가장 멀리는 <a href="./08-terrain.html">지형 텍스처</a>입니다. 커다란 쿼드 하나에 절차적 노이즈로
+    잔디색을 칠해, 개별 blade 없이도 <strong>멀리서 초원처럼</strong> 보이게 합니다. 여러 옥타브의 값 노이즈를
+    섞어 얼룩덜룩한 톤을 만듭니다. 디버그 토글(<code>uRings</code>)이 켜지면 <code>FAR</code> 바깥 영역에
+    파랑끼를 더해 "여기는 원경 텍스처 구역"임을 보여줍니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>ground_vs.hlsl / ground_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">// ── VS: 40x40 지면 쿼드 ──
+cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;
+    float3 uEye; float uTime;
+    float uNear; float uFar; int uRings; float _pad;
+};
+struct GVSIn  { float2 p : APOS0; };            // -1..1 쿼드
+struct GVSOut { float4 pos : SV_Position; float2 v : TEXCOORD0; };
+
+GVSOut vs_main(GVSIn i) {
+    GVSOut o;
+    o.v   = i.p;
+    o.pos = mul(float4(i.p.x * 40.0, 0.0, i.p.y * 40.0, 1.0), uVP);
+    return o;
+}
+
+// ── PS: 옥타브 노이즈로 초원 톤 ──
+float h(float2 c) { return frac(sin(dot(c, float2(41.3, 289.1))) * 43758.5453); }
+float noise(float2 p) {
+    float2 i = floor(p), f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return lerp(lerp(h(i),               h(i + float2(1,0)), f.x),
+                lerp(h(i + float2(0,1)),  h(i + float2(1,1)), f.x), f.y);
+}
+float4 ps_main(GVSOut i) : SV_Target {
+    float2 uv = i.v * 44.0;
+    float n = noise(uv) * 0.6 + noise(uv * 3.0) * 0.3 + noise(uv * 9.0) * 0.1;
+    float3 c = lerp(float3(0.10, 0.20, 0.08), float3(0.30, 0.5, 0.18), n);
+    if (uRings == 1) {                           // 디버그: 원경 구역 표시
+        float r = length(i.v * 40.0);
+        if (r &gt; 34.0) c *= float3(0.8, 0.8, 1.0);
+    }
+    return float4(c, 1.0);
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 중거리 — 빌보드 카드 (페이드 인/아웃)</h2>
+  <p>
+    <a href="./08-billboard.html">빌보드</a>는 카메라를 향하는 알파 카드입니다. 여기서는 <strong>두 개의
+    <code>smoothstep</code></strong>으로 가시성을 만듭니다. <code>fin</code>은 <code>NEAR</code> 근처에서
+    0→1로 켜지고(근경에선 지오메트리에 양보해 숨음), <code>fout</code>은 <code>FAR</code> 근처에서 1→0으로
+    꺼집니다(원경에선 텍스처에 양보). 둘을 곱한 <code>vis = fin*fout</code>이 곧 알파이고, 너무 작으면
+    <code>discard</code>해 오버드로우를 줄입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>billboard_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;
+    float3 uEye; float uTime;
+    float uNear; float uFar; int uRings; float _pad;
+};
+cbuffer Cam : register(b1) { float3 uRight; float _p2; };  // 빌보드 우측축
+
+struct VSIn {
+    float2 aQ : APOS0;      // 쿼드 (-0.5..0.5, 0..1)
+    float4 iA : INSTA0;     // (posX, posZ, angle, height)
+    float2 iC : INSTB0;     // (phase, colVar)
+};
+struct VSOut {
+    float4 pos  : SV_Position;
+    float2 uv   : TEXCOORD0;
+    float  vis  : TEXCOORD1;   // 알파(페이드)
+    float  shade: TEXCOORD2;
+};
+
+VSOut main(VSIn i) {
+    float dist = length(i.iA.xy - uEye.xz);
+    float fin  = smoothstep(uNear * 0.7, uNear, dist);       // 근경에선 숨음
+    float fout = 1.0 - smoothstep(uFar * 0.9, uFar, dist);   // 원경에선 숨음
+    float vis  = fin * fout;
+
+    float h = i.iA.w * 1.5;
+    float3 c = float3(i.iA.x, 0.0, i.iA.y);
+    float sway = sin(uTime * 1.5 + i.iC.x) * 0.3 * i.aQ.y * i.aQ.y;
+    float3 p = c + uRight * i.aQ.x * 0.9 + float3(0.0, i.aQ.y * h, 0.0);
+    p.x += sway;
+
+    VSOut o;
+    o.uv    = float2(i.aQ.x + 0.5, 1.0 - i.aQ.y);
+    o.vis   = vis;
+    o.shade = lerp(0.5, 1.0, i.aQ.y);
+    o.pos   = mul(float4(p, 1.0), uVP);
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>billboard_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">Texture2D    uTex : register(t0);
+SamplerState uSmp : register(s0);
+cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;
+    float3 uEye; float uTime;
+    float uNear; float uFar; int uRings; float _pad;
+};
+
+struct PSIn {
+    float4 pos  : SV_Position;
+    float2 uv   : TEXCOORD0;
+    float  vis  : TEXCOORD1;
+    float  shade: TEXCOORD2;
+};
+
+float4 main(PSIn i) : SV_Target {
+    if (i.vis &lt; 0.02) discard;              // 링 밖: 아예 안 그림
+    float4 t = uTex.Sample(uSmp, i.uv);
+    if (t.a &lt; 0.3) discard;                 // 알파 테스트(마스크)
+    float3 c = t.rgb * i.shade;
+    if (uRings == 1) c *= float3(1.2, 1.1, 0.7);  // 디버그: 중경 노랑끼
+    return float4(c, 1.0);
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    타일드 모바일 GPU에서 <strong>알파 블렌드는 오버드로우로 프레임을 죽입니다</strong>. 위처럼
+    <code>discard</code> 기반 <strong>알파 테스트(마스크)</strong>를 쓰고 <code>OMSetBlendState</code>는
+    끄세요(불투명 취급). 페이드는 블렌딩이 아니라 <code>discard</code> 문턱을 넘나드는 방식으로 근사하거나,
+    부드러움이 꼭 필요하면 <strong>디더(dither) 알파</strong>로 처리합니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 근거리 — 지오메트리 blade (페이드 아웃)</h2>
+  <p>
+    가장 가까이는 <a href="./08-geometry.html">진짜 blade</a>입니다. 각 blade가 카메라까지 거리를 재고
+    <code>fade = 1 - smoothstep(NEAR*0.7, NEAR, dist)</code>로 <strong><code>NEAR</code>를 넘어가면
+    사라지게</strong> 합니다. 페이드가 0에 가까워지면 <strong>키를 줄여</strong>(<code>p.y += t*h*fade</code>)
+    지면으로 <strong>가라앉히고</strong>, 완전히 0이면 픽셀에서 <code>discard</code>합니다. 이렇게 하면
+    blade가 툭 사라지는 대신 <strong>땅속으로 스르르 들어가</strong> 팝핑이 눈에 안 띕니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>geo_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;
+    float3 uEye; float uTime;
+    float uNear; float uFar; int uRings; float _pad;
+};
+
+struct VSIn {
+    float2 blade : BLADE0;   // (side, t)
+    float4 iA    : INSTA0;   // (posX, posZ, angle, height)
+    float2 iC    : INSTB0;   // (phase, colVar)
+};
+struct VSOut {
+    float4 pos : SV_Position;
+    float3 col : COLOR0;
+    float  t   : TEXCOORD0;
+    float  kill: TEXCOORD1;  // 페이드(0이면 버림)
+};
+
+VSOut main(VSIn i) {
+    float t = i.blade.y, side = i.blade.x;
+    float h = i.iA.w, ang = i.iA.z;
+    float w = (1.0 - t) * 0.06;
+
+    float dist = length(i.iA.xy - uEye.xz);
+    float fade = 1.0 - smoothstep(uNear * 0.7, uNear, dist);  // 근거리만
+
+    float3 dir = float3(cos(ang), 0.0, sin(ang));
+    float3 p = float3(i.iA.x, 0.0, i.iA.y);
+    float sway = sin(uTime * 1.6 + i.iC.x) * 0.3 * t * t;
+    p += dir * side * w;
+    p.y += t * h * fade;     // 페이드가 줄면 키가 줄어 땅속으로 가라앉음
+    p.x += sway;
+
+    float3 c = lerp(float3(0.09, 0.22, 0.08), float3(0.35, 0.62, 0.20), t)
+             * lerp(0.4, 1.0, t);
+    if (uRings == 1) c *= float3(0.8, 1.15, 0.8);   // 디버그: 근경 초록끼
+
+    VSOut o;
+    o.col  = c;
+    o.t    = t;
+    o.kill = fade;
+    o.pos  = mul(float4(p, 1.0), uVP);
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>geo_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">struct PSIn {
+    float4 pos : SV_Position;
+    float3 col : COLOR0;
+    float  t   : TEXCOORD0;
+    float  kill: TEXCOORD1;
+};
+
+float4 main(PSIn i) : SV_Target {
+    if (i.kill &lt; 0.02) discard;      // NEAR 밖의 blade는 버림
+    return float4(i.col, 1.0);
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>5. 렌더 순서 — 세 패스를 겹쳐 그린다</h2>
+  <p>
+    한 프레임에서 <strong>원경 지면 → 중경 빌보드 → 근경 지오메트리</strong> 순으로 그립니다. 셋 다 불투명
+    취급(깊이 테스트 ON, 블렌드 OFF)이라 순서에 민감하지 않지만, 지면을 먼저 깔면 그 위에 빌보드·blade가
+    자연스럽게 얹힙니다. 카메라 위치 <code>eye</code>와 빌보드용 <code>right</code> 벡터를 매 프레임
+    갱신해 세 패스에 넘깁니다. 각 패스는 자기 인스턴스 버퍼로 <code>DrawInstanced</code> 한 번씩입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void drawLodScene(ID3D11DeviceContext* ctx, const XMMATRIX&amp; viewProj,
+                  const XMFLOAT3&amp; eye, float time, bool ringsDebug) {
+    // 공유 프레임 cbuffer
+    LodFrameCB cb;
+    XMStoreFloat4x4(&amp;cb.vp, viewProj);   // row_major, 전치 없음
+    cb.eye = eye; cb.time = time;
+    cb.nearR = NEAR_R; cb.farR = FAR_R;
+    cb.rings = ringsDebug ? 1 : 0; cb._pad = 0;
+    ctx-&gt;UpdateSubresource(g_frameCB.Get(), 0, nullptr, &amp;cb, 0, 0);
+
+    ctx-&gt;OMSetDepthStencilState(g_depthOn.Get(), 0);
+    ctx-&gt;OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);   // 블렌드 OFF(불투명)
+    ID3D11Buffer* frameCB = g_frameCB.Get();
+    ctx-&gt;VSSetConstantBuffers(0, 1, &amp;frameCB);
+    ctx-&gt;PSSetConstantBuffers(0, 1, &amp;frameCB);
+
+    // ── ① 원경: 텍스처 지면 ──
+    ctx-&gt;IASetInputLayout(g_groundLayout.Get());
+    UINT gs = sizeof(float) * 2, go = 0;
+    ID3D11Buffer* gvb = g_groundVB.Get();
+    ctx-&gt;IASetVertexBuffers(0, 1, &amp;gvb, &amp;gs, &amp;go);
+    ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    ctx-&gt;VSSetShader(g_groundVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_groundPS.Get(), nullptr, 0);
+    ctx-&gt;Draw(4, 0);
+
+    // ── ② 중경: 빌보드 카드 ──
+    XMFLOAT3 right = computeBillboardRight(eye);   // 카메라 우측축
+    updateCamCB(ctx, g_camCB.Get(), right);
+    ctx-&gt;VSSetConstantBuffers(1, 1, g_camCB.GetAddressOf());
+    UINT bStr[2] = { sizeof(float) * 2, sizeof(GrassInstance) };
+    UINT bOff[2] = { 0, 0 };
+    ID3D11Buffer* bvbs[2] = { g_quadVB.Get(), g_instVB.Get() };
+    ctx-&gt;IASetInputLayout(g_billLayout.Get());
+    ctx-&gt;IASetVertexBuffers(0, 2, bvbs, bStr, bOff);
+    ctx-&gt;VSSetShader(g_billVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_billPS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShaderResources(0, 1, g_cardSRV.GetAddressOf());
+    ctx-&gt;PSSetSamplers(0, 1, g_samp.GetAddressOf());
+    ctx-&gt;DrawInstanced(4, g_billCount, 0, 0);
+
+    // ── ③ 근경: 지오메트리 blade ──
+    UINT nStr[2] = { sizeof(BladeVertex), sizeof(GrassInstance) };
+    UINT nOff[2] = { 0, 0 };
+    ID3D11Buffer* nvbs[2] = { g_bladeVB.Get(), g_instVB.Get() };
+    ctx-&gt;IASetInputLayout(g_geoLayout.Get());
+    ctx-&gt;IASetVertexBuffers(0, 2, nvbs, nStr, nOff);
+    ctx-&gt;VSSetShader(g_geoVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_geoPS.Get(), nullptr, 0);
+    ctx-&gt;DrawInstanced(g_bladeVertexCount, g_geoCount, 0, 0);
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정 — 팝핑</span>
+    세 LOD의 페이드 구간이 <strong>겹치도록</strong> 경계를 잡아야 합니다. 빌보드의 <code>fin</code>이
+    지오메트리의 <code>fade</code>가 끝나는 지점과 만나야 전환이 매끄럽습니다. 구간을 <strong>딱 붙여
+    (겹침 0)</strong> 두면 한 프레임에 한 LOD도 안 그려지는 <strong>빈틈</strong>이 생겨 오히려 더 심한
+    팝핑이 됩니다. <code>smoothstep</code>의 시작/끝을 <code>NEAR*0.7~NEAR</code>처럼 <strong>여유 구간</strong>을
+    두는 이유입니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>6. 10가지 잔디 렌더링 기법 총정리</h2>
+  <p>
+    8장에서 다룬 열 가지 기법을 한눈에 회고합니다. 실제 게임은 이들을 <strong>배타적으로 고르는 게 아니라</strong>,
+    이 페이지처럼 거리·플랫폼·아트 방향에 맞춰 <strong>조합</strong>합니다.
+  </p>
+
+  <table class="impl">
+    <thead>
+      <tr><th>#</th><th>기법</th><th>한 줄 요약</th><th>적합한 거리 / 상황</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td><a href="./08-geometry.html">지오메트리 인스턴싱</a></td><td>진짜 blade 메시를 수만 개 인스턴싱, 버텍스 <code>sin</code> 바람</td><td>근거리 · 최고 품질</td></tr>
+      <tr><td>2</td><td><a href="./08-billboard.html">빌보드 / 크로스쿼드</a></td><td>카메라 향하는 알파 카드, 알파 테스트로 오버드로우 억제</td><td>중거리 · 밀도 확보</td></tr>
+      <tr><td>3</td><td><a href="./08-shell.html">셸 텍스처링</a></td><td>여러 층을 쌓아 털처럼, 층마다 알파 컷</td><td>짧은 잔디 · 카펫</td></tr>
+      <tr><td>4</td><td><a href="./08-terrain.html">지형 텍스처</a></td><td>지면에 잔디색을 직접 칠해 blade 없이 초원</td><td>원거리 · 배경</td></tr>
+      <tr><td>5</td><td><a href="./08-raymarch.html">레이마칭 잔디</a></td><td>픽셀에서 볼륨을 행진해 잔디 밀도를 적분</td><td>스타일 · 셰이더 아트</td></tr>
+      <tr><td>6</td><td><a href="./08-trample.html">밟힘 / 인터랙션</a></td><td>플레이어 접촉으로 잔디를 눕히는 상호작용 맵</td><td>게임플레이 피드백</td></tr>
+      <tr><td>7</td><td><a href="./08-bezier.html">베지어 곡선 blade</a></td><td>제어점 곡선으로 자연스러운 휘어짐</td><td>근거리 · 고급 실루엣</td></tr>
+      <tr><td>8</td><td><a href="./08-toon.html">툰 / 스타일라이즈드</a></td><td>밝기를 밴딩해 만화 톤, 넓은 잎</td><td>스타일 게임 · 모바일</td></tr>
+      <tr><td>9</td><td><a href="./08-wind.html">통합 바람 그리드</a></td><td>바람장 + 이동 vorticle로 밭 전체가 함께 눕음</td><td>대규모 야외 · 분위기</td></tr>
+      <tr><td>10</td><td>LOD 통합 씬 <em>(이 페이지)</em></td><td>근:지오 · 중:빌보드 · 원:텍스처를 거리 페이드로 결합</td><td>실전 프로덕션</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout perf">
+    <span class="tag">모바일 프로덕션 체크리스트</span>
+    ① <strong>GPU 인스턴싱</strong>은 필수(1 드로우콜). ② <strong>컬링을 GPU로</strong>(컴퓨트 프러스텀·거리,
+    저사양은 RenderTexture(UAV) 우회). ③ <strong>LOD 스택</strong>으로 근·중·원을 나눠 오버드로우 억제.
+    ④ 바람은 <strong>버텍스에서</strong>. ⑤ 알파는 <strong>블렌드 대신 마스크(테스트)</strong> + 타이트한 카드 메시.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>모든 페이드의 기준은 <strong><code>NEAR</code>/<code>FAR</code> 두 숫자</strong> — cbuffer로 세 패스에 공유.</li>
+    <li>원경 <strong>텍스처 지면</strong> → 중경 <strong>빌보드(페이드 인/아웃)</strong> → 근경 <strong>지오메트리(페이드 아웃)</strong> 순으로 그림.</li>
+    <li>근거리 blade는 페이드 시 <strong>키를 줄여 땅속으로 가라앉혀</strong> 팝핑을 숨김.</li>
+    <li>LOD 페이드 구간은 <strong>서로 겹치게</strong> 잡아야 빈틈 없는 전환.</li>
+    <li>실전은 세 기법을 <strong>거리 링별 인스턴스 분류 + Indirect</strong>로 나눠 낭비 제거.</li>
+    <li>10가지 기법은 <strong>배타적 선택이 아니라 조합</strong> — 거리·플랫폼·아트에 맞춰 섞는다.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-wind.html">← 통합 바람 그리드</a>
+    <a href="./08-grass.html">8장 허브 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

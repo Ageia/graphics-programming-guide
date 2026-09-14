@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 통합 바람 그리드 / vorticles (Ghost of Tsushima 풍) — C++/DirectX 11</title>
+<meta name="description" content="월드를 셀 그리드로 보고 방향성 돌풍 파동에 이동하는 소용돌이(vorticle)를 더한 절차적 바람장을 HLSL로 샘플해 잔디를 눕히고, 바람장 화살표까지 시각화하는 통합 바람 시뮬을 C++/DirectX 11로 구현." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">통합 바람 그리드 / vorticles</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 9/10</span>
+  <h1>통합 바람 그리드 / vorticles — Ghost of Tsushima 바람 시뮬</h1>
+  <p class="lead">
+    지금까지 바람은 포기마다 <code>sin</code> 하나였습니다. 이제 <strong>월드 전체가 공유하는 바람장</strong>을
+    만듭니다. 월드를 셀 그리드로 보고 셀마다 방향/세기를 정한 뒤(여기선 절차적 필드), 거기에
+    <strong>움직이는 소용돌이(vorticle)</strong>를 더해 회오리 돌풍을 만듭니다. 잔디는 자기 발밑의 바람 벡터를
+    샘플해 <strong>그 방향으로 눕고</strong>, 방향성 <strong>돌풍 파동</strong>이 밭을 가로질러 퍼집니다.
+    바람장을 반환하는 HLSL 함수 하나를 잔디 셰이더와 <strong>화살표 시각화 셰이더가 공유</strong>하는 게 핵심이며,
+    실전에서는 이 함수를 flow map 텍스처로 구워 씁니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
+    <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>바람장 함수</strong> — 위치·시간으로 2D 바람 벡터를 반환하는 <code>windAt()</code>를 HLSL로 만듭니다.</li>
+    <li><strong>돌풍 파동</strong> — 방향을 따라 흐르는 <code>sin</code> 게이트로 직진성 돌풍을 만듭니다.</li>
+    <li><strong>vorticle</strong> — 원을 그리며 이동하는 소용돌이 중심의 접선 회전을 더합니다.</li>
+    <li><strong>잔디 눕히기</strong> — 잔디가 발밑 바람 벡터를 샘플해 <code>t²</code> 가중으로 눕습니다.</li>
+    <li><strong>화살표 시각화</strong> — 셀마다 화살표를 인스턴싱해 바람장을 눈으로 봅니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 바람장 함수 — 잔디와 화살표가 공유</h2>
+  <p>
+    바람장의 진짜 핵심은 <strong>같은 함수를 두 셰이더가 공유</strong>한다는 점입니다. 잔디는 눕기 위해,
+    화살표는 방향을 그리기 위해 <em>정확히 같은 <code>windAt()</code></em>를 호출해야 둘이 일치합니다.
+    HLSL은 <code>#include</code>를 지원하므로 바람장 함수를 별도 파일에 두고 양쪽에서 포함합니다.
+    함수는 <strong>방향성 돌풍(base)</strong>과 <strong>회전하는 vorticle</strong> 두 항의 합을 반환합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>wind_field.hlsli</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">// 잔디 셰이더와 화살표 셰이더가 #include 로 공유하는 바람장.
+// pos : 월드 XZ, t : 시간, wS : 바람 세기, vS : 소용돌이 세기
+// 반환 : 그 지점의 2D 바람 벡터(방향 × 세기)
+float2 windAt(float2 pos, float t, float wS, float vS) {
+    // ── ① 직진성 돌풍 파동 ──
+    float2 dirW = float2(0.8, 0.35);           // 밭을 흐르는 큰 바람 방향
+    float2 nd   = normalize(dirW);
+    // 방향축을 따라 흐르는 sin 게이트(0..1). 시간이 지나면 파동이 전진한다.
+    float gust  = sin(dot(pos, nd) * 0.25 - t * 1.6) * 0.5 + 0.5;
+    float2 base = nd * gust * wS;
+
+    // ── ② 이동하는 소용돌이(vorticle) ──
+    float2 vc  = float2(cos(t * 0.5), sin(t * 0.5)) * 10.0;  // 중심이 원을 그림
+    float2 rel = pos - vc;
+    float  r   = length(rel);
+    float2 tang = float2(-rel.y, rel.x) / (r + 1.0);         // 접선 방향(회전)
+    float2 vort = tang * exp(-r * 0.08) * vS * 2.0;          // 가까울수록 강함
+
+    return base + vort;
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">왜 절차적인가</span>
+    셀 그리드에 바람을 <strong>텍스처로 저장</strong>하면 샘플 한 번으로 끝나지만, 여기서는 원리를 보이려고
+    <strong>수식으로 즉석 계산</strong>합니다. 잔디 수만 개가 매 프레임 이 함수를 호출해도 <code>sin</code>·
+    <code>exp</code> 몇 번이라 버텍스 셰이더에서 감당됩니다. 실전 규모(수십만~수백만)에서는 5절 팁대로
+    flow map으로 구워 텍스처 샘플로 대체합니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. 셀 그리드와 cbuffer</h2>
+  <p>
+    "월드를 셀 그리드로 본다"는 개념을 CPU 쪽에서 준비합니다. 화살표 시각화(5절)는 셀마다 화살표 하나를
+    그리므로 <strong>셀 중심 좌표 목록</strong>이 필요합니다. 잔디 자체는 절차적 함수를 쓰므로 그리드 데이터가
+    필요 없지만, "이 필드가 어떤 해상도의 그리드로 이해되는지"를 셀 목록으로 명시해 둡니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>wind_grid.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+#include &lt;vector&gt;
+using namespace DirectX;
+
+// 프레임 상수: 바람장 파라미터를 잔디·화살표 셰이더에 동일하게 전달
+struct WindFrameCB {
+    XMFLOAT4X4 vp;      // view * proj (row_major)
+    float time;
+    float windStrength; // wS
+    float vortStrength; // vS
+    float _pad;
+};
+static_assert(sizeof(WindFrameCB) % 16 == 0, "cbuffer는 16바이트 배수");
+
+// 바람장 화살표를 그릴 셀 중심 목록 (4단위 격자, -24..24)
+std::vector&lt;XMFLOAT2&gt; makeWindCells() {
+    std::vector&lt;XMFLOAT2&gt; cells;
+    for (int z = -24; z &lt;= 24; z += 4)
+        for (int x = -24; x &lt;= 24; x += 4)
+            cells.push_back(XMFLOAT2((float)x, (float)z));
+    return cells;                    // 13x13 = 169개 셀
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 버텍스 셰이더 — 잔디를 바람 방향으로 눕히기</h2>
+  <p>
+    잔디는 <a href="./08-geometry.html">지오메트리 잔디</a>의 인스턴싱을 그대로 쓰되, 흔드는 방식만
+    바람장으로 바꿉니다. 각 blade가 자기 뿌리 위치 <code>p.xz</code>를 <code>windAt()</code>에 넣어
+    <strong>발밑 바람 벡터 <code>wv</code></strong>를 얻고, 그 방향으로 <code>t²</code> 가중해 눕힙니다.
+    바람이 셀수록 <strong>끝을 살짝 눌러</strong>(<code>p.y</code> 감소) 실제로 휘어 눕는 느낌을 냅니다.
+    바람이 강한 곳은 색을 하이라이트해 돌풍의 흐름이 눈에 보이게 합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>wind_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">#include "wind_field.hlsli"      // windAt() 공유
+
+cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;
+    float uTime;
+    float uWs;                   // 바람 세기
+    float uVs;                   // 소용돌이 세기
+    float _pad;
+};
+
+struct VSIn {
+    float2 blade : BLADE0;       // (side, t)
+    float4 ia    : INSTA0;       // (posX, posZ, angle, height)
+    float2 ib    : INSTB0;       // (phase, colVar)
+};
+struct VSOut {
+    float4 pos : SV_Position;
+    float3 col : COLOR0;
+    float  t   : TEXCOORD0;
+};
+
+VSOut main(VSIn i) {
+    float side = i.blade.x;
+    float t    = i.blade.y;
+    float ang  = i.ia.z;
+    float h    = i.ia.w;
+    float w = (1.0 - t) * 0.06;
+
+    float3 dir = float3(cos(ang), 0.0, sin(ang));
+    float3 p = float3(i.ia.x, 0.0, i.ia.y);
+
+    // ── 발밑 바람 벡터를 샘플 ──
+    float2 wv  = windAt(p.xz, uTime, uWs, uVs);
+    float  mag = length(wv);
+
+    p += dir * side * w;                    // 좌/우 폭
+    p.y += t * h;                           // 세우기
+    // 바람 방향으로 눕히기(위로 갈수록, t² 가중)
+    p.xz += wv * t * t * 0.35;
+    p.y  -= min(mag, 2.0) * t * h * 0.12;   // 셀수록 끝을 눌러 눕힘
+
+    float3 c = lerp(float3(0.09, 0.22, 0.08), float3(0.36, 0.62, 0.20), t);
+    // 바람 센 곳 하이라이트 → 돌풍 흐름이 보인다
+    c = lerp(c, float3(0.6, 0.75, 0.3), clamp(mag * 0.15, 0.0, 0.4));
+
+    VSOut o;
+    o.col = c * lerp(0.4, 1.0, t);          // 아래쪽 AO
+    o.t   = t;
+    o.pos = mul(float4(p, 1.0), uVP);
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>wind_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">struct PSIn {
+    float4 pos : SV_Position;
+    float3 col : COLOR0;
+    float  t   : TEXCOORD0;
+};
+
+float4 main(PSIn i) : SV_Target {
+    return float4(i.col, 1.0);
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    눕히기를 <code>p.xz += wv</code>로 <strong>선형</strong>하게 주면 바람이 세질 때 blade가 무한정 늘어나
+    찢어집니다. <code>t*t</code> 가중으로 뿌리를 고정하고, <code>min(mag, 2.0)</code>으로 세기를
+    <strong>클램프</strong>해야 폭풍에도 blade가 지면 안에 붙어 자연스럽게 눕습니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 화살표 지오메트리 — 셀마다 하나 인스턴싱</h2>
+  <p>
+    바람장을 눈으로 보려면 셀마다 <strong>바람 방향을 가리키는 화살표</strong>를 그립니다. 화살표 한 개는
+    자루+머리를 <code>LINESTRIP</code> 5정점으로 만들고(밑→끝→머리왼쪽, 끝→머리오른쪽), 셀 좌표를
+    <strong>per-instance</strong>로 넘겨 <a href="./08-geometry.html">지오메트리 잔디</a>와 같은 인스턴싱으로
+    169개 셀을 <strong>한 번에</strong> 그립니다. 정점 데이터 <code>aP.x</code>는 자루를 따라 0(밑)~1(끝),
+    <code>aP.y</code>는 머리의 좌우 벌어짐입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>화살표 버퍼 생성</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// 화살표 지오메트리: 자루(밑→끝) + 머리 두 선. LINESTRIP 5정점.
+//  aP.x : 0(base)..1(tip) 자루 축,  aP.y : 머리 좌우
+const float arrowGeo[] = {
+    0.0f, 0.0f,   1.0f, 0.0f,   0.75f, 1.0f,   1.0f, 0.0f,   0.75f, -1.0f
+};
+
+ComPtr&lt;ID3D11Buffer&gt; g_arrowVB;    // 슬롯 0: 정점당(aP)
+ComPtr&lt;ID3D11Buffer&gt; g_cellVB;     // 슬롯 1: 인스턴스당(셀 중심 XZ)
+UINT g_cellCount = 0;
+
+void createArrowBuffers(ID3D11Device* dev) {
+    auto cells = makeWindCells();
+    g_cellCount = (UINT)cells.size();
+
+    auto makeVB = [&amp;](const void* data, UINT bytes, ComPtr&lt;ID3D11Buffer&gt;&amp; out) {
+        D3D11_BUFFER_DESC bd = {};
+        bd.Usage = D3D11_USAGE_IMMUTABLE;
+        bd.ByteWidth = bytes;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA sd = { data, 0, 0 };
+        dev-&gt;CreateBuffer(&amp;bd, &amp;sd, out.GetAddressOf());
+    };
+    makeVB(arrowGeo, sizeof(arrowGeo), g_arrowVB);
+    makeVB(cells.data(), (UINT)(cells.size() * sizeof(XMFLOAT2)), g_cellVB);
+}
+
+// 입력 레이아웃: 자루 정점(슬롯0) + 셀 중심(슬롯1, per-instance)
+D3D11_INPUT_ELEMENT_DESC arrowLayout[] = {
+    { "APOS", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0,
+      D3D11_INPUT_PER_VERTEX_DATA,   0 },
+    { "CELL", 0, DXGI_FORMAT_R32G32_FLOAT, 1, 0,
+      D3D11_INPUT_PER_INSTANCE_DATA, 1 },   // StepRate=1
+};</code></pre>
+  </div>
+
+  <p>
+    화살표 버텍스 셰이더도 <strong>같은 <code>windAt()</code></strong>를 호출해 셀 중심의 바람 벡터를 얻고,
+    그 방향으로 자루를 회전·스케일합니다. 머리 색을 자루 축(<code>vHead</code>)에 따라 파랑→노랑으로 바꿔
+    방향이 잘 보이게 합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>arrow_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">#include "wind_field.hlsli"
+
+cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;
+    float uTime; float uWs; float uVs; float _pad;
+};
+
+struct VSIn {
+    float2 aP   : APOS0;    // (자루축 0..1, 머리 좌우)
+    float2 cell : CELL0;    // 셀 중심 XZ (per-instance)
+};
+struct VSOut {
+    float4 pos  : SV_Position;
+    float  head : TEXCOORD0;
+};
+
+VSOut main(VSIn i) {
+    float2 wv  = windAt(i.cell, uTime, uWs, uVs);
+    float  mag = length(wv);
+    float2 d   = mag &gt; 0.001 ? normalize(wv) : float2(1.0, 0.0);
+    float2 n   = float2(-d.y, d.x);           // 화살표 폭 방향
+    float  len = clamp(mag * 0.5, 0.2, 1.6);  // 세기 → 길이
+
+    // 셀 중심에서 방향 d로 뻗고, 머리는 n으로 벌린다
+    float2 xz = i.cell + d * i.aP.x * len + n * i.aP.y * 0.18 * len;
+
+    VSOut o;
+    o.head = i.aP.x;
+    o.pos  = mul(float4(xz.x, 0.05, xz.y, 1.0), uVP);  // 지면 살짝 위
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>arrow_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">struct PSIn {
+    float4 pos  : SV_Position;
+    float  head : TEXCOORD0;
+};
+
+float4 main(PSIn i) : SV_Target {
+    // 밑(파랑) → 끝(노랑)으로 방향을 강조
+    float3 c = lerp(float3(0.2, 0.5, 1.0), float3(1.0, 0.9, 0.3), i.head);
+    return float4(c, 1.0);
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>5. 드로우 — 잔디 + (옵션)화살표</h2>
+  <p>
+    한 프레임에 먼저 잔디를 <code>TRIANGLESTRIP</code>으로 인스턴싱하고, 시각화 토글이 켜져 있으면
+    화살표를 <code>LINESTRIP</code>으로 인스턴싱합니다. 둘 다 같은 프레임 cbuffer(<code>b0</code>)를 쓰므로
+    바람 파라미터가 자동으로 일치합니다. 화살표는 5정점씩 셀 개수만큼 인스턴싱합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void drawWindScene(ID3D11DeviceContext* ctx, const XMMATRIX&amp; viewProj,
+                   float time, float wS, float vS,
+                   UINT grassCount, bool showArrows) {
+    // 프레임 cbuffer 갱신(잔디·화살표가 공유)
+    WindFrameCB cb;
+    XMStoreFloat4x4(&amp;cb.vp, viewProj);      // row_major, 전치 없음
+    cb.time = time; cb.windStrength = wS; cb.vortStrength = vS; cb._pad = 0;
+    ctx-&gt;UpdateSubresource(g_frameCB.Get(), 0, nullptr, &amp;cb, 0, 0);
+    ctx-&gt;VSSetConstantBuffers(0, 1, g_frameCB.GetAddressOf());
+
+    // ── 잔디 (지오메트리 인스턴싱) ──
+    UINT gStr[2] = { sizeof(BladeVertex), sizeof(GrassInstance) };
+    UINT gOff[2] = { 0, 0 };
+    ID3D11Buffer* gvbs[2] = { g_bladeVB.Get(), g_instVB.Get() };
+    ctx-&gt;IASetInputLayout(g_grassLayout.Get());
+    ctx-&gt;IASetVertexBuffers(0, 2, gvbs, gStr, gOff);
+    ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    ctx-&gt;VSSetShader(g_windVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_windPS.Get(), nullptr, 0);
+    ctx-&gt;DrawInstanced(g_bladeVertexCount, grassCount, 0, 0);
+
+    // ── 바람장 화살표 (옵션) ──
+    if (showArrows) {
+        UINT aStr[2] = { sizeof(float) * 2, sizeof(XMFLOAT2) };
+        UINT aOff[2] = { 0, 0 };
+        ID3D11Buffer* avbs[2] = { g_arrowVB.Get(), g_cellVB.Get() };
+        ctx-&gt;IASetInputLayout(g_arrowLayout.Get());
+        ctx-&gt;IASetVertexBuffers(0, 2, avbs, aStr, aOff);
+        ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
+        ctx-&gt;VSSetShader(g_arrowVS.Get(), nullptr, 0);
+        ctx-&gt;PSSetShader(g_arrowPS.Get(), nullptr, 0);
+        ctx-&gt;DrawInstanced(5, g_cellCount, 0, 0);   // 5정점 × 셀 개수
+    }
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">실전: flow map으로 굽기</span>
+    수식으로 매 프레임 계산하는 대신, 실전에서는 <code>windAt()</code>를 <strong>RenderTexture(RG16F)</strong>에
+    한 번 렌더링해 <strong>flow map</strong>으로 굽습니다. 잔디 셰이더는 그 텍스처를 <code>Sample</code> 한 번으로
+    읽으므로 <code>sin</code>/<code>exp</code> 비용이 사라지고, 아티스트가 flow map을 손으로 칠해 바람을
+    디자인할 수도 있습니다. Ghost of Tsushima의 바람은 이렇게 <strong>텍스처 기반 필드 + 동적 vorticle</strong>의
+    조합입니다. 저사양 기기는 버텍스에서 텍스처 샘플이 느릴 수 있으니 셀 그리드 해상도로 타협합니다.
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    화살표를 <code>LINESTRIP</code>으로 그릴 때 5정점이 <strong>인스턴스 경계를 넘어 이어지지 않도록</strong>
+    <code>DrawInstanced</code>가 인스턴스마다 정점 범위를 재시작한다는 점에 의존합니다(잔디 스트립과 동일 원리).
+    만약 한 버퍼에 모든 화살표를 이어 담아 비인스턴싱으로 그리면 셀과 셀 사이에 <strong>잘못된 선분</strong>이
+    생깁니다.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>바람은 <strong><code>windAt()</code> 함수 하나</strong>로 정의하고 잔디·화살표가 <code>#include</code>로 공유.</li>
+    <li>바람장 = <strong>방향성 돌풍 파동(base)</strong> + <strong>이동하는 vorticle(회전)</strong>의 합.</li>
+    <li>잔디는 발밑 바람을 샘플해 <strong><code>t²</code> 가중 + 세기 클램프</strong>로 눕힘.</li>
+    <li>셀 그리드를 <strong>화살표 인스턴싱</strong>으로 시각화해 방향 필드를 눈으로 확인.</li>
+    <li>실전은 <strong>flow map(RenderTexture)</strong>으로 구워 텍스처 샘플로 대체.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-toon.html">← 툰 / 스타일라이즈드</a>
+    <a href="./08-lodcombine.html">LOD 통합 씬 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

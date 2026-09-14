@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 볼류메트릭 레이마칭 잔디 (메시 0) — C++/DirectX 11</title>
+<meta name="description" content="정점도 인스턴스도 없이 풀스크린 삼각형과 픽셀 셰이더의 광선 행진만으로 잔디밭을 그리는 볼류메트릭 레이마칭을 C++/DirectX 11/HLSL로 한 줄 한 줄 구현." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">볼류메트릭 레이마칭</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 5/10</span>
+  <h1>볼류메트릭 레이마칭 — 메시 0, 픽셀마다 광선 행진</h1>
+  <p class="lead">
+    이번엔 정반대의 접근입니다. <strong>정점도 인스턴스도 하나 없습니다.</strong> 화면을 덮는
+    <strong>풀스크린 삼각형</strong> 하나만 그리고, 나머지는 전부 <strong>픽셀 셰이더</strong>가 합니다.
+    픽셀마다 카메라에서 광선을 쏘고, <strong>3D 셀(Worley류) 노이즈</strong>로 잔디 밀도를 판정하며
+    볼륨 안을 <strong>스텝 행진</strong>해 색을 쌓습니다. 위로 갈수록 가늘어지는 taper로 잎 실루엣을 만들고,
+    잔디 슬랩(높이 0~1) <em>안</em>에서만 정밀하게 행진해 밴딩을 줄입니다. 비용은 정직하게
+    <strong>픽셀 수 × 스텝 수</strong> — 이 페이지에서 풀스크린 삼각형 생성부터 광선 basis, 밀도 함수,
+    행진 루프까지 <strong>성분 하나까지</strong> D3D11로 풀어봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 이 데모는 지오메트리를 변환하지 않고
+    픽셀 셰이더에서 광선을 직접 만들기 때문에 뷰-투영 행렬 대신 <strong>카메라 basis(eye/forward/right/up)</strong>를
+    cbuffer로 넘깁니다. 아래 코드는 원리 확인용 학습 예제입니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>풀스크린 삼각형</strong> — 정점 버퍼 없이 <code>SV_VertexID</code> 3개로 화면 전체를 덮습니다.</li>
+    <li><strong>카메라 basis cbuffer</strong> — eye·forward·right·up과 시간·바람·주파수·스텝수를 넘깁니다.</li>
+    <li><strong>광선 생성</strong> — NDC 좌표와 basis로 픽셀마다 광선 방향 <code>rd</code>를 만듭니다.</li>
+    <li><strong>3D 셀 노이즈 밀도</strong> — 해시로 셀마다 점을 흩뿌리고 최근접 거리로 잔디 유무를 판정합니다.</li>
+    <li><strong>슬랩 안 행진</strong> — 잔디 층 진입/바닥 지점을 해석적으로 구해 그 사이만 스텝 행진합니다.</li>
+    <li><strong>드로우 1콜</strong> — 깊이 테스트를 끄고 <code>Draw(3, 0)</code> 한 번으로 화면을 채웁니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 풀스크린 삼각형 — 정점 버퍼가 아예 없다</h2>
+  <p>
+    레이마칭은 화면의 모든 픽셀에서 픽셀 셰이더를 한 번씩 돌리는 게 목적입니다. 화면을 덮는 가장 싼 방법은
+    사각형(2삼각형·6정점)이 아니라 <strong>화면보다 큰 삼각형 하나</strong>입니다. 그런데 그 삼각형조차
+    정점 버퍼로 올릴 필요가 없습니다. 버텍스 셰이더에서 <strong><code>SV_VertexID</code></strong>(0,1,2)만 보고
+    클립 좌표를 계산하면 됩니다. 입력 레이아웃도, 정점 버퍼도 <code>nullptr</code>로 두고 <code>Draw(3, 0)</code>만
+    부릅니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>fullscreen_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">struct VSOut {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;   // NDC [-1,1] (광선 생성에 그대로 씀)
+};
+
+// 정점 버퍼 없이 SV_VertexID로 화면을 덮는 큰 삼각형을 만든다.
+//  id=0 → (-1,-1), id=1 → (3,-1), id=2 → (-1,3)
+//  이 세 점이 이루는 삼각형이 [-1,1]² 화면을 완전히 덮는다.
+VSOut main(uint id : SV_VertexID) {
+    VSOut o;
+    float2 p = float2((id == 1) ? 3.0 : -1.0,
+                      (id == 2) ? 3.0 : -1.0);
+    o.uv  = p;                       // NDC 그대로 픽셀로 넘김
+    o.pos = float4(p, 0.0, 1.0);     // 이미 클립 좌표
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">왜 사각형이 아니라 삼각형인가</span>
+    사각형은 대각선에서 두 삼각형이 맞닿아 그 라인의 픽셀이 <strong>두 번</strong> 셰이딩되고, 쿼드 단위 래스터라이저에서
+    캐시·미분 효율도 떨어집니다. 화면보다 큰 삼각형 하나는 대각선 봉합이 없어 <strong>픽셀당 정확히 한 번</strong>만
+    돕니다. 클리핑으로 잘려 나가는 바깥 부분은 래스터 단계에서 공짜로 버려집니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. 카메라 basis를 cbuffer로 넘긴다</h2>
+  <p>
+    보통은 정점을 <code>view * proj</code>로 변환하지만, 여기선 반대로 <strong>픽셀에서 월드로</strong> 광선을 쏩니다.
+    그러려면 카메라의 위치(<code>eye</code>)와 세 축(<code>forward/right/up</code>)이 필요합니다. C++에서 카메라
+    파라미터로부터 이 basis를 만들어 cbuffer로 올립니다. 원본 WebGL 데모의 <code>camBasis()</code>와 같은 값을
+    DirectXMath로 계산하는 것뿐입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>raymarch_cb.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+// HLSL cbuffer와 바이트 배치를 정확히 맞춘다 (16바이트 정렬).
+struct RayCB {
+    XMFLOAT3 eye;     float aspect;   // ro + 화면 종횡비
+    XMFLOAT3 fwd;     float time;     // forward + uTime
+    XMFLOAT3 right;   float freq;     // right   + 밀도 주파수
+    XMFLOAT3 up;      float wind;     // up      + 바람 세기
+    int   steps;      float _pad[3];  // 스텝 수
+};
+static_assert(sizeof(RayCB) % 16 == 0, "cbuffer는 16바이트 배수여야 함");
+
+// 카메라 각도(yaw/pitch)와 거리로 basis를 만든다 (좌표계: 왼손, y-up).
+RayCB makeRayCB(float yaw, float pitch, float dist,
+                XMFLOAT3 target, float aspect,
+                float time, float freq, float wind, int steps) {
+    // 궤도 카메라: target을 중심으로 yaw/pitch/dist로 eye를 배치
+    XMVECTOR tgt = XMLoadFloat3(&amp;target);
+    XMVECTOR off = XMVectorSet(
+        cosf(pitch) * sinf(yaw),
+        sinf(pitch),
+        cosf(pitch) * cosf(yaw), 0.0f);
+    XMVECTOR eye = XMVectorAdd(tgt, XMVectorScale(off, dist));
+
+    XMVECTOR fwd   = XMVector3Normalize(XMVectorSubtract(tgt, eye));
+    XMVECTOR wUp   = XMVectorSet(0, 1, 0, 0);
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(wUp, fwd)); // 왼손: up × fwd
+    XMVECTOR up    = XMVector3Cross(fwd, right);
+
+    RayCB cb = {};
+    XMStoreFloat3(&amp;cb.eye, eye);   cb.aspect = aspect;
+    XMStoreFloat3(&amp;cb.fwd, fwd);   cb.time   = time;
+    XMStoreFloat3(&amp;cb.right, right); cb.freq = freq;
+    XMStoreFloat3(&amp;cb.up, up);     cb.wind   = wind;
+    cb.steps = steps;
+    return cb;
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    HLSL cbuffer는 <strong>float3 뒤에 float 하나</strong>를 붙이면 딱 16바이트로 맞아 떨어집니다(위 구조체가 그 배치).
+    무심코 <code>float3</code> 뒤에 또 <code>float3</code>를 두면 패킹 규칙 때문에 두 번째가 다음 16바이트 경계로
+    밀려 값이 어긋납니다. C++ 구조체와 HLSL <code>cbuffer</code> 선언의 <strong>필드 순서·크기</strong>를 한 몸으로 관리하세요.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 광선 생성 + 3D 셀 노이즈 밀도 함수</h2>
+  <p>
+    픽셀 셰이더가 받은 NDC 좌표 <code>uv</code>와 basis로 광선 방향을 만듭니다.
+    <code>rd = normalize(fwd + (uv.x·aspect·right + uv.y·up)·0.55)</code> — 0.55는 시야각(FOV)을 정하는 상수입니다.
+    밀도 함수 <code>dens()</code>는 월드 점 <code>wp</code>가 잔디 안인지(1)/밖인지(0) 판정합니다.
+    높이 <code>h = wp.y</code>가 0~1을 벗어나면 잔디가 없고, 그 안에서는 <strong>3×3 이웃 셀</strong>을 훑어
+    해시로 흩뿌린 점까지의 <strong>최근접 거리</strong>(Worley)를 재고, 그 거리가 <code>0.42·(1-h)</code>보다
+    작으면 잔디로 칩니다. <code>(1-h)</code>가 곱해져 <strong>위로 갈수록 임계가 작아져 가늘어지는</strong> taper가
+    자연히 생깁니다. 바람은 샘플 좌표를 시간에 따라 흔들어 넣습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>raymarch_ps.hlsl (밀도)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer RayCB : register(b0) {
+    float3 uRo;  float uAsp;   // eye + 종횡비
+    float3 uF;   float uT;     // forward + time
+    float3 uR;   float uFreq;  // right + 밀도 주파수
+    float3 uU;   float uWind;  // up + 바람
+    int    uSteps; float3 _pad;
+};
+
+// 2D 해시: 셀 좌표 → [0,1)² 난수점 (WebGL 데모 h2()와 동일 상수)
+float2 h2(float2 p) {
+    p = float2(dot(p, float2(127.1, 311.7)),
+               dot(p, float2(269.5, 183.3)));
+    return frac(sin(p) * 43758.5453);
+}
+
+// 월드 점 wp가 잔디 볼륨 안이면 1, 아니면 0.
+float dens(float3 wp) {
+    float h = wp.y;
+    if (h &lt; 0.0 || h &gt; 1.0) return 0.0;          // 슬랩 밖
+
+    // 바람: 높이²에 비례해 위쪽일수록 크게 흔든다
+    float2 wind = float2(sin(uT * 1.2 + wp.z * 0.6),
+                         cos(uT * 1.0 + wp.x * 0.6)) * 0.12 * h * h * uWind;
+
+    float2 xz   = (wp.xz + wind) * uFreq;         // 샘플 좌표(주파수 스케일)
+    float2 cell = floor(xz);
+    float  d    = 9.0;
+    // 3×3 이웃 셀에서 최근접 점까지 거리 (Worley)
+    [unroll] for (int j = -1; j &lt;= 1; ++j)
+    [unroll] for (int i = -1; i &lt;= 1; ++i) {
+        float2 g   = float2(i, j);
+        float2 o   = h2(cell + g);
+        float2 pos = cell + g + o;
+        d = min(d, length(xz - pos));
+    }
+    // 위로 갈수록 임계가 작아져(=가늘어져) 잎 taper가 생긴다
+    return d &lt; 0.42 * (1.0 - h) ? 1.0 : 0.0;
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 슬랩 안에서만 정밀 행진</h2>
+  <p>
+    핵심 최적화입니다. 잔디 볼륨은 <code>y ∈ [0,1]</code>의 얇은 슬랩입니다. 광선이 아래를 향할 때
+    (<code>rd.y &lt; 0</code>) 이 슬랩에 <strong>언제 들어가고(tE)</strong> <strong>언제 바닥에 닿는지(tG)</strong>를
+    <em>해석적으로</em> 풀 수 있습니다. 그 두 지점 사이만 균등 스텝으로 행진하면, 허공을 낭비 없이 건너뛰고
+    잔디가 있을 법한 구간만 촘촘히 볼 수 있어 <strong>밴딩이 크게 줄어듭니다</strong>. 밀도가 1인 첫 지점에서
+    높이 <code>h</code>로 색을 정하고 멈춥니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>raymarch_ps.hlsl (행진 + main)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">struct PSIn {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+};
+
+float4 main(PSIn i) : SV_Target {
+    // 픽셀 NDC + basis로 광선 생성 (0.55 = FOV 상수)
+    float3 rd = normalize(uF + (i.uv.x * uAsp * uR + i.uv.y * uU) * 0.55);
+    float3 ro = uRo;
+
+    // 하늘(위쪽 밝고 지평선 어둡게)
+    float3 sky = lerp(float3(0.55, 0.72, 0.85),
+                      float3(0.20, 0.36, 0.52), saturate(rd.y));
+    float3 col  = sky;
+    float  tHit = 34.0;
+
+    if (rd.y &lt; -0.0001) {
+        // 잔디 슬랩(y:1→0) 진입/바닥 t를 해석적으로 구해 그 사이만 행진
+        float tE = max((1.0 - ro.y) / rd.y, 0.0);   // y=1 진입
+        float tG = (0.0 - ro.y) / rd.y;             // y=0 바닥
+        float step = clamp((tG - tE) / (float)uSteps, 0.008, 0.35);
+        float t = tE;
+        bool found = false;
+
+        [loop] for (int s = 0; s &lt; 200; ++s) {
+            if (s &gt;= uSteps) break;
+            float3 p = ro + rd * t;
+            if (dens(p) &gt; 0.5) {
+                float h = p.y;
+                col  = lerp(float3(0.05, 0.16, 0.04),
+                            float3(0.5, 0.78, 0.28), h)
+                     * lerp(0.3, 1.0, h) * (0.6 + 0.4 * h);
+                tHit = t; found = true; break;
+            }
+            if (p.y &lt;= 0.0) break;
+            t += step;
+        }
+        if (!found) {
+            float3 p = ro + rd * t;
+            if (p.y &lt;= 0.03) { col = float3(0.10, 0.14, 0.07); tHit = tG; } // 사이로 바닥
+            else             { tHit = t; }
+        }
+    }
+
+    // 거리 안개로 먼 잔디를 하늘색에 녹인다
+    float fog = 1.0 - exp(-tHit * 0.05);
+    col = lerp(col, sky, fog * 0.7);
+    return float4(pow(max(col, 0.0), 0.9.xxx), 1.0);  // 감마 살짝
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">비용 = 픽셀 수 × 스텝 수</span>
+    이 기법의 값은 오직 두 수의 곱입니다. 스텝을 <code>140→40</code>으로 낮추면 픽셀 셰이더 부하가 3배 이상
+    가벼워지지만, 슬랩을 성기게 훑어 잔디 표면에 <strong>층(밴딩)</strong>이 보이기 시작합니다. 반대로 스텝을 올리면
+    부드럽지만 4K·저사양에서 급격히 느려집니다. <strong>해상도(픽셀 수)를 0.7배로 낮춰 렌더 타깃을 쓰고 업스케일</strong>하면
+    스텝을 유지하면서도 큰 이득을 봅니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>5. 드로우 — 깊이 끄고 삼각형 하나</h2>
+  <p>
+    렌더 루프는 허무할 정도로 짧습니다. 정점 버퍼도 입력 레이아웃도 없으니 <code>IASetVertexBuffers</code>조차
+    부르지 않습니다. cbuffer만 갱신하고, <strong>깊이 테스트를 끄고</strong>(레이마칭이 깊이를 직접 다루므로),
+    토폴로지를 <code>TRIANGLELIST</code>로 두고 <code>Draw(3, 0)</code> 한 번이면 끝입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void drawRaymarchGrass(ID3D11DeviceContext* ctx, const RayCB&amp; cbData) {
+    // 1) cbuffer 갱신
+    D3D11_MAPPED_SUBRESOURCE m;
+    ctx-&gt;Map(g_rayCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;m);
+    memcpy(m.pData, &amp;cbData, sizeof(RayCB));
+    ctx-&gt;Unmap(g_rayCB.Get(), 0);
+
+    // 2) 입력 조립 없음 — 정점 버퍼/레이아웃 모두 미설정
+    ctx-&gt;IASetInputLayout(nullptr);
+    ctx-&gt;IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
+    ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // 3) 셰이더 + cbuffer(픽셀 셰이더에도 바인딩)
+    ctx-&gt;VSSetShader(g_fsVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_rayPS.Get(), nullptr, 0);
+    ctx-&gt;PSSetConstantBuffers(0, 1, g_rayCB.GetAddressOf());
+
+    // 4) 깊이 테스트 OFF — 레이마칭이 픽셀별로 깊이를 스스로 결정
+    ctx-&gt;OMSetDepthStencilState(g_dssNoDepth.Get(), 0);
+
+    // 5) 삼각형 하나로 화면 전체
+    ctx-&gt;Draw(3, 0);
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    다른 불투명 지오메트리와 <strong>함께</strong> 합성하려면 위 <code>main</code>이 <code>tHit</code>를 이미 계산하므로
+    이를 클립 z로 변환해 <code>SV_Depth</code>로 출력해야 깊이 버퍼와 올바르게 섞입니다. 이 예제는 배경 전용이라
+    깊이를 끄지만, 씬에 얹을 때는 <strong>깊이 출력</strong>을 반드시 추가하세요.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>메시가 <strong>0</strong> — <code>SV_VertexID</code> 풀스크린 삼각형 + 픽셀 셰이더 광선 행진이 전부.</li>
+    <li>변환 행렬 대신 <strong>카메라 basis(eye/fwd/right/up)</strong>를 cbuffer로 넘겨 픽셀에서 광선 생성.</li>
+    <li>잔디는 <strong>3D 셀(Worley) 노이즈</strong>, <code>0.42·(1-h)</code> 임계로 위쪽 taper.</li>
+    <li>슬랩 <strong>[0,1] 안에서만</strong> 해석적 진입/바닥 t 사이를 행진해 밴딩 최소화.</li>
+    <li>비용은 <strong>픽셀 수 × 스텝 수</strong> — 해상도·스텝으로 품질/성능을 저울질.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-terrain.html">← 지형 하이브리드</a>
+    <a href="./08-trample.html">인터랙티브 밟힘 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

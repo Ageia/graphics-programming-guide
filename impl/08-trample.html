@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 인터랙티브 밟힘 잔디 (밟힘맵 + 바람) — C++/DirectX 11</title>
+<meta name="description" content="플레이어 주변 잔디를 바깥으로 눕히고 납작하게 만드는 인터랙티브 밟힘을, 버텍스 거리 계산 버전과 컴퓨트가 밟힘맵을 그리고 버텍스가 샘플하는 실전 버전으로 C++/DirectX 11/HLSL로 구현." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">인터랙티브 밟힘</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 6/10</span>
+  <h1>인터랙티브 밟힘 — 잔디 눕히기 + 바람</h1>
+  <p class="lead">
+    캐릭터가 지나가면 그 주변 잔디가 <strong>바깥으로 휘고 납작</strong>해집니다. 원리는 단순합니다.
+    버텍스 셰이더에서 각 blade 뿌리와 플레이어 위치의 <strong>거리</strong>를 재고, 밟힘 반경 안이면
+    <strong>바깥 방향으로 눕히고 y를 깎습니다</strong>. 이 페이지는 두 버전을 다룹니다. 먼저 uniform 하나로
+    플레이어 위치를 넘기는 <strong>직접 계산 버전</strong>, 그다음 실전 게임이 쓰는
+    <strong>밟힘맵(RenderTexture) 버전</strong> — 컴퓨트 셰이더가 밟힘 방향/세기를 텍스처에 그려두고
+    버텍스가 그걸 <strong>Vertex Texture Fetch(<code>SampleLevel</code>)</strong>로 읽는 구조입니다. 후자는
+    발자국이 서서히 <em>펴지는</em> 잔상, 여러 캐릭터 동시 처리까지 자연스럽게 확장됩니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
+    <code>view * proj</code> 순서로 곱합니다. blade 메시·인스턴스 버퍼·입력 레이아웃은
+    <a href="./08-geometry.html">지오메트리 잔디</a>와 동일하다고 가정합니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>플레이어 위치 cbuffer</strong> — <code>uPlayerPos</code>·<code>uTrampleRadius</code>·바람·시간·VP를 넘깁니다.</li>
+    <li><strong>거리 → 휨 세기</strong> — 뿌리~플레이어 거리로 <code>smoothstep</code> 영향력을 만듭니다.</li>
+    <li><strong>눕히기 + 납작</strong> — 바깥 방향으로 밀고(<code>xz</code>) 높이를 깎습니다(<code>y</code>).</li>
+    <li><strong>밟힘맵 컴퓨트</strong> — 캐릭터들을 밟힘 텍스처(UAV)에 그리고 시간에 따라 회복시킵니다.</li>
+    <li><strong>Vertex Texture Fetch</strong> — 버텍스가 <code>SampleLevel</code>로 밟힘맵을 읽어 적용합니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 플레이어 위치를 cbuffer로</h2>
+  <p>
+    가장 단순한 버전은 밟힘 중심 한 점을 uniform으로 넘기는 것입니다. 마우스 호버 지점을 지면 평면에 투영해
+    월드 좌표 <code>uPlayerPos</code>(xz)로 만들고, 반경 <code>uTrampleRadius</code>와 함께 cbuffer에 담습니다.
+    바람 관련 값도 같이 넣어 밟힘과 바람이 한 버텍스 셰이더에서 합쳐지게 합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>trample_cb.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+// HLSL cbuffer와 16바이트 정렬을 맞춘다.
+struct TrampleCB {
+    XMFLOAT4X4 vp;          // view * proj (row_major)
+    XMFLOAT2  playerPos;    // 밟힘 중심 (월드 xz)
+    float     radius;       // 밟힘 반경
+    float     wind;         // 바람 세기
+    float     time;         // uTime
+    float     _pad[3];
+};
+static_assert(sizeof(TrampleCB) % 16 == 0, "cbuffer는 16바이트 배수");
+
+// 마우스 호버(NDC)를 지면 y=0 평면에 광선 교차시켜 월드 xz를 구한다.
+XMFLOAT2 pickGround(XMFLOAT3 eye, XMFLOAT3 rayDir) {
+    // eye.y + t*rayDir.y = 0  →  t = -eye.y / rayDir.y
+    float t = -eye.y / rayDir.y;
+    return { eye.x + rayDir.x * t, eye.z + rayDir.z * t };
+}</code></pre>
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">자동 데모 모드</span>
+    마우스 입력이 없을 땐 원본 데모처럼 밟힘 중심을 원 궤도로 돌립니다:
+    <code>playerPos = (cos(t·0.8)·7, sin(t·0.8)·7)</code>. 입력이 들어오면 그 지점으로 스냅합니다.
+    C++ 쪽에서 매 프레임 이 분기만 해주면 됩니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. 버텍스에서 거리로 휨 세기 계산</h2>
+  <p>
+    이제 blade 뿌리 <code>p.xz</code>에서 플레이어까지 벡터 <code>toB</code>를 구합니다. 그 길이 <code>d</code>가
+    반경보다 작을수록 영향력이 커야 하므로 <code>smoothstep(radius, 0, d)</code>로 <strong>0~1 영향력</strong>을
+    만듭니다(반경에서 0, 중심에서 1). 바깥 방향 <code>away = normalize(toB)</code>로 잎을 밀고, 동시에 높이를
+    깎아 <strong>납작</strong>하게 만듭니다. 밟힌 부분은 색을 살짝 바래게 해 시각적으로도 구분합니다.
+    바람 <code>sway</code>는 <a href="./08-geometry.html">지오메트리 잔디</a>와 같은 <code>t²·sin</code> 공식입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>trample_vs.hlsl (직접 계산 버전)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer TrampleCB : register(b0) {
+    row_major float4x4 uVP;
+    float2 uPlayer;      // 밟힘 중심 (xz)
+    float  uRad;         // 밟힘 반경
+    float  uW;           // 바람
+    float  uT;           // 시간
+    float3 _pad;
+};
+
+struct VSIn {
+    float2 blade : BLADE0;   // (side, t)
+    float4 ia    : INSTA0;   // (posX, posZ, angle, height)
+    float2 ib    : INSTB0;   // (phase, colVar)
+};
+struct VSOut {
+    float4 pos : SV_Position;
+    float3 col : COLOR0;
+    float  t   : TEXCOORD0;
+};
+
+VSOut main(VSIn i) {
+    float t = i.blade.y, side = i.blade.x;
+    float h = i.ia.w,    ang  = i.ia.z;
+    float w = (1.0 - t) * 0.06;
+
+    float3 dir = float3(cos(ang), 0.0, sin(ang));
+    float3 p   = float3(i.ia.x, 0.0, i.ia.y);
+
+    // 바람 (뿌리 고정, 끝일수록 크게)
+    float sway = (sin(uT * 1.6 + i.ib.x)
+                + 0.4 * sin(uT * 3.1 + i.ib.x * 1.7)) * 0.5 * uW * t * t;
+
+    // ── 밟힘: 뿌리~플레이어 거리로 영향력 ──
+    float2 toB  = p.xz - uPlayer;
+    float  d    = length(toB);
+    float  infl = smoothstep(uRad, 0.0, d);           // 중심=1, 반경=0
+    float2 away = normalize(toB + float2(0.0001, 0.0)); // 바깥 방향
+
+    // blade 세우기 + 폭 + 바람
+    p += dir * side * w;
+    p.y += t * h;
+    p.x += sway * 0.9;
+    p.z += sway * 0.5;
+
+    // 밟힘 적용: 바깥으로 눕히고(xz) 납작하게(y↓)
+    p.xz += away * infl * t * 1.0;
+    p.y  -= infl * t * h * 0.8;
+
+    // 색: 밟힌 곳은 살짝 바래게
+    float3 c = lerp(float3(0.09, 0.22, 0.08),
+                    float3(0.35, 0.62, 0.20), t) * lerp(0.8, 1.15, i.ib.y);
+    c = lerp(c, c * float3(1.15, 0.98, 0.7), infl * 0.6);
+
+    VSOut o;
+    o.col = c * lerp(0.4, 1.0, t);
+    o.t   = t;
+    o.pos = mul(float4(p, 1.0), uVP);   // 행벡터
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>trample_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">struct PSIn {
+    float4 pos : SV_Position;
+    float3 col : COLOR0;
+    float  t   : TEXCOORD0;
+};
+
+float4 main(PSIn i) : SV_Target {
+    float3 tip = float3(0.04, 0.07, 0.02) * pow(i.t, 3.0);
+    return float4(i.col + tip, 1.0);
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>normalize(toB)</code>는 <code>d==0</code>(뿌리가 플레이어와 정확히 겹침)에서 0으로 나눠 NaN이 됩니다.
+    위처럼 <code>+float2(0.0001,0)</code>을 더해 방어하세요. 또 <code>smoothstep(uRad, 0, d)</code>는 인자 순서가
+    거꾸로(큰 값이 앞)라 <strong>반경에서 0, 중심에서 1</strong>로 뒤집힌 곡선을 줍니다 — 의도한 방향입니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 실전 구조 — 밟힘맵(RenderTexture)</h2>
+  <p>
+    캐릭터가 여럿이거나, 지나간 자리에 발자국이 <strong>서서히 펴지는</strong> 잔상을 남기려면 버텍스에서 매번
+    거리를 재는 방식으론 한계가 있습니다. 실전 게임(예: Ghost of Tsushima)은 지면을 위에서 내려다본
+    <strong>밟힘맵</strong>이라는 텍스처를 하나 두고, <strong>컴퓨트 셰이더</strong>가 매 프레임 캐릭터들의 밟힘을
+    그 텍스처에 <em>스탬프</em>합니다. 각 텍셀은 밟힘 방향(RG)과 세기(B)를 담고, 세기는 프레임마다 조금씩
+    회복(<code>decay</code>)돼 자연스럽게 펴집니다. 버텍스는 자기 뿌리 위치를 이 맵의 UV로 변환해
+    <strong>한 번 샘플</strong>하기만 하면 됩니다 — 거리 계산이 텍스처 조회로 바뀌어 캐릭터 수와 무관해집니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>trample_cs.hlsl (밟힘맵 갱신)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">// 밟힘맵: RGBA16F.  RG=밟힘 방향(월드 xz), B=세기(0..1)
+RWTexture2D&lt;float4&gt; uTrampleMap : register(u0);
+
+cbuffer StampCB : register(b0) {
+    float2 uArea;        // 밟힘맵이 덮는 월드 크기(예: 64 x 64)
+    float  uDecay;       // 프레임당 회복량(예: 0.02)
+    int    uCount;       // 이번 프레임 캐릭터 수
+    float4 uActors[16];  // xy=월드 위치, z=반경, w=미사용
+};
+
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    uint W, H; uTrampleMap.GetDimensions(W, H);
+    if (id.x &gt;= W || id.y &gt;= H) return;
+
+    // 텍셀 → 월드 xz (맵 중심을 원점으로 가정)
+    float2 uv = (float2(id.xy) + 0.5) / float2(W, H);     // 0..1
+    float2 wp = (uv - 0.5) * uArea;                       // 월드 xz
+
+    float4 cur = uTrampleMap[id.xy];
+    cur.b = max(cur.b - uDecay, 0.0);                     // 서서히 회복
+
+    // 각 캐릭터의 밟힘을 스탬프 (가장 센 것으로 갱신)
+    [loop] for (int a = 0; a &lt; uCount; ++a) {
+        float2 toB = wp - uActors[a].xy;
+        float  d   = length(toB);
+        float  infl = smoothstep(uActors[a].z, 0.0, d);
+        if (infl &gt; cur.b) {
+            cur.rg = normalize(toB + float2(0.0001, 0.0));
+            cur.b  = infl;
+        }
+    }
+    uTrampleMap[id.xy] = cur;
+}</code></pre>
+  </div>
+
+  <p>
+    버텍스 셰이더는 이제 거리 루프 대신 밟힘맵을 <strong>한 번</strong> 샘플합니다. 버텍스 단계에서는 자동
+    밉맵 미분이 없으므로 <strong>반드시 <code>SampleLevel</code></strong>(명시적 LOD 0)을 씁니다 — 이것이
+    Vertex Texture Fetch의 핵심 규칙입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>trample_vs.hlsl (밟힘맵 샘플 버전 · 발췌)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">Texture2D&lt;float4&gt; uTrampleMap : register(t0);
+SamplerState      uSamp       : register(s0);
+
+cbuffer TrampleCB : register(b0) {
+    row_major float4x4 uVP;
+    float2 uArea;    // 밟힘맵이 덮는 월드 크기
+    float  uW;       // 바람
+    float  uT;       // 시간
+};
+
+VSOut main(VSIn i) {
+    float t = i.blade.y, side = i.blade.x;
+    float h = i.ia.w, ang = i.ia.z;
+    float w = (1.0 - t) * 0.06;
+    float3 dir = float3(cos(ang), 0.0, sin(ang));
+    float3 p   = float3(i.ia.x, 0.0, i.ia.y);
+
+    // 뿌리 월드 xz → 밟힘맵 UV
+    float2 uv = p.xz / uArea + 0.5;
+
+    // ★ 버텍스에서는 SampleLevel (명시적 LOD) — Sample()은 VS에서 불가
+    float4 tr   = uTrampleMap.SampleLevel(uSamp, uv, 0);
+    float2 away = tr.rg;     // 밟힘 방향
+    float  infl = tr.b;      // 밟힘 세기
+
+    float sway = (sin(uT * 1.6 + i.ib.x)
+                + 0.4 * sin(uT * 3.1 + i.ib.x * 1.7)) * 0.5 * uW * t * t;
+
+    p += dir * side * w;
+    p.y += t * h;
+    p.x += sway * 0.9; p.z += sway * 0.5;
+
+    // 맵에서 읽은 방향/세기로 눕히기 + 납작
+    p.xz += away * infl * t * 1.0;
+    p.y  -= infl * t * h * 0.8;
+
+    float3 c = lerp(float3(0.09, 0.22, 0.08),
+                    float3(0.35, 0.62, 0.20), t) * lerp(0.8, 1.15, i.ib.y);
+    c = lerp(c, c * float3(1.15, 0.98, 0.7), infl * 0.6);
+
+    VSOut o;
+    o.col = c * lerp(0.4, 1.0, t);
+    o.t   = t;
+    o.pos = mul(float4(p, 1.0), uVP);
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정 — 샘플러는 VS에도 바인딩</span>
+    Vertex Texture Fetch를 쓰려면 SRV와 샘플러를 <strong>픽셀 셰이더가 아니라 버텍스 셰이더 슬롯</strong>에
+    바인딩해야 합니다: <code>VSSetShaderResources</code> / <code>VSSetSamplers</code>. 그리고 밉이 없어도
+    <code>SampleLevel(..., 0)</code>로 LOD를 명시하세요. <code>Sample()</code>은 픽셀 미분이 필요해
+    버텍스에서 컴파일되지 않습니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 밟힘맵 리소스 만들고 파이프라인에 걸기</h2>
+  <p>
+    밟힘맵은 <strong>UAV(컴퓨트가 쓰기)</strong>와 <strong>SRV(버텍스가 읽기)</strong> 두 뷰를 함께 가진
+    <code>RGBA16F</code> 2D 텍스처입니다. 컴퓨트로 갱신한 뒤 SRV로 다시 묶어 잔디를 그립니다. 같은 텍스처를
+    한 드로우에서 UAV와 SRV로 <em>동시에</em> 걸면 안 되므로, 컴퓨트 후 UAV를 풀고 SRV를 바인딩하는 순서가 중요합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>trample_map.cpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">ComPtr&lt;ID3D11Texture2D&gt;           g_trTex;
+ComPtr&lt;ID3D11UnorderedAccessView&gt; g_trUAV;   // 컴퓨트 쓰기
+ComPtr&lt;ID3D11ShaderResourceView&gt;  g_trSRV;   // 버텍스 읽기
+
+void createTrampleMap(ID3D11Device* dev, UINT size) {
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = td.Height = size;             // 예: 256×256
+    td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+    dev-&gt;CreateTexture2D(&amp;td, nullptr, g_trTex.GetAddressOf());
+    dev-&gt;CreateUnorderedAccessView(g_trTex.Get(), nullptr, g_trUAV.GetAddressOf());
+    dev-&gt;CreateShaderResourceView(g_trTex.Get(), nullptr, g_trSRV.GetAddressOf());
+}
+
+void updateAndDraw(ID3D11DeviceContext* ctx, UINT mapSize) {
+    // 1) 컴퓨트로 밟힘맵 갱신
+    ctx-&gt;CSSetShader(g_trampleCS.Get(), nullptr, 0);
+    ctx-&gt;CSSetConstantBuffers(0, 1, g_stampCB.GetAddressOf());
+    ID3D11UnorderedAccessView* uavs[] = { g_trUAV.Get() };
+    ctx-&gt;CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+    ctx-&gt;Dispatch((mapSize + 7) / 8, (mapSize + 7) / 8, 1);
+
+    // 2) UAV 해제 (읽기/쓰기 충돌 방지)
+    ID3D11UnorderedAccessView* nullUAV[] = { nullptr };
+    ctx-&gt;CSSetUnorderedAccessViews(0, 1, nullUAV, nullptr);
+
+    // 3) 버텍스 셰이더에 SRV+샘플러 바인딩 후 잔디 인스턴싱 드로우
+    ctx-&gt;VSSetShaderResources(0, 1, g_trSRV.GetAddressOf());
+    ctx-&gt;VSSetSamplers(0, 1, g_clampSamp.GetAddressOf());
+    ctx-&gt;VSSetShader(g_grassVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_grassPS.Get(), nullptr, 0);
+    ctx-&gt;DrawInstanced(g_bladeVertexCount, g_instanceCount, 0, 0);
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">왜 맵이 이기는가</span>
+    직접 계산 버전은 캐릭터가 <code>K</code>명이면 버텍스마다 <code>K</code>번 거리 계산을 합니다(정점 수 × K).
+    밟힘맵은 <strong>버텍스당 텍스처 조회 1번</strong>으로 고정이고, 캐릭터 처리 비용은 컴퓨트에서
+    맵 해상도에만 의존합니다. 게다가 <code>decay</code>로 <strong>지나간 자취(발자국)</strong>가 공짜로 남고,
+    바람·물결 같은 다른 변형과 같은 맵에 합성할 수도 있습니다.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>밟힘 = 뿌리~플레이어 <strong>거리로 영향력</strong>(<code>smoothstep</code>) → 바깥으로 눕히고 y 깎기.</li>
+    <li>단순 버전은 <strong>uPlayerPos</strong> uniform 하나면 충분하지만 캐릭터 수에 비례해 비싸짐.</li>
+    <li>실전은 <strong>컴퓨트가 밟힘맵(UAV)에 스탬프 + decay</strong>, 버텍스가 <strong>SRV를 SampleLevel</strong>.</li>
+    <li>Vertex Texture Fetch는 <strong>VSSetShaderResources/Samplers</strong> + <code>SampleLevel(...,0)</code>.</li>
+    <li>같은 텍스처를 UAV·SRV로 동시에 걸지 말 것 — <strong>컴퓨트 후 UAV 해제</strong> 순서 준수.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-raymarch.html">← 볼류메트릭 레이마칭</a>
+    <a href="./08-bezier.html">큐빅 베지어 잎 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

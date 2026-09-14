@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 큐빅 베지어 잎 (Ghost of Tsushima 방식) — C++/DirectX 11</title>
+<meta name="description" content="잎 하나를 4개 제어점 큐빅 베지어 곡선으로 정의해 우아하게 휘고 바람에 나부끼게 만드는 Ghost of Tsushima 방식 잔디를 C++/DirectX 11/HLSL로 한 줄 한 줄 구현." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">큐빅 베지어 잎</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 7/10</span>
+  <h1>큐빅 베지어 잎 — Ghost of Tsushima 방식</h1>
+  <p class="lead">
+    직선으로 세운 잔디는 어딘가 뻣뻣합니다. Ghost of Tsushima가 인상적이었던 이유는 잎 하나하나가
+    <strong>우아하게 휘어</strong> 바람에 나부꼈기 때문입니다. 그 비결은 잎을 <strong>4개 제어점의
+    큐빅 베지어 곡선</strong>으로 정의하는 것입니다. 뿌리 <code>P0</code>는 지면에 고정하고, 끝 <code>P3</code>와
+    중간 <code>P2</code>를 바람이 밀어 곡선 전체가 자연스럽게 굽습니다. 버텍스는 자신의 높이비 <code>t(0~1)</code>로
+    곡선 위 점을 평가해 배치되고, 폭 방향으로 좌우로 벌어져 잎 두께를 만듭니다. 곡률·키·방향을 인스턴스마다
+    랜덤화하면 <em>모든 잎이 서로 다르게</em> 휩니다. 이 페이지에서 베지어 공식과 그 미분(접선)까지
+    <strong>성분 하나까지</strong> D3D11로 풀어봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
+    <code>view * proj</code> 순서로 곱합니다. blade 메시(세그먼트 스트립)·인스턴스 버퍼·입력 레이아웃은
+    <a href="./08-geometry.html">지오메트리 잔디</a>와 동일하되, 곡선을 잘 따라가도록 세그먼트를 늘립니다(<code>SEG=9</code>).
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>세그먼트 늘린 blade</strong> — 곡선을 매끄럽게 따라가도록 <code>SEG=9</code> 스트립을 만듭니다.</li>
+    <li><strong>4개 제어점</strong> — 인스턴스 곡률·바람으로 <code>P0..P3</code>를 버텍스에서 구성합니다.</li>
+    <li><strong>큐빅 베지어 평가</strong> — <code>t</code>로 곡선 위 점 <code>B(t)</code>를 계산해 배치합니다.</li>
+    <li><strong>접선(미분)</strong> — <code>B'(t)</code>로 잎이 향한 방향을 얻어 폭·법선을 정합니다.</li>
+    <li><strong>인스턴스 랜덤화</strong> — 잎마다 곡률·키·방향을 달리해 자연스러운 밭을 만듭니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 큐빅 베지어와 그 미분(접선)</h2>
+  <p>
+    큐빅 베지어는 4개 제어점 <code>P0, P1, P2, P3</code>와 매개변수 <code>t ∈ [0,1]</code>로 정의되는 곡선입니다.
+    <code>t=0</code>이면 <code>P0</code>(뿌리), <code>t=1</code>이면 <code>P3</code>(끝)을 정확히 지나고, 중간은
+    <code>P1, P2</code>가 <em>당기는</em> 방향으로 부드럽게 휩니다. 잎의 <strong>접선(진행 방향)</strong>은 곡선을
+    <code>t</code>로 미분한 <code>B'(t)</code>입니다. 폭 방향으로 잎을 벌리려면 이 접선에 수직인 법선이 필요하니
+    미분을 반드시 함께 계산합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">공식</span>
+    <strong>큐빅 베지어</strong><br>
+    <code>B(t) = (1−t)³·P0 + 3(1−t)²·t·P1 + 3(1−t)·t²·P2 + t³·P3</code><br>
+    <strong>접선(1차 미분)</strong><br>
+    <code>B'(t) = 3(1−t)²·(P1−P0) + 6(1−t)·t·(P2−P1) + 3t²·(P3−P2)</code>
+  </div>
+
+  <div class="code">
+    <div class="code-head"><span>bezier.hlsli (평가 함수)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">// 큐빅 베지어 위의 점 B(t)
+float3 bezier(float3 P0, float3 P1, float3 P2, float3 P3, float t) {
+    float u = 1.0 - t;
+    return u*u*u * P0
+         + 3.0*u*u*t * P1
+         + 3.0*u*t*t * P2
+         + t*t*t     * P3;
+}
+
+// 접선 B'(t) — 폭 방향 법선을 구할 때 쓴다
+float3 bezierTangent(float3 P0, float3 P1, float3 P2, float3 P3, float t) {
+    float u = 1.0 - t;
+    return 3.0*u*u   * (P1 - P0)
+         + 6.0*u*t   * (P2 - P1)
+         + 3.0*t*t   * (P3 - P2);
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">왜 세그먼트를 늘리나</span>
+    직선 잔디는 <code>SEG=6</code>이면 충분하지만, 베지어는 곡선을 <strong>꺾은선으로 근사</strong>하므로 세그먼트가
+    적으면 굽은 부분이 각져 보입니다. <code>SEG=9</code>(정점 20개) 정도면 근·중거리에서 매끈합니다.
+    멀리 있는 잎은 LOD로 세그먼트를 줄여도 실루엣 차이가 거의 없습니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. 인스턴스마다 제어점 만들기</h2>
+  <p>
+    제어점은 미리 저장하지 않고 <strong>버텍스에서 즉석 계산</strong>합니다. 잎은 뿌리에서 곧게 시작해 위로 갈수록
+    한 방향(법선 <code>nrm</code>)으로 기웁니다. 인스턴스의 색변주 <code>iC.y</code>로 잎마다 <strong>고유 곡률</strong>을
+    주고, 전역 <code>uCurl</code>과 곱해 사용자가 전체 곡률을 조절할 수 있게 합니다. 바람은 <code>lean</code>에
+    시간 <code>sin</code>을 더해 <code>P2/P3</code>를 앞뒤로 밀어 나부끼게 합니다. 뿌리 <code>P0</code>는 항상
+    원점(잎 로컬)에 고정돼 잎이 땅에서 뽑히지 않습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>bezier_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">#include "bezier.hlsli"
+
+cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;   // view * proj
+    float uT;                 // 시간
+    float uW;                 // 바람 세기
+    float uCurl;              // 전역 곡률 배수
+    float _pad;
+};
+
+struct VSIn {
+    float2 blade : BLADE0;    // (side, t)
+    float4 ia    : INSTA0;    // (posX, posZ, angle, height)
+    float2 ib    : INSTB0;    // (phase, colVar)
+};
+struct VSOut {
+    float4 pos : SV_Position;
+    float3 col : COLOR0;
+    float  t   : TEXCOORD0;
+};
+
+VSOut main(VSIn i) {
+    float t    = i.blade.y;
+    float side = i.blade.x;
+    float h    = i.ia.w;      // 키
+    float ang  = i.ia.z;      // 방위각
+    float w    = (1.0 - t) * 0.055;   // 폭 (위로 갈수록 좁게)
+
+    // 잎이 향한 방향과 그 법선(폭 방향)
+    float3 dir = float3(cos(ang), 0.0, sin(ang));
+    float3 nrm = float3(-dir.z, 0.0, dir.x);
+
+    // 곡률 = 잎 고유(iC.y) × 전역(uCurl), 바람이 더 밀어줌
+    float lean = (0.5 + i.ib.y * 0.9) * uCurl;
+    float wind = (sin(uT * 1.5 + i.ib.x)
+                + 0.4 * sin(uT * 3.0 + i.ib.x * 1.7)) * 0.5 * uW;
+    lean += wind * 0.8;
+
+    // 4개 제어점 (잎 로컬): P0 뿌리 고정, 위로 갈수록 nrm 방향으로 lean
+    float3 P0 = float3(0, 0, 0);
+    float3 P1 = nrm * lean * 0.15 + float3(0, h * 0.35, 0);
+    float3 P2 = nrm * lean * 0.5  + float3(0, h * 0.7,  0);
+    float3 P3 = nrm * lean * 0.9  + float3(0, h,        0);
+
+    // 곡선 위 점 + 접선
+    float3 cpos = bezier(P0, P1, P2, P3, t);
+    // (접선은 폭 법선 계산에 쓸 수 있음 — 여기선 dir 기반 폭을 그대로 사용)
+
+    // 월드 배치: 필드 위치 + 곡선점 + 좌우 폭
+    float3 base = float3(i.ia.x, 0.0, i.ia.y);
+    float3 p    = base + cpos + dir * side * w;
+
+    // 색: 뿌리 어둡고 끝 밝게 + 잎별 변주
+    float3 c = lerp(float3(0.08, 0.2, 0.07),
+                    float3(0.4, 0.66, 0.24), t) * lerp(0.85, 1.12, i.ib.y);
+
+    VSOut o;
+    o.col = c * lerp(0.4, 1.0, t);
+    o.t   = t;
+    o.pos = mul(float4(p, 1.0), uVP);   // 행벡터
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    제어점을 <strong>월드 좌표로 미리 만들어 버퍼에 넣지 마세요.</strong> 바람으로 매 프레임 <code>P2/P3</code>가
+    움직이므로, 제어점은 버텍스에서 <em>즉석 계산</em>하는 게 맞습니다. 인스턴스 버퍼에는 위치·방위·키·위상 같은
+    <strong>불변 파라미터</strong>만 넣고, 곡선은 셰이더가 매번 새로 세웁니다. 이렇게 해야 12만 잎이 각자
+    실시간으로 나부낍니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 접선으로 폭 법선을 더 정확히</h2>
+  <p>
+    위 코드는 폭을 방위 <code>dir</code> 기준으로 벌렸습니다. 잎이 크게 휠수록 이 근사는 잎이 옆으로 살짝 눌린 것처럼
+    보일 수 있습니다. 더 정확히 하려면 <strong>접선 <code>B'(t)</code>에 수직</strong>인 방향으로 폭을 벌립니다.
+    접선을 화면/시선과 함께 고려하면 잎이 항상 두께를 유지한 채 곡선을 따라 감기는 느낌을 줍니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>bezier_vs.hlsl (접선 기반 폭 · 발췌)</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">    // 곡선 위 점과 접선을 함께 구한다
+    float3 cpos = bezier(P0, P1, P2, P3, t);
+    float3 tang = normalize(bezierTangent(P0, P1, P2, P3, t) + float3(0, 1e-4, 0));
+
+    // 접선과 잎 방위로 폭 방향(법선)을 만든다:
+    //  접선(진행) × 잎 좌우축 → 잎 표면 법선 → 그 법선과 접선의 외적이 폭축
+    float3 sideAxis = float3(-dir.z, 0.0, dir.x);           // 잎 좌우축(수평)
+    float3 leafN    = normalize(cross(tang, sideAxis));      // 잎 표면 법선
+    float3 widthDir = normalize(cross(leafN, tang));         // 접선에 수직인 폭축
+
+    float3 base = float3(i.ia.x, 0.0, i.ia.y);
+    float3 p    = base + cpos + widthDir * side * w;         // 곡선 따라 감긴 폭</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">두 가지 폭 방식</span>
+    수평 <code>dir</code> 폭은 계산이 싸고 멀리서 충분합니다(외적 없음). 접선 <code>widthDir</code> 폭은 근거리
+    클로즈업에서 잎이 곡선을 따라 <strong>비틀리며 감기는</strong> 고급 느낌을 줍니다. LOD로 근거리에만
+    접선 폭을 쓰고 원거리는 수평 폭으로 떨어뜨리면 비용을 아낍니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 인스턴스 필드 랜덤화</h2>
+  <p>
+    자연스러운 밭의 핵심은 <strong>모든 잎이 다르게 휘는</strong> 것입니다. 인스턴스 데이터를 뿌릴 때 위치·방위뿐
+    아니라 <strong>곡률 시드(colVar)</strong>와 <strong>위상(phase)</strong>을 결정론적 난수로 흩뿌려, 같은 시드면
+    늘 같은 배치가 나오게 합니다. 곡률 시드는 셰이더의 <code>lean</code>에, 위상은 바람 <code>sin</code>에 들어가
+    잎마다 굽음과 흔들림이 어긋납니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>bezier_field.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;DirectXMath.h&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+using namespace DirectX;
+
+struct GrassInstance {
+    float posX, posZ;   // 지면 위치
+    float angle;        // 방위각
+    float height;       // 키
+    float phase;        // 바람 위상
+    float colVar;       // 색 변주 겸 곡률 시드
+};
+static_assert(sizeof(GrassInstance) == 24, "stride 24");
+
+// 결정론적 해시 난수로 원판 안에 잎을 흩뿌린다 (지오메트리 잔디와 동일 감각)
+std::vector&lt;GrassInstance&gt; scatterBezierField(int count, float radius, uint32_t seed) {
+    float s = (float)seed;
+    auto rnd = [&amp;]() {
+        s = std::sin(s * 12.9898f + 78.233f) * 43758.5453f;
+        return s - std::floor(s);
+    };
+    std::vector&lt;GrassInstance&gt; out(count);
+    for (int i = 0; i &lt; count; ++i) {
+        float a = rnd() * 6.2831853f;
+        float r = std::sqrt(rnd()) * radius;      // 균일 분포용 sqrt
+        out[i].posX   = std::cos(a) * r;
+        out[i].posZ   = std::sin(a) * r;
+        out[i].angle  = rnd() * 6.2831853f;       // 방향 랜덤
+        out[i].height = 0.8f + rnd() * 0.9f;      // 키 랜덤
+        out[i].phase  = rnd() * 6.2831853f;       // 바람 위상 랜덤
+        out[i].colVar = rnd();                    // 곡률/색 시드
+    }
+    return out;
+}</code></pre>
+  </div>
+
+  <p>
+    드로우는 <a href="./08-geometry.html">지오메트리 잔디</a>와 완전히 동일합니다 — 두 정점 버퍼(blade·인스턴스)를
+    슬롯 0·1에 걸고 <code>TRIANGLESTRIP</code>으로 <code>DrawInstanced</code> 한 번. 곡선은 전부 버텍스 셰이더가
+    처리하므로 CPU·드로우 구조는 바뀌지 않습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프 (프레임 상수만 갱신)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void drawBezierGrass(ID3D11DeviceContext* ctx, float time,
+                     float wind, float curl) {
+    // Frame cbuffer 갱신 (uT, uW, uCurl)
+    struct Frame { XMFLOAT4X4 vp; float t, w, curl, pad; } f;
+    f.vp = g_viewProj; f.t = time; f.w = wind; f.curl = curl; f.pad = 0;
+    D3D11_MAPPED_SUBRESOURCE m;
+    ctx-&gt;Map(g_frameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;m);
+    memcpy(m.pData, &amp;f, sizeof(f));
+    ctx-&gt;Unmap(g_frameCB.Get(), 0);
+
+    UINT strides[2] = { sizeof(BladeVertex), sizeof(GrassInstance) };
+    UINT offsets[2] = { 0, 0 };
+    ID3D11Buffer* vbs[2] = { g_bladeVB.Get(), g_instVB.Get() };
+
+    ctx-&gt;IASetInputLayout(g_layout.Get());
+    ctx-&gt;IASetVertexBuffers(0, 2, vbs, strides, offsets);
+    ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    ctx-&gt;VSSetShader(g_bezierVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_grassPS.Get(), nullptr, 0);
+    ctx-&gt;VSSetConstantBuffers(0, 1, g_frameCB.GetAddressOf());
+
+    ctx-&gt;DrawInstanced(g_bladeVertexCount, g_instanceCount, 0, 0);
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    베지어는 세그먼트가 많아 <strong>정점 수가 직선 잔디보다 큽니다</strong>(<code>SEG=9</code> → 잎당 20정점).
+    12만 잎이면 240만 정점이니, 근·중거리에만 베지어를 쓰고 원거리는 빌보드·텍스처로 LOD 전환하는 게 정석입니다.
+    <a href="./07-lod.html">7장 LOD·컬링</a>의 거리 기반 전환을 그대로 얹으면 됩니다.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>잎 하나 = <strong>4개 제어점 큐빅 베지어</strong>, <code>P0</code> 뿌리 고정, 바람이 <code>P2/P3</code>를 밀어 나부낌.</li>
+    <li><code>B(t)=(1−t)³P0+3(1−t)²tP1+3(1−t)t²P2+t³P3</code>로 곡선 위 점을 배치.</li>
+    <li>접선 <code>B'(t)</code>로 폭 법선을 구하면 잎이 곡선을 따라 <strong>감기는</strong> 고급 느낌.</li>
+    <li>곡률·키·방향·위상을 <strong>인스턴스마다 랜덤화</strong>해 모든 잎이 다르게 휨.</li>
+    <li>제어점은 버퍼가 아니라 <strong>버텍스에서 즉석 계산</strong> — 실시간 바람 반영, 드로우 구조는 그대로.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-trample.html">← 인터랙티브 밟힘</a>
+    <a href="./08-toon.html">툰 / 스타일라이즈드 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 셸 텍스처링 잔디 — C++/DirectX 11</title>
+<meta name="description" content="지면 쿼드를 살짝 띄운 여러 겹으로 인스턴싱하고 각 겹에서 해시 노이즈 임계값으로 strand를 discard하는 셸 텍스처링 잔디를 C++/DirectX 11/HLSL로 구현." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./08-grass.html">8장. 잔디 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">셸 텍스처링</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 3/10</span>
+  <h1>셸 텍스처링 — 반투명 레이어 적층</h1>
+  <p class="lead">
+    셸 텍스처링은 지면을 <strong>살짝씩 띄운 여러 겹(shell)</strong>으로 반복해 그립니다.
+    각 겹의 픽셀에서 노이즈 임계값으로 strand(잔디 가닥)를 <code>discard</code>하면, 위로 갈수록 성기게 남아
+    옆에서 보면 진짜 잔디처럼 층층이 쌓여 보입니다. 정점은 지면 쿼드 하나 × 레이어 수뿐이라 <strong>거의
+    없지만</strong>, 같은 픽셀을 레이어 수만큼 덧그리므로 <strong>겹 수가 곧 오버드로우 배수</strong>가 됩니다.
+    이 페이지에서는 <code>SV_InstanceID</code>로 레이어를 쌓고, 해시 노이즈로 원뿔형 strand를 깎아내는 과정을 D3D11로 구현합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
+    <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
+    <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
+  </div>
+
+  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+  <ol class="steps">
+    <li><strong>지면 쿼드</strong> — 단 하나의 평면 쿼드(4정점)를 만듭니다. 이것을 여러 겹 쌓습니다.</li>
+    <li><strong>레이어 인스턴싱</strong> — <code>SV_InstanceID</code>로 겹 인덱스를 받아 높이 <code>y = ln·1.4</code>로 띄웁니다.</li>
+    <li><strong>해시 노이즈 strand</strong> — 각 셀에서 밀도 임계값과 키·원뿔 반경으로 strand를 <code>discard</code>합니다.</li>
+    <li><strong>바람 sway</strong> — 위 레이어일수록 크게 흔들리도록 <code>ln²</code> 가중을 줍니다.</li>
+    <li><strong>단일 드로우콜</strong> — <code>DrawInstanced</code> 한 번으로 모든 겹을 그립니다.</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. 왜 “겹”인가 — 셸 텍스처링의 원리</h2>
+  <p>
+    풀을 실제 가닥으로 모델링하는 대신, 셸 텍스처링은 <strong>같은 지면을 조금씩 높여 여러 번</strong> 그립니다.
+    가장 아래 겹은 잔디 가닥의 밑동, 조금 위 겹은 중간, 맨 위 겹은 끝을 나타냅니다. 각 겹에서 “이 위치에 이 높이의
+    가닥이 존재하는가?”를 노이즈로 판정해, 존재하지 않으면 픽셀을 버립니다. 위로 갈수록 살아남는 가닥이 줄어들어
+    <strong>아래는 빽빽하고 위는 성긴</strong> 자연스러운 실루엣이 만들어집니다.
+  </p>
+  <p>
+    지오메트리·빌보드가 “객체(포기/카드)마다 인스턴스”였다면, 셸은 <strong>겹마다 인스턴스</strong>입니다. 그래서 별도의
+    인스턴스 정점 버퍼가 필요 없습니다 — 겹 인덱스는 GPU가 자동으로 주는 <code>SV_InstanceID</code>로 충분합니다.
+    쿼드 하나만 만들고 인스턴스 수를 레이어 수로 넘기면 됩니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>grass_shell.hpp</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">#include &lt;d3d11.h&gt;
+#include &lt;DirectXMath.h&gt;
+#include &lt;wrl/client.h&gt;
+#include &lt;vector&gt;
+using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+
+// 정점당 데이터: 지면 평면의 정규화 좌표 (x, z) ∈ [-1, 1]
+struct GroundVertex { float x, z; };
+
+// 지면 쿼드 하나(4정점 삼각형 스트립). 이 한 장을 레이어 수만큼 인스턴싱한다.
+std::vector&lt;GroundVertex&gt; makeGround() {
+    return {
+        { -1.0f, -1.0f },
+        { +1.0f, -1.0f },
+        { -1.0f, +1.0f },
+        { +1.0f, +1.0f },
+    };
+}
+
+ComPtr&lt;ID3D11Buffer&gt; g_groundVB;
+
+void createGroundBuffer(ID3D11Device* dev) {
+    auto quad = makeGround();
+    D3D11_BUFFER_DESC bd = {};
+    bd.Usage = D3D11_USAGE_IMMUTABLE;
+    bd.ByteWidth = (UINT)(quad.size() * sizeof(GroundVertex));
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sd = { quad.data(), 0, 0 };
+    dev-&gt;CreateBuffer(&amp;bd, &amp;sd, g_groundVB.GetAddressOf());
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. 상수 버퍼 — 레이어·밀도·바람</h2>
+  <p>
+    셸 렌더링을 제어하는 값들을 하나의 cbuffer로 묶습니다. <code>uLayers</code>(겹 수), <code>uDensity</code>(밀도 임계값),
+    <code>uWind</code>(바람 세기), <code>uTime</code>(시간), 그리고 뷰-투영 <code>uVP</code>입니다.
+    이 중 <code>uLayers</code>와 <code>uDensity</code>가 셸의 인상을 결정합니다 — 겹이 많을수록 촘촘하지만
+    오버드로우가 늘고, 밀도가 높을수록 살아남는 셀이 많아집니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>상수 버퍼 (C++ 측)</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">// HLSL cbuffer와 16바이트 정렬을 맞춘 구조체
+struct ShellCB {
+    XMFLOAT4X4 uVP;      // view * proj (row_major로 그대로 업로드)
+    float uTime;
+    float uWind;
+    int   uLayers;       // 겹 수 (4 .. 48)
+    float uDensity;      // 밀도 임계값 (0.2 .. 0.9)
+};
+static_assert(sizeof(ShellCB) % 16 == 0, "cbuffer는 16바이트 배수여야 함");
+
+ComPtr&lt;ID3D11Buffer&gt; g_shellCB;
+
+void createShellCB(ID3D11Device* dev) {
+    D3D11_BUFFER_DESC bd = {};
+    bd.Usage = D3D11_USAGE_DYNAMIC;                 // 매 프레임 갱신
+    bd.ByteWidth = sizeof(ShellCB);
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    dev-&gt;CreateBuffer(&amp;bd, nullptr, g_shellCB.GetAddressOf());
+}
+
+void updateShellCB(ID3D11DeviceContext* ctx, const XMMATRIX&amp; vp,
+                   float t, float wind, int layers, float density) {
+    D3D11_MAPPED_SUBRESOURCE m;
+    ctx-&gt;Map(g_shellCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &amp;m);
+    auto* cb = (ShellCB*)m.pData;
+    XMStoreFloat4x4(&amp;cb-&gt;uVP, vp);   // row_major이므로 전치하지 않음
+    cb-&gt;uTime = t; cb-&gt;uWind = wind;
+    cb-&gt;uLayers = layers; cb-&gt;uDensity = density;
+    ctx-&gt;Unmap(g_shellCB.Get(), 0);
+}</code></pre>
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>3. 버텍스 셰이더 — SV_InstanceID로 겹 쌓기</h2>
+  <p>
+    핵심은 <code>SV_InstanceID</code>입니다. GPU는 인스턴스마다 0, 1, 2, … 로 증가하는 이 값을 자동으로 넘겨줍니다.
+    이걸 겹 인덱스 <code>layer</code>로 받아 <strong>정규화 높이 <code>ln = layer / uLayers</code></strong>를 구하고,
+    월드 y를 <code>ln · 1.4</code>로 띄웁니다(잔디 최대 높이 1.4). 지면 쿼드는 30배 스케일해 넓은 밭으로 만듭니다.
+  </p>
+  <p>
+    바람은 위 레이어일수록 크게 흔들려야 하므로 <strong><code>ln²</code> 가중</strong>을 씁니다(밑동 <code>ln=0</code>은
+    거의 안 흔들림). 월드 xz 위치를 sin의 위상에 섞어 밭 전체가 한 박자로 출렁이는 인공적인 느낌을 없앱니다.
+    UV는 지면 좌표를 55배 확대해 셀 격자를 촘촘히 만듭니다 — 이 격자 한 칸이 잔디 가닥 하나의 영역입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>shell_vs.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;   // view * proj (행벡터 관례)
+    float uTime;
+    float uWind;
+    int   uLayers;
+    float uDensity;           // (VS에서는 미사용, PS와 공유)
+};
+
+struct VSIn {
+    float2 p : GROUND0;       // 지면 정규화 좌표 (x, z)
+    uint   iid : SV_InstanceID;
+};
+struct VSOut {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+    float  h   : TEXCOORD1;   // 이 겹의 정규화 높이 ln
+};
+
+VSOut main(VSIn i) {
+    int   layer = (int)i.iid;
+    float ln    = (float)layer / (float)uLayers;   // 0 .. ~1
+    float y     = ln * 1.4;                         // 겹 높이
+
+    float3 wp = float3(i.p.x * 30.0, y, i.p.y * 30.0);
+
+    // ln² 가중 sway: 위 레이어일수록 크게 흔들림
+    float sway = sin(uTime * 1.3 + wp.x * 0.15 + wp.z * 0.12)
+               * uWind * ln * ln * 0.7;
+    wp.x += sway;
+    wp.z += sway * 0.4;
+
+    VSOut o;
+    o.uv  = i.p * 55.0;         // 셀 격자(잔디 가닥 영역)
+    o.h   = ln;
+    o.pos = mul(float4(wp, 1.0), uVP);   // 행벡터 → mul(v, M)
+    return o;
+}</code></pre>
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">SV_InstanceID는 공짜 인스턴스 데이터</span>
+    빌보드·지오메트리 편에서는 인스턴스마다 다른 값을 <strong>두 번째 정점 버퍼</strong>에 담아 넘겼습니다.
+    셸에서는 겹마다 필요한 정보가 “몇 번째 겹인가” 하나뿐이라, 별도 버퍼 없이 <code>SV_InstanceID</code>만으로
+    끝납니다. <code>DrawInstanced</code>에 인스턴스 수(=레이어 수)만 넘기면 GPU가 알아서 0..N-1을 배분합니다.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. 픽셀 셰이더 — 해시 노이즈로 strand 깎기</h2>
+  <p>
+    이제 각 겹의 픽셀에서 “여기에 이 높이의 잔디 가닥이 있는가?”를 판정합니다. 절차는 세 단계의
+    <code>discard</code>로 이루어집니다.
+  </p>
+  <ol class="steps">
+    <li><strong>밀도 판정</strong> — 셀의 해시값 <code>r1</code>이 <code>uDensity</code>보다 크면 이 셀엔 잔디가 없음 → 버림.</li>
+    <li><strong>키 판정</strong> — 이 셀 잔디의 끝 높이 <code>maxH</code>보다 현재 겹 높이가 위면 → 버림(가닥 끝 위는 비어 있음).</li>
+    <li><strong>원뿔 반경 판정</strong> — 셀 안 위치가 위로 갈수록 좁아지는 원뿔 밖이면 → 버림(뾰족한 가닥 모양).</li>
+  </ol>
+  <p>
+    해시는 격자 셀 좌표를 입력으로 받아 결정론적 난수를 뽑습니다(같은 셀은 늘 같은 잔디). 원뿔 반경
+    <code>0.30·(1-t)</code>는 뿌리에서 넓고 끝(<code>t=1</code>)에서 0이 되어, 옆에서 보면 위로 갈수록 가늘어지는
+    자연스러운 실루엣을 만듭니다. 살짝 기울임(<code>t</code>에 비례해 한쪽으로) 항을 더해 눕는 느낌도 줍니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>shell_ps.hlsl</span><span class="lang">hlsl</span></div>
+    <pre><code class="language-hlsl">cbuffer Frame : register(b0) {
+    row_major float4x4 uVP;
+    float uTime;
+    float uWind;
+    int   uLayers;
+    float uDensity;           // 밀도 임계값
+};
+
+struct PSIn {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+    float  h   : TEXCOORD1;   // 이 겹의 정규화 높이 ln
+};
+
+// 셀 좌표 → 결정론적 해시 (WebGL 데모와 동일한 상수)
+float hash(float2 c) {
+    return frac(sin(dot(c, float2(41.3, 289.1))) * 43758.5453);
+}
+
+float4 main(PSIn i) : SV_Target {
+    float2 cell = floor(i.uv);
+    float r1 = hash(cell);
+    float r2 = hash(cell + 3.7);
+    float r3 = hash(cell + 7.1);
+
+    // ① 밀도: 임계값보다 성긴 셀은 잔디 자체가 없음
+    if (r1 &gt; uDensity) discard;
+
+    // ② 키: 이 셀 잔디의 끝 높이 위는 비어 있음
+    float maxH = 0.45 + 0.55 * r2;      // 가닥별 키
+    if (i.h &gt; maxH) discard;
+    float t = i.h / maxH;               // 0=뿌리 .. 1=끝
+
+    // ③ 원뿔 반경: 셀 안 위치가 (위로 갈수록 좁아지는) 원뿔 밖이면 버림
+    float2 center = float2(0.3 + 0.4 * r2, 0.3 + 0.4 * r3);
+    float2 f = frac(i.uv) - center;
+    f -= float2(r2 - 0.5, r3 - 0.5) * t * 0.7;   // 위로 갈수록 살짝 기움
+    float radius = 0.30 * (1.0 - t);             // 끝에서 0 → 뾰족
+    if (length(f) &gt; radius) discard;
+
+    // 뿌리(어두움)→끝(밝음) + 셀별 색 변주
+    float3 c = lerp(float3(0.07, 0.19, 0.06),
+                    float3(0.46, 0.74, 0.27), t) * lerp(0.7, 1.1, r1);
+    return float4(c, 1.0);
+}</code></pre>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>frac(sin(...) * 43758.5453)</code> 해시는 격자 셀 좌표를 <strong>정수로</strong> 받아야 셀마다 값이
+    고정됩니다. 그래서 <code>floor(uv)</code>로 셀 인덱스를 만들고, 셀 안 위치는 <code>frac(uv)</code>로 따로
+    구합니다. UV 스케일(55)을 바꾸면 셀 크기와 잔디 밀도 체감이 함께 달라지니, 밀도 슬라이더와 별개의
+    “가닥 굵기” 튜닝 지점임을 기억하세요.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>5. 드로우 — 레이어 수만큼 인스턴싱</h2>
+  <p>
+    지면 쿼드 하나를 바인딩하고 <code>DrawInstanced(4, layers, 0, 0)</code>로 그립니다. 인스턴스 수가 곧 겹 수입니다.
+    잔디는 알파 테스트(<code>discard</code>)로 통과 픽셀만 남기는 <strong>불투명</strong> 렌더이므로 블렌드는 끄고
+    <strong>깊이 테스트는 켭니다</strong>. 아래 겹부터 위 겹 순으로 그려지면 깊이 버퍼가 앞뒤를 정리해 줍니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>렌더 루프</span><span class="lang">cpp</span></div>
+    <pre><code class="language-cpp">void drawShell(ID3D11DeviceContext* ctx, const XMMATRIX&amp; vp,
+               float t, float wind, int layers, float density) {
+    updateShellCB(ctx, vp, t, wind, layers, density);
+
+    UINT stride = sizeof(GroundVertex), offset = 0;
+    ctx-&gt;IASetInputLayout(g_layout.Get());
+    ctx-&gt;IASetVertexBuffers(0, 1, g_groundVB.GetAddressOf(), &amp;stride, &amp;offset);
+    ctx-&gt;IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    ctx-&gt;VSSetShader(g_vs.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(g_ps.Get(), nullptr, 0);
+    ctx-&gt;VSSetConstantBuffers(0, 1, g_shellCB.GetAddressOf());
+    ctx-&gt;PSSetConstantBuffers(0, 1, g_shellCB.GetAddressOf());   // VS/PS 공유
+
+    ctx-&gt;OMSetDepthStencilState(g_depthOn.Get(), 0);            // 깊이 ON
+    float bf[4] = { 0, 0, 0, 0 };
+    ctx-&gt;OMSetBlendState(nullptr, bf, 0xffffffff);              // 블렌드 OFF
+
+    // 4정점 × layers 겹, 드로우콜 1
+    ctx-&gt;DrawInstanced(4, (UINT)layers, 0, 0);
+}</code></pre>
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">레이어 수 = 오버드로우 배수</span>
+    셸의 비용 모델은 단순합니다. 화면을 덮는 지면 픽셀 하나를 <strong>레이어 수만큼</strong> 픽셀 셰이더가 처리합니다.
+    24겹이면 같은 픽셀에 셰이더가 최대 24번 실행됩니다(<code>discard</code>로 조기 종료되긴 하지만 조기
+    <code>discard</code>는 초반 판정까지는 실행됩니다). 레이어를 줄이면 층이 계단처럼 보이고(측면 아티팩트),
+    늘리면 촘촘하지만 오버드로우가 선형으로 증가합니다. 그래서 셸은 <strong>평지 근·중거리</strong>에 적합하고,
+    카메라가 낮게 깔리는 장면(수평 시선)에서는 층 사이가 벌어져 보이는 단점이 있습니다.
+  </div>
+
+  <h2>정리</h2>
+  <ul>
+    <li>메시는 <strong>지면 쿼드 하나</strong>, 겹은 <strong><code>SV_InstanceID</code></strong>로 쌓는다(별도 인스턴스 버퍼 불필요).</li>
+    <li>각 겹 높이 <code>y = (iid/uLayers)·1.4</code>, 바람은 위 레이어일수록 크게(<strong><code>ln²</code> 가중</strong>).</li>
+    <li>픽셀에서 <strong>밀도 → 키 → 원뿔 반경</strong> 세 단계 <code>discard</code>로 뾰족한 strand를 조각한다.</li>
+    <li>불투명 알파테스트 → <strong>블렌드 OFF · 깊이 ON</strong>.</li>
+    <li><strong>레이어 수 = 오버드로우 배수</strong> — 평지 근·중거리용, 수평 시선에서는 층이 벌어진다.</li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./08-billboard.html">← 빌보드 / 크로스쿼드</a>
+    <a href="./08-terrain.html">지형 텍스처 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

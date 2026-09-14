@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 잔디 렌더링 (사례연구) — C++/DirectX 11</title>
+<meta name="description" content="모바일 대량 잔디 렌더링 10가지 기법(지오메트리 인스턴싱·빌보드·셸·지형·레이마칭·밟힘·베지어·툰·바람·LOD)을 Direct3D 11/HLSL로 구현하는 8장 사례연구 허브." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">8장. 잔디 렌더링 (사례연구)</span>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · CASE STUDY</span>
+  <h1>잔디 렌더링 — 10가지 기법 총정리</h1>
+  <p class="lead">
+    이 장은 지금까지 배운 것들이 <strong>실제 게임에서 어떻게 하나로 합쳐지는가</strong>를 보여주는 사례연구입니다.
+    잔디밭 하나에 <strong>GPU 인스턴싱(4장)·빌보드/텍스처(2장)·알파 테스트(7장)·레이마칭(6장)·버텍스 바람(4장)·LOD/컬링(7장)</strong>이
+    전부 들어갑니다. 대량 잔디를 <strong>모바일에서도 60fps</strong>로 그리는 10가지 기법을 각각
+    Direct3D 11/HLSL로 <strong>코드 한 줄·상태 하나까지</strong> 구현합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 시리즈는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행렬 <strong>행 우선</strong> 저장, <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>, 텍스처 V축 위→아래.
+    원본 WebGL 데모의 로직을 그대로 이식하되, D3D11의 상태 기반 API와 HLSL로 옮기고 그 밑의 원리를 파헤칩니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">가장 중요한 한 문장</span>
+    타일드 모바일 GPU(Adreno/Mali/Apple)에서 프레임의 진짜 적은 정점 수가 아니라 <strong>오버드로우</strong>(같은 픽셀을
+    여러 번 덧칠)입니다. 그래서 잔디는 <strong>알파 블렌드 대신 알파 테스트(<code>clip</code>/discard)</strong>,
+    <strong>단일 드로우콜 인스턴싱</strong>, <strong>거리별 LOD</strong>가 핵심입니다.
+  </div>
+
+  <h2 style="margin-top:40px;">기법 한눈에 비교</h2>
+  <table class="impl">
+    <thead><tr><th>기법</th><th>비용</th><th>핵심</th><th>적합 거리</th></tr></thead>
+    <tbody>
+      <tr><td><strong>① 지오메트리</strong></td><td>높음</td><td>진짜 메시 blade, 품질 최고</td><td>근거리</td></tr>
+      <tr><td><strong>② 빌보드/크로스쿼드</strong></td><td>중간</td><td>4정점 쿼드, 알파 오버드로우 주의</td><td>중거리</td></tr>
+      <tr><td><strong>③ 셸 텍스처링</strong></td><td>중간</td><td>레이어 적층, 정점 적고 오버드로우↑</td><td>근~중거리 평지</td></tr>
+      <tr><td><strong>④ 지형 텍스처</strong></td><td>거의 공짜</td><td>평면에 텍스처, 입체감 없음</td><td>원거리</td></tr>
+      <tr><td><strong>⑤ 레이마칭</strong></td><td>높음(픽셀)</td><td>메시 0, 프래그먼트에서 볼륨 행진</td><td>특수/스타일</td></tr>
+      <tr><td><strong>⑥ 밟힘</strong></td><td>중간</td><td>밟힘맵 샘플로 눕히기</td><td>플레이어 주변</td></tr>
+      <tr><td><strong>⑦ 베지어 잎</strong></td><td>중~높음</td><td>큐빅 베지어로 우아한 곡선</td><td>근거리 고품질</td></tr>
+      <tr><td><strong>⑧ 툰/스타일</strong></td><td>중간</td><td>색 밴딩 + 넓은 잎</td><td>스타일 게임</td></tr>
+      <tr><td><strong>⑨ 바람 그리드</strong></td><td>낮음</td><td>바람장 + vorticle 돌풍</td><td>전역 효과</td></tr>
+      <tr><td><strong>⑩ LOD 통합</strong></td><td>가변</td><td>근:지오 · 중:빌보드 · 원:텍스처</td><td>전 거리</td></tr>
+    </tbody>
+  </table>
+
+  <h2 style="margin-top:40px;">세부 페이지</h2>
+  <div class="hub-grid">
+    <a class="hub-card" href="./08-geometry.html">
+      <div class="num">1 / 10</div>
+      <h3>지오메트리 잔디</h3>
+      <p>blade 한 포기 = 삼각형 스트립. 수만 포기를 단일 드로우콜로 인스턴싱하고 바람은 버텍스에서 sin으로.</p>
+      <div class="topics">인스턴싱 · 정점 버퍼 · Divisor · 버텍스 바람</div>
+    </a>
+    <a class="hub-card" href="./08-billboard.html">
+      <div class="num">2 / 10</div>
+      <h3>빌보드 / 크로스쿼드</h3>
+      <p>잔디 다발을 4정점 쿼드에 텍스처로 압축, 카메라를 향해 회전. 오버드로우 히트맵으로 비용 확인.</p>
+      <div class="topics">빌보드 · 알파 테스트 · 오버드로우 · clip()</div>
+    </a>
+    <a class="hub-card" href="./08-shell.html">
+      <div class="num">3 / 10</div>
+      <h3>셸 텍스처링</h3>
+      <p>지면을 살짝 띄운 여러 겹(shell)을 인스턴싱으로 적층, 노이즈 임계값으로 strand를 discard.</p>
+      <div class="topics">셸 레이어 · SV_InstanceID · 노이즈 discard</div>
+    </a>
+    <a class="hub-card" href="./08-terrain.html">
+      <div class="num">4 / 10</div>
+      <h3>지형 텍스처</h3>
+      <p>먼 거리는 평면에 잔디 텍스처 한 장. 정점·오버드로우 거의 0. LOD 스택의 마지막 단계.</p>
+      <div class="topics">원경 LOD · 절차적 노이즈 · 하이브리드</div>
+    </a>
+    <a class="hub-card" href="./08-raymarch.html">
+      <div class="num">5 / 10</div>
+      <h3>볼류메트릭 레이마칭</h3>
+      <p>메시 0. 풀스크린 삼각형에서 픽셀마다 광선을 쏘고 3D 노이즈로 잔디 밀도를 판정해 색을 쌓기.</p>
+      <div class="topics">풀스크린 패스 · 레이마칭 · Worley · taper</div>
+    </a>
+    <a class="hub-card" href="./08-trample.html">
+      <div class="num">6 / 10</div>
+      <h3>인터랙티브 밟힘</h3>
+      <p>플레이어 주변 잔디가 바깥으로 휘고 납작해짐. 밟힘맵(RenderTexture)을 버텍스에서 샘플.</p>
+      <div class="topics">밟힘맵 · 버텍스 텍스처 페치 · 휨 벡터</div>
+    </a>
+    <a class="hub-card" href="./08-bezier.html">
+      <div class="num">7 / 10</div>
+      <h3>큐빅 베지어 잎</h3>
+      <p>잎 하나를 4개 제어점의 큐빅 베지어로 정의해 우아하게 휘게. Ghost of Tsushima 방식.</p>
+      <div class="topics">큐빅 베지어 · 세그먼트 · 곡률 랜덤화</div>
+    </a>
+    <a class="hub-card" href="./08-toon.html">
+      <div class="num">8 / 10</div>
+      <h3>툰 / 스타일라이즈드</h3>
+      <p>색을 2~3단계로 밴딩하고 뿌리는 어둡게(AO), 끝은 하이라이트. Breath of the Wild 풍.</p>
+      <div class="topics">색 밴딩 · AO 그라디언트 · 넓은 잎</div>
+    </a>
+    <a class="hub-card" href="./08-wind.html">
+      <div class="num">9 / 10</div>
+      <h3>통합 바람 그리드</h3>
+      <p>월드를 셀 그리드로 보고 바람 방향/세기를 저장, 움직이는 소용돌이(vorticle)로 자연스러운 돌풍.</p>
+      <div class="topics">바람장 · vorticle · flow map · 돌풍 파동</div>
+    </a>
+    <a class="hub-card" href="./08-lodcombine.html">
+      <div class="num">10 / 10</div>
+      <h3>LOD 통합 씬</h3>
+      <p>카메라 거리에 따라 근:지오메트리 · 중:빌보드 · 원:텍스처로 자동 전환(경계 페이드). 실전 조합.</p>
+      <div class="topics">LOD 전환 · 페이드 · 거리 분기 · 통합</div>
+    </a>
+  </div>
+
+  <h2 style="margin-top:40px;">참고 링크</h2>
+  <ul>
+    <li><a href="https://danielilett.com/2022-12-05-tut6-2-six-grass-techniques/" target="_blank" rel="noopener">Six Grass Rendering Techniques (Unity)</a></li>
+    <li><a href="https://hexaquo.at/pages/grass-rendering-series-part-2-full-geometry-grass-in-godot/" target="_blank" rel="noopener">Grass Rendering Series (hexaquo)</a></li>
+    <li><a href="https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/" target="_blank" rel="noopener">Procedural grass w/ mesh shaders (GPUOpen)</a></li>
+    <li><a href="https://www.gdcvault.com/play/1025480/Between-Tech-and-Art-The" target="_blank" rel="noopener">Ghost of Tsushima: Between Tech and Art (GDC)</a></li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./07-techniques.html">← 7장. 실전 렌더링 기법</a>
+    <a href="./index.html">구현 허브 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+</body>
+</html>

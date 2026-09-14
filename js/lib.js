@@ -12,10 +12,14 @@
     const canvas = document.getElementById(id);
     const ctx = canvas.getContext("2d");
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // 논리 높이는 최초 1회만 읽는다. canvas.height 프로퍼티를 대입하면
+    // HTML height 속성이 함께 바뀌므로, 매번 읽으면 dpr배씩 커지는
+    // 피드백 루프가 생긴다(=데모가 세로로 무한정 길어짐).
+    const baseH = parseInt(canvas.getAttribute("height")) || 300;
 
     function resize() {
       const cssW = canvas.clientWidth || canvas.parentElement.clientWidth;
-      const cssH = parseInt(canvas.getAttribute("height")) || 300;
+      const cssH = baseH;
       canvas.style.height = cssH + "px";
       canvas.width = Math.round(cssW * dpr);
       canvas.height = Math.round(cssH * dpr);

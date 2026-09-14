@@ -259,11 +259,13 @@
       if (!canvas) return;
       const ctl = document.getElementById("ctl-fragshader");
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      // 논리 높이는 최초 1회만 읽는다(피드백 루프 방지, lib.js setup 주석 참고)
+      const baseH = parseInt(canvas.getAttribute("height")) || 340;
 
       // 표시 크기 설정 (lib의 setup은 2D 컨텍스트를 잡으므로 여기선 직접 처리)
       function sizeCanvas() {
         const cssW = canvas.clientWidth || (canvas.parentElement && canvas.parentElement.clientWidth) || 600;
-        const cssH = parseInt(canvas.getAttribute("height")) || 340;
+        const cssH = baseH;
         canvas.style.height = cssH + "px";
         canvas.width = Math.round(cssW * dpr);
         canvas.height = Math.round(cssH * dpr);

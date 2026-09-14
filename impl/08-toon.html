@@ -38,7 +38,23 @@
     <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
   </div>
 
-  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+    <h2>▶ 실시간 데모</h2>
+  <p class="demo-caption">드래그로 회전, 휠로 줌. 아래에서 설명하는 코드가 실제로 이렇게 동작합니다. (WebGL2)</p>
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="c_toon"></canvas>
+      <div class="hud" id="h_toon">초기화 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl"><label>잔디 수 <span class="gval" id="toon_vN">28,000</span></label><input id="toon_N" type="range" min="4000" max="80000" step="2000" value="28000"></div>
+      <div class="gctl"><label>색 밴드 <span class="gval" id="toon_vB">3</span></label><input id="toon_B" type="range" min="2" max="6" step="1" value="3"></div>
+      <div class="gctl"><label>바람 <span class="gval" id="toon_vW">1.0</span></label><input id="toon_W" type="range" min="0" max="3" step="0.05" value="1"></div>
+      <div class="gctl" style="flex:.7"><label>표시</label><div class="gbtns"><button data-t="toon" data-k="spin" class="on">자동회전</button></div></div>
+    </div>
+    <div class="ghint">💡 색 밴드를 줄이면 더 만화 같고, 늘리면 부드러워짐. 넓은 잎 + 밝은 끝이 스타일 포인트.</div>
+  </div>
+
+<h2>이 페이지에서 만들 것 (큰 그림)</h2>
   <ol class="steps">
     <li><strong>넓적한 blade</strong> — 지오메트리 blade를 그대로 쓰되 버텍스에서 폭을 키워 넓은 잎을 만듭니다.</li>
     <li><strong>밴딩용 값 전달</strong> — 픽셀 셰이더가 밴딩할 밝기 <code>t</code>와 색 변주 <code>colVar</code>를 넘깁니다.</li>
@@ -336,5 +352,6 @@ float4 main(PSIn i) : SV_Target {
   <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
 </main>
 <script src="./highlight.js"></script>
+<script src="./grass-demo.js"></script>
 </body>
 </html>

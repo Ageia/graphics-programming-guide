@@ -39,7 +39,21 @@
     <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
   </div>
 
-  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+    <h2>▶ 실시간 데모</h2>
+  <p class="demo-caption">드래그로 회전, 휠로 줌. 아래에서 설명하는 코드가 실제로 이렇게 동작합니다. (WebGL2)</p>
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="c_lod"></canvas>
+      <div class="hud" id="h_lod">초기화 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl" style="flex:1.4"><label>표시</label><div class="gbtns"><button data-t="lod" data-k="rings" class="on">LOD 경계 색표시</button><button data-t="lod" data-k="spin" class="on">자동회전</button></div></div>
+      <div class="gctl" style="flex:2;color:var(--text-dim)">경계 색표시를 켜면 근(초록끼)·중(노란끼)·원(텍스처) 영역이 구분돼 보여.</div>
+    </div>
+    <div class="ghint">💡 휠로 줌인/아웃하면 같은 잔디가 지오메트리↔빌보드↔텍스처로 바뀌는 걸 볼 수 있어.</div>
+  </div>
+
+<h2>이 페이지에서 만들 것 (큰 그림)</h2>
   <ol class="steps">
     <li><strong>거리 링 정의</strong> — <code>NEAR</code>/<code>FAR</code> 두 경계로 근·중·원 세 구간을 나눕니다.</li>
     <li><strong>원거리 텍스처 지면</strong> — 노이즈로 칠한 지형을 깔아 멀리서 잔디처럼 보이게 합니다.</li>
@@ -417,5 +431,6 @@ float4 main(PSIn i) : SV_Target {
   <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
 </main>
 <script src="./highlight.js"></script>
+<script src="./grass-demo.js"></script>
 </body>
 </html>

@@ -40,7 +40,22 @@
     <a href="./08-geometry.html">지오메트리 잔디</a>와 동일하다고 가정합니다.
   </div>
 
-  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+    <h2>▶ 실시간 데모</h2>
+  <p class="demo-caption">드래그로 회전, 휠로 줌. 아래에서 설명하는 코드가 실제로 이렇게 동작합니다. (WebGL2)</p>
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="c_tramp"></canvas>
+      <div class="hud" id="h_tramp">초기화 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl"><label>밟힘 반경 <span class="gval" id="tramp_vR">3.0</span></label><input id="tramp_R" type="range" min="1" max="7" step="0.2" value="3"></div>
+      <div class="gctl"><label>바람 <span class="gval" id="tramp_vW">1.0</span></label><input id="tramp_W" type="range" min="0" max="3" step="0.05" value="1"></div>
+      <div class="gctl" style="flex:1"><label>표시</label><div class="gbtns"><button data-t="tramp" data-k="spin">자동회전</button></div></div>
+    </div>
+    <div class="ghint">💡 마우스를 캔버스에 올리면 그 지점이 밟힘 중심. 안 올리면 자동으로 원을 그리며 돎. 드래그=카메라 회전.</div>
+  </div>
+
+<h2>이 페이지에서 만들 것 (큰 그림)</h2>
   <ol class="steps">
     <li><strong>플레이어 위치 cbuffer</strong> — <code>uPlayerPos</code>·<code>uTrampleRadius</code>·바람·시간·VP를 넘깁니다.</li>
     <li><strong>거리 → 휨 세기</strong> — 뿌리~플레이어 거리로 <code>smoothstep</code> 영향력을 만듭니다.</li>
@@ -371,5 +386,6 @@ void updateAndDraw(ID3D11DeviceContext* ctx, UINT mapSize) {
   <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
 </main>
 <script src="./highlight.js"></script>
+<script src="./grass-demo.js"></script>
 </body>
 </html>

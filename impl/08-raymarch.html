@@ -40,7 +40,23 @@
     cbuffer로 넘깁니다. 아래 코드는 원리 확인용 학습 예제입니다.
   </div>
 
-  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+    <h2>▶ 실시간 데모</h2>
+  <p class="demo-caption">드래그로 회전, 휠로 줌. 아래에서 설명하는 코드가 실제로 이렇게 동작합니다. (WebGL2)</p>
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="c_ray"></canvas>
+      <div class="hud" id="h_ray">초기화 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl"><label>밀도(주파수) <span class="gval" id="ray_vF">5.0</span></label><input id="ray_F" type="range" min="2" max="10" step="0.5" value="5"></div>
+      <div class="gctl"><label>바람 <span class="gval" id="ray_vW">1.0</span></label><input id="ray_W" type="range" min="0" max="3" step="0.05" value="1"></div>
+      <div class="gctl"><label>스텝 수 <span class="gval" id="ray_vS">90</span></label><input id="ray_S" type="range" min="40" max="140" step="10" value="90"></div>
+      <div class="gctl" style="flex:.7"><label>표시</label><div class="gbtns"><button data-t="ray" data-k="spin" class="on">자동회전</button></div></div>
+    </div>
+    <div class="ghint">💡 메시 0인데 잔디밭이 나옴 = 순수 프래그먼트 셰이더. 스텝을 낮추면 빨라지지만 층이 보임.</div>
+  </div>
+
+<h2>이 페이지에서 만들 것 (큰 그림)</h2>
   <ol class="steps">
     <li><strong>풀스크린 삼각형</strong> — 정점 버퍼 없이 <code>SV_VertexID</code> 3개로 화면 전체를 덮습니다.</li>
     <li><strong>카메라 basis cbuffer</strong> — eye·forward·right·up과 시간·바람·주파수·스텝수를 넘깁니다.</li>
@@ -332,5 +348,6 @@ float4 main(PSIn i) : SV_Target {
   <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
 </main>
 <script src="./highlight.js"></script>
+<script src="./grass-demo.js"></script>
 </body>
 </html>

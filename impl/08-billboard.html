@@ -38,7 +38,22 @@
     <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
   </div>
 
-  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+    <h2>▶ 실시간 데모</h2>
+  <p class="demo-caption">드래그로 회전, 휠로 줌. 아래에서 설명하는 코드가 실제로 이렇게 동작합니다. (WebGL2)</p>
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="c_bill"></canvas>
+      <div class="hud" id="h_bill">초기화 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl"><label>카드 수 <span class="gval" id="bill_vN">12,000</span></label><input id="bill_N" type="range" min="1000" max="40000" step="1000" value="12000"></div>
+      <div class="gctl"><label>바람 <span class="gval" id="bill_vW">1.0</span></label><input id="bill_W" type="range" min="0" max="3" step="0.05" value="1.0"></div>
+      <div class="gctl" style="flex:1.6"><label>표시</label><div class="gbtns"><button data-t="bill" data-k="heat">🔥 오버드로우 히트맵</button><button data-t="bill" data-k="spin" class="on">자동회전</button></div></div>
+    </div>
+    <div class="ghint">💡 히트맵을 켜면 픽셀이 겹칠수록 빨개져 → <b>빨간 영역 = 프레임 잡아먹는 곳</b>. 알파 블렌드 대신 알파 테스트를 쓰는 이유.</div>
+  </div>
+
+<h2>이 페이지에서 만들 것 (큰 그림)</h2>
   <ol class="steps">
     <li><strong>쿼드 메시</strong> — 잔디 카드 한 장을 x∈[-0.5,0.5], y∈[0,1]의 4정점 스트립으로 만듭니다.</li>
     <li><strong>인스턴스 데이터</strong> — 카드마다 위치·키·위상·색변주를 담은 두 번째 정점 버퍼를 만듭니다.</li>
@@ -453,5 +468,6 @@ void createBlendStates(ID3D11Device* dev) {
   <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
 </main>
 <script src="./highlight.js"></script>
+<script src="./grass-demo.js"></script>
 </body>
 </html>

@@ -38,7 +38,21 @@
     <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
   </div>
 
-  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+    <h2>▶ 실시간 데모</h2>
+  <p class="demo-caption">드래그로 회전, 휠로 줌. 아래에서 설명하는 코드가 실제로 이렇게 동작합니다. (WebGL2)</p>
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="c_terr"></canvas>
+      <div class="hud" id="h_terr">초기화 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl" style="flex:1.4"><label>표시</label><div class="gbtns"><button data-t="terr" data-k="lod" class="on">근경에 blade 겹치기</button><button data-t="terr" data-k="spin" class="on">자동회전</button></div></div>
+      <div class="gctl" style="flex:2;color:var(--text-dim)">근경은 지오메트리, 원경은 텍스처 — 실제 게임의 LOD 조합이 이런 모습.</div>
+    </div>
+    <div class="ghint">💡 blade 겹치기를 끄면 순수 텍스처 지형만 남음(가장 쌈). 켜면 가까운 곳만 실제 blade로 보강하는 하이브리드.</div>
+  </div>
+
+<h2>이 페이지에서 만들 것 (큰 그림)</h2>
   <ol class="steps">
     <li><strong>지형 평면</strong> — 크게 스케일한 지면 쿼드 하나를 그립니다.</li>
     <li><strong>절차적 잔디 텍스처</strong> — 픽셀 셰이더에서 value noise로 잔디 색을 생성합니다(텍스처 파일 불필요).</li>
@@ -306,5 +320,6 @@ VSOut main(VSIn i) {
   <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
 </main>
 <script src="./highlight.js"></script>
+<script src="./grass-demo.js"></script>
 </body>
 </html>

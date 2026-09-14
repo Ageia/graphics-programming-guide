@@ -38,7 +38,22 @@
     <code>view * proj</code> 순서로 곱합니다. 아래 코드는 원리 확인용 학습 예제입니다.
   </div>
 
-  <h2>이 페이지에서 만들 것 (큰 그림)</h2>
+    <h2>▶ 실시간 데모</h2>
+  <p class="demo-caption">드래그로 회전, 휠로 줌. 아래에서 설명하는 코드가 실제로 이렇게 동작합니다. (WebGL2)</p>
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="c_wind"></canvas>
+      <div class="hud" id="h_wind">초기화 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl"><label>바람 세기 <span class="gval" id="wind_vW">1.0</span></label><input id="wind_W" type="range" min="0" max="2.5" step="0.05" value="1"></div>
+      <div class="gctl"><label>소용돌이 세기 <span class="gval" id="wind_vV">1.0</span></label><input id="wind_V" type="range" min="0" max="2.5" step="0.05" value="1"></div>
+      <div class="gctl" style="flex:1.3"><label>표시</label><div class="gbtns"><button data-t="wind" data-k="vec">바람장 화살표</button><button data-t="wind" data-k="spin">자동회전</button></div></div>
+    </div>
+    <div class="ghint">💡 소용돌이가 지나가면 잔디가 회오리처럼 눕고, 돌풍 파동이 밭을 가로질러 퍼져. "바람장 화살표"로 방향 필드를 봐.</div>
+  </div>
+
+<h2>이 페이지에서 만들 것 (큰 그림)</h2>
   <ol class="steps">
     <li><strong>바람장 함수</strong> — 위치·시간으로 2D 바람 벡터를 반환하는 <code>windAt()</code>를 HLSL로 만듭니다.</li>
     <li><strong>돌풍 파동</strong> — 방향을 따라 흐르는 <code>sin</code> 게이트로 직진성 돌풍을 만듭니다.</li>
@@ -389,5 +404,6 @@ float4 main(PSIn i) : SV_Target {
   <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
 </main>
 <script src="./highlight.js"></script>
+<script src="./grass-demo.js"></script>
 </body>
 </html>

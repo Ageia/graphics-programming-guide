@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 이미지 기반 조명 (IBL) · 리플렉션 프로브 — C++/DirectX 11</title>
+<meta name="description" content="환경맵(큐브맵)에서 디퓨즈 irradiance 컨볼루션 · 스페큘러 프리필터 · split-sum BRDF LUT를 굽고, 씬에 배치하는 리플렉션 프로브(로컬 큐브맵·parallax correction·프로브 블렌딩)까지 HLSL/C++로 한 줄씩 직접 구현하며 간접 스페큘러의 원리를 해부하는 입문자용 가이드." />
+<link rel="stylesheet" href="../css/theme.css" />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+<script src="./embed.js"></script>
+</head>
+<body>
+<main class="content" style="max-width:1200px;">
+  <a class="back-link" href="./index.html" onclick="if(history.length>1){history.back();return false}">← 뒤로가기</a>
+
+  <!-- 타이틀 히어로 배너: IBL의 본질 = 환경(하늘·주변)이 곧 광원.
+       WebGL 프래그먼트 셰이더로 절차적 환경을 반사하는 크롬 구를 실시간 레이마칭. -->
+  <div class="grass-hero" id="iblHero">
+    <canvas id="iblHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Image-Based <span class="accent">Lighting</span></h2>
+      <p class="gh-sub">Irradiance · Prefilter · Split-Sum · Reflection Probe</p>
+    </div>
+  </div>
+
+  <h1 style="font-size:32px; margin:0 0 12px;">이미지 기반 조명 (IBL) · 리플렉션 프로브 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead" style="font-size:16px;">
+    <a class="btn-link" href="./06-pbr.html">PBR</a> 페이지의 마지막에서, 우리는 점광원 몇 개만으로는 진짜 재질감이 안 나온다는 것을 봤습니다.
+    금속 구가 사실적이려면 <em>주변 환경 전체가 그 표면에 비쳐야</em> 하기 때문입니다.
+    <strong>이미지 기반 조명(Image-Based Lighting, IBL)</strong>은 바로 이 "환경 전체를 광원으로 쓰는" 기법입니다 —
+    하늘·벽·바닥이 담긴 <strong>환경맵(큐브맵)</strong>을 하나의 거대한 면광원으로 취급합니다.
+    문제는 반사 방정식의 반구 적분을 픽셀마다 다시 풀 수 없다는 것. 그래서 IBL은 이 적분을
+    <strong>미리(오프라인) 굽고</strong>, 런타임에는 텍스처를 몇 번 샘플만 합니다.
+    이 페이지에서는 그 세 조각 — <strong>디퓨즈 irradiance 큐브맵 · 스페큘러 프리필터 큐브맵 · split-sum BRDF LUT</strong> —
+    을 굽는 셰이더를 한 줄씩 해부하고, 이 환경맵을 <em>씬 곳곳에 배치</em>하는 <strong>리플렉션 프로브</strong>까지 만들어 봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 페이지의 모든 코드는 사이트 공통 규약을 따릅니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행 우선 저장, <strong>왼손 좌표계</strong>, 클립 z ∈ [0,1], 텍스처 V축 위→아래. 조명은 <strong>선형 공간(linear)</strong>에서 계산하며,
+    환경맵은 반드시 <strong>HDR(부동소수 큐브맵)</strong>이어야 합니다 — 하이라이트가 1을 넘는 값을 담아야 프리필터가 물리적으로 맞습니다.
+    코드는 검증된 라이브러리 대신 <strong>원리 학습용</strong>으로 최소 형태만 남겼습니다.
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- 0. 큰 그림 — split-sum -->
+  <!-- ================================================================ -->
+  <section id="overview">
+    <h2>0. 큰 그림 — 환경을 광원으로, 그리고 split-sum 근사</h2>
+    <p>
+      IBL이 풀려는 것은 <a class="btn-link" href="./06-pbr.html">PBR</a>과 똑같은 <strong>반사 방정식</strong>입니다. 다만 입사광
+      <code>L<sub>i</sub></code>가 몇 개의 점광원이 아니라 <em>환경맵의 모든 방향</em>이라는 점만 다릅니다:
+    </p>
+    <p style="text-align:center; color:var(--text-dim);">
+      <code>L<sub>o</sub>(v) = ∫<sub>Ω</sub> f(l, v) · L<sub>env</sub>(l) · (n·l) dl</code>
+    </p>
+    <p>
+      Cook-Torrance BRDF <code>f</code>는 <strong>디퓨즈</strong> 항과 <strong>스페큘러</strong> 항의 합이므로, 이 적분도 자연스럽게 둘로 갈라집니다.
+      <strong>디퓨즈 쪽</strong>은 BRDF가 방향에 둔감(람베르트)해서 <em>법선 방향 하나</em>로 결과가 정해집니다 — 그래서
+      "법선 → 색" 큐브맵 한 장(<strong>irradiance map</strong>)으로 미리 구울 수 있습니다.
+      <strong>스페큘러 쪽</strong>이 골칫거리입니다: BRDF가 <em>보는 방향·거칠기·프레넬</em>에 모두 얽혀 있어 4차원 적분이라 통째로 굽지 못합니다.
+    </p>
+
+    <div class="callout">
+      <span class="tag">직관</span>
+      Epic Games(Karis, 2013)의 <strong>split-sum 근사</strong>는 이 얽힌 스페큘러 적분을 <em>두 개의 독립된 평균의 곱</em>으로 쪼갭니다:
+      <strong>①</strong> "이 거칠기에서 환경은 평균적으로 어떤 색으로 뭉개져 보이나"(= 거칠기별로 흐려진 환경 = <strong>프리필터 큐브맵</strong>)와,
+      <strong>②</strong> "그 반사가 프레넬·기하 손실로 얼마나 세게/약하게 나오나"(환경과 무관한 순수 BRDF 적분 = <strong>BRDF LUT</strong>).
+      환경에만 의존하는 항과 BRDF에만 의존하는 항으로 분리했기에, <em>둘 다 오프라인에서 미리 구울</em> 수 있게 됩니다.
+    </div>
+
+    <p style="text-align:center; color:var(--text-dim);">
+      <code>∫ f·L·(n·l) dl  ≈  (∫ L<sub>env</sub>·(n·l) dl / ∫(n·l) dl)  ×  (∫ f·(n·l) dl)</code><br />
+      <span style="font-size:13px;">└─ 프리필터 큐브맵(환경만) ─┘&nbsp;&nbsp;&nbsp;└─ BRDF LUT(BRDF만) ─┘</span>
+    </p>
+
+    <p>정리하면 IBL은 아래 <strong>세 개의 미리 구운 텍스처</strong>로 앰비언트를 대체합니다. 이 페이지는 각 줄을 실제로 굽습니다:</p>
+
+    <table class="impl">
+      <thead><tr><th>미리 굽는 것</th><th>무엇을 담나</th><th>인덱스(런타임 조회 키)</th><th>해상도 감각</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Irradiance 큐브맵</strong><br />(디퓨즈)</td>
+          <td>법선 방향으로 들어오는 <em>코사인 가중 평균</em> 간접광</td>
+          <td>표면 법선 <code>n</code></td>
+          <td>아주 작아도 됨(예: 32²×6) — 저주파라 뭉툭</td>
+        </tr>
+        <tr>
+          <td><strong>프리필터 큐브맵</strong><br />(스페큘러 ①)</td>
+          <td>거칠기별로 흐려진 환경 — 밉 레벨 = 거칠기</td>
+          <td>반사 벡터 <code>r</code> + 거칠기(밉)</td>
+          <td>128²×6 + 밉 체인(거칠기 5~6단계)</td>
+        </tr>
+        <tr>
+          <td><strong>BRDF LUT</strong><br />(스페큘러 ②)</td>
+          <td>프레넬·기하 항의 적분 결과(scale, bias)</td>
+          <td>(<code>n·v</code>, 거칠기) 2D</td>
+          <td>512² 2채널(RG16F), 씬과 무관해 <em>한 번만</em></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      IBL은 <strong>무한히 먼 환경</strong>을 가정합니다 — 큐브맵은 방향만 알 뿐 <em>거리</em>가 없어서, 방 안 어디서 봐도 벽이 같은 방향에 있다고 착각합니다.
+      그래서 하나의 큐브맵으로 실내 전체를 덮으면 반사가 어긋납니다. 이 한계를 푸는 것이 아래 <a class="btn-link" href="#reflection-probe">리플렉션 프로브</a>의
+      <strong>parallax correction</strong>(위치 보정)입니다.
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 인터랙티브 데모 (What) -->
+  <!-- ================================================================ -->
+  <section id="demo">
+    <h2>직관 데모 — 거칠기가 곧 밉 레벨이다</h2>
+    <p>
+      split-sum의 핵심 직관을 손으로 만져 봅시다. 아래 구는 절차적 환경(하늘·태양·바닥)에 놓여 있습니다.
+      <strong>거칠기</strong>를 올리면 반사가 흐려지는데, 이것은 <em>프리필터 큐브맵의 더 높은 밉 레벨</em>을 읽는 것과 정확히 같습니다 —
+      거친 표면일수록 넓은 각도의 환경을 평균해 보기 때문입니다. <strong>metallic</strong>을 내리면 디퓨즈 irradiance(뭉툭한 평균광)의
+      비중이 커지고, 올리면 순수 환경 반사가 지배합니다. 오른쪽 HUD가 지금 어느 밉을 읽는지 보여줍니다.
+    </p>
+    <div class="gdemo">
+      <div class="gcanvas-wrap">
+        <canvas id="iblDemoCanvas" class="gcanvas" width="900" height="360"></canvas>
+        <div class="hud" id="iblHud">렌더링…</div>
+      </div>
+      <div class="gctrls">
+        <div class="gctl">
+          <label>거칠기 roughness <span class="gval" id="iblRoughVal">0.25</span></label>
+          <input type="range" id="iblRough" min="0" max="1" step="0.01" value="0.25" />
+        </div>
+        <div class="gctl">
+          <label>금속성 metallic <span class="gval" id="iblMetalVal">1.00</span></label>
+          <input type="range" id="iblMetal" min="0" max="1" step="0.01" value="1.0" />
+        </div>
+      </div>
+      <p class="ghint">
+        왼쪽 = IBL로 조명한 구, 오른쪽 위 = 지금 읽는 <strong>프리필터 밉</strong>(거칠기로 선택), 오른쪽 아래 = <strong>irradiance</strong>(디퓨즈, 항상 최대로 뭉갬).
+        거칠기 0 = 밉 0(거울), 거칠기 1 = 최상위 밉(완전 확산)입니다. 값은 개념 이해용 근사입니다.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 1. Irradiance 큐브맵 -->
+  <!-- ================================================================ -->
+  <section id="irradiance">
+    <h2>1. 디퓨즈 Irradiance 큐브맵 — 반구를 컨볼루션해 굽는다</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 환경맵의 각 방향(=출력 큐브맵의 텍셀)에 대해, 그 방향을 법선으로 놓은 <em>반구 전체</em>를 훑어
+      코사인 가중 평균을 낸 큐브맵입니다. 런타임 셰이더는 표면 법선으로 이 큐브맵을 <strong>단 한 번</strong> 샘플해 디퓨즈 간접광을 얻습니다.
+      <strong>왜 필요한가:</strong> 디퓨즈는 저주파(뭉툭)라 이렇게 미리 뭉개도 손실이 거의 없고, 픽셀당 반구 적분을 텍스처 읽기 하나로 바꿔 줍니다.
+    </p>
+    <div class="callout">
+      <span class="tag">수식</span>
+      디퓨즈 irradiance는 <code>E(n) = ∫<sub>Ω</sub> L<sub>env</sub>(l) · (n·l) dl</code> 입니다. 여기에 람베르트 BRDF <code>albedo/π</code>를 곱하면
+      최종 디퓨즈가 되지만, BRDF의 <code>albedo</code>는 런타임 재질값이므로 <em>큐브맵에는 순수 <code>E(n)</code>만 굽고</em> albedo는 셰이딩 때 곱합니다.
+    </div>
+
+    <h3>1-1. 반구 컨볼루션 셰이더 (HLSL)</h3>
+    <p>
+      출력 큐브맵의 한 텍셀을 그리는 픽셀 셰이더입니다. 그 텍셀의 월드 방향을 법선 <code>N</code>으로 삼고, 접선 공간에서 반구를 촘촘히 돌며
+      환경맵을 적분합니다. 큐브맵 6면을 렌더 타깃으로 한 면씩 그리며 이 셰이더가 호출됩니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>irradiance_convolve.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">TextureCube  gEnv  : register(t0);   // 원본 HDR 환경 큐브맵
+SamplerState gSamp : register(s0);
+
+// 이 텍셀이 대표하는 반구의 축(월드 방향). VS가 큐브 면 위치로 만들어 넘겨줌.
+float4 main(float3 worldDir : DIRECTION) : SV_Target
+{
+    float3 N = normalize(worldDir);      // 반구의 축 = 이 텍셀의 법선
+
+    // N을 축으로 하는 접선 기저(up이 N과 나란하면 축을 바꿔 특이점 회피)
+    float3 up      = abs(N.y) &lt; 0.999 ? float3(0,1,0) : float3(0,0,1);
+    float3 tangent = normalize(cross(up, N));
+    float3 bitan   = cross(N, tangent);
+
+    float3 irradiance = 0;
+    float  nrSamples  = 0.0;
+    const float TWO_PI = 6.2831853;
+    const float HALF_PI = 1.5707963;
+
+    // 방위각 phi(0..2π) × 극각 theta(0..π/2)를 균일 각도 간격으로 훑는다.
+    for (float phi = 0.0; phi &lt; TWO_PI; phi += 0.025)
+    for (float theta = 0.0; theta &lt; HALF_PI; theta += 0.025)
+    {
+        // 접선 공간 방향(구면좌표) → 월드 방향
+        float3 tanSample = float3(sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta));
+        float3 L = tanSample.x*tangent + tanSample.y*bitan + tanSample.z*N;
+
+        // 코사인(cosθ) · 입체각 보정(sinθ) 가중으로 환경을 적립
+        irradiance += gEnv.Sample(gSamp, L).rgb * cos(theta) * sin(theta);
+        nrSamples  += 1.0;
+    }
+    // π·(합/표본수): 균일 각도 샘플의 정규화 상수
+    irradiance = 3.14159265 * irradiance * (1.0 / nrSamples);
+    return float4(irradiance, 1.0);
+}
+</code></pre>
+    </div>
+
+    <h4>줄 단위 해부</h4>
+    <p>
+      <code>TextureCube gEnv</code>는 6면을 하나로 묶은 큐브맵 타입입니다. <code>Sample(samp, dir)</code>에 <em>UV가 아니라 방향 벡터</em>를 넣으면
+      하드웨어가 어느 면의 어느 텍셀인지 알아서 골라 줍니다 — 큐브맵의 핵심 편의입니다.
+    </p>
+    <p>
+      <code>up = abs(N.y) &lt; 0.999 ? (0,1,0) : (0,0,1)</code>은 접선 기저를 만들 때 <strong>특이점(gimbal)</strong>을 피합니다.
+      법선이 정확히 위/아래를 가리키면 <code>cross(up, N)</code>이 0이 되어 기저가 무너지므로, 그 경우만 보조축을 바꿉니다.
+    </p>
+    <p>
+      <strong>수학 → 코드:</strong> <code>cos(theta)</code>는 반사 방정식의 <code>(n·l)</code> 코사인 항이고, <code>sin(theta)</code>는
+      구면좌표에서 <em>극각 theta 근처 띠의 실제 입체각</em>(<code>dl = sinθ dθ dφ</code>)을 보정합니다. 이 둘을 곱해 적립하고,
+      마지막 <code>π · 합/N</code>이 균일 각도 샘플링의 정규화 상수입니다. 결과가 곧 <code>E(N)</code>입니다.
+    </p>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      이 이중 루프는 텍셀당 약 <code>(2π/0.025)×(π/2·1/0.025) ≈ 250×63 ≈ 1.6만</code> 샘플입니다. 하지만 irradiance 큐브맵은
+      <strong>32²×6</strong>처럼 작아도 충분하고(저주파), 씬당 <em>한 번만</em> 굽습니다(정적 환경). 동적 하늘이면 매 프레임 다시 굽는 대신
+      <em>구면 조화(SH)로 압축</em>해 9계수만 갱신하는 편이 훨씬 쌉니다 —
+      그 SH 경로는 <a class="btn-link" href="./06-gi.html#probe">전역 조명: Irradiance Probe</a>에서 다룹니다.
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 2. 프리필터 큐브맵 -->
+  <!-- ================================================================ -->
+  <section id="prefilter">
+    <h2>2. 스페큘러 프리필터 큐브맵 — 거칠기를 밉 레벨에 굽는다</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 같은 환경맵을 <em>거칠기 단계별로</em> 흐리게 만들어 밉 체인에 저장합니다. 밉 0 = 원본(거울),
+      밉이 올라갈수록 더 거친 표면용으로 넓게 뭉갠 버전입니다. 런타임에는 반사 벡터 <code>R</code>로 샘플하되, 밉 레벨을 <code>roughness</code>로 지정합니다.
+      <strong>왜 필요한가:</strong> split-sum의 ① 항(환경 부분)을 이 한 장으로 끝냅니다 — "이 거칠기에서 환경이 평균 무슨 색인가"가 미리 구워져 있습니다.
+    </p>
+    <div class="callout">
+      <span class="tag">직관</span>
+      거친 금속의 흐릿한 반사는 <em>수많은 미세면이 조금씩 다른 방향을 반사</em>한 것의 평균입니다. 그 평균을 픽셀마다 다시 구하는 대신,
+      GGX 분포(<code>D</code>)를 <strong>중요도 샘플링</strong>해 반사 방향 주변을 가중 평균한 결과를 밉에 미리 구워 둡니다.
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>prefilter_env.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">TextureCube  gEnv  : register(t0);
+SamplerState gSamp : register(s0);
+cbuffer PrefilterCB : register(b0) { float gRoughness; };  // 이 밉이 대표하는 거칠기
+
+// GGX 중요도 샘플: (u1,u2) 난수 → 거칠기 a에서 있음직한 하프벡터 방향
+float3 ImportanceSampleGGX(float2 Xi, float3 N, float a)
+{
+    float phi      = 6.2831853 * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0) * Xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta*cosTheta);
+
+    float3 H = float3(sinTheta*cos(phi), sinTheta*sin(phi), cosTheta); // 접선 공간
+    float3 up      = abs(N.z) &lt; 0.999 ? float3(0,0,1) : float3(1,0,0);
+    float3 tangent = normalize(cross(up, N));
+    float3 bitan   = cross(N, tangent);
+    return normalize(tangent*H.x + bitan*H.y + N*H.z);                 // 월드로
+}
+
+float4 main(float3 worldDir : DIRECTION) : SV_Target
+{
+    float3 N = normalize(worldDir);
+    float3 R = N;  float3 V = N;     // 근사: 보는 방향 = 반사 방향 = N (Karis 가정)
+
+    const uint SAMPLES = 1024;
+    float3 prefiltered = 0;
+    float  totalWeight = 0.0;
+
+    for (uint i = 0; i &lt; SAMPLES; ++i)
+    {
+        float2 Xi = Hammersley(i, SAMPLES);            // 저불일치 2D 난수
+        float3 H  = ImportanceSampleGGX(Xi, N, gRoughness);
+        float3 L  = reflect(-V, H);                    // V를 H로 반사 → 입사 방향
+
+        float NoL = max(dot(N, L), 0.0);
+        if (NoL &gt; 0.0)
+        {
+            prefiltered += gEnv.Sample(gSamp, L).rgb * NoL;  // NoL 가중 평균
+            totalWeight += NoL;
+        }
+    }
+    return float4(prefiltered / totalWeight, 1.0);
+}
+</code></pre>
+    </div>
+
+    <h4>수학 → 기하 직관 → 코드 매핑</h4>
+    <p>
+      <strong>ImportanceSampleGGX</strong>는 균일 난수 <code>(Xi.x, Xi.y)</code>를 <em>GGX 분포가 큰 방향</em>으로 변환합니다.
+      <code>cosTheta</code> 공식은 GGX의 누적분포를 역함수로 뒤집은 것으로, 거칠기 <code>a</code>가 작으면 하프벡터가 <code>N</code> 주변에 몰리고(좁은 하이라이트),
+      크면 넓게 퍼집니다. 그래서 <em>기여가 큰 방향에만 표본을 집중</em>해 적은 샘플로도 매끈한 결과를 얻습니다.
+    </p>
+    <p>
+      <code>R = V = N</code>은 Karis의 핵심 근사입니다 — 프리필터를 구울 때는 <em>보는 각도 정보가 없으므로</em> "정면에서 본다"고 가정합니다.
+      그래서 스치는 각의 길쭉한 반사(anisotropic streak)는 표현 못 하지만, 이 덕분에 큐브맵 한 장으로 모든 시선각을 커버합니다.
+    </p>
+    <p>
+      <code>reflect(-V, H)</code>는 시선 <code>V</code>를 미세면 법선 <code>H</code>에 대해 반사해 <em>그 미세면이 어느 환경 방향을 비추는지</em>(<code>L</code>)를 구합니다.
+      <code>NoL</code> 가중은 표면에 스치듯 들어오는 방향의 기여를 줄여, 결과가 물리적으로 편향되지 않게 합니다.
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      각 밉 레벨을 그릴 때 <code>gRoughness</code>를 <strong>그 밉에 맞는 값</strong>(예: <code>mip / (mipCount-1)</code>)으로 넘겨야 합니다.
+      또 밉 0(거칠기 0)은 적분이 델타 함수라 원본을 그대로 복사하는 게 정확합니다. 밉 선택 시 <em>큐브맵 seam</em>(면 경계)에서 필터가 튀지 않도록
+      <code>D3D11_TEXCUBE</code> 생성 시 <code>MiscFlags</code>에 <code>D3D11_RESOURCE_MISC_TEXTURECUBE</code>와 밉 생성 옵션을 함께 켜야 합니다.
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 3. BRDF LUT -->
+  <!-- ================================================================ -->
+  <section id="brdflut">
+    <h2>3. BRDF LUT — split-sum의 둘째 항(BRDF만)을 2D 텍스처로</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 환경과 무관한 순수 BRDF 적분을 <em>(<code>n·v</code>, 거칠기)</em> 축의 2D 텍스처에 굽습니다.
+      각 텍셀은 두 값(<strong>scale</strong>, <strong>bias</strong>)을 담아 프레넬 <code>F0</code>에 <code>F0·scale + bias</code>로 적용됩니다.
+      <strong>왜 필요한가:</strong> 이 항은 씬·환경이 무엇이든 바뀌지 않으므로 <em>앱 전체에서 딱 한 번</em> 굽고 재사용합니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>brdf_lut.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 출력: RG16F. R = 프레넬 scale, G = 프레넬 bias.
+float2 IntegrateBRDF(float NoV, float roughness)
+{
+    // 시선 V를 (NoV로부터) 접선 공간에 복원. N = (0,0,1)로 고정.
+    float3 V = float3(sqrt(1.0 - NoV*NoV), 0.0, NoV);
+    float3 N = float3(0, 0, 1);
+
+    float A = 0.0, B = 0.0;
+    const uint SAMPLES = 1024;
+    for (uint i = 0; i &lt; SAMPLES; ++i)
+    {
+        float2 Xi = Hammersley(i, SAMPLES);
+        float3 H  = ImportanceSampleGGX(Xi, N, roughness);
+        float3 L  = reflect(-V, H);
+
+        float NoL = max(L.z, 0.0);
+        float NoH = max(H.z, 0.0);
+        float VoH = max(dot(V, H), 0.0);
+        if (NoL &gt; 0.0)
+        {
+            float G     = GeometrySmithIBL(N, V, L, roughness); // IBL용 k=a²/2
+            float G_Vis = (G * VoH) / (NoH * NoV);
+            float Fc    = pow(1.0 - VoH, 5.0);                  // 프레넬의 (1-VoH)^5 부분
+            A += (1.0 - Fc) * G_Vis;                            // scale
+            B += Fc * G_Vis;                                    // bias
+        }
+    }
+    return float2(A, B) / SAMPLES;
+}
+</code></pre>
+    </div>
+    <p>
+      <strong>왜 scale·bias 두 값인가:</strong> 프레넬-슐릭은 <code>F = F0 + (1-F0)(1-VoH)⁵</code>입니다. 적분 안에서 <code>F0</code>을 밖으로 빼면
+      <code>F0·∫(1-Fc)G' + ∫Fc·G'</code> 꼴로 정확히 <strong>두 항</strong>으로 분리됩니다 — 앞이 <code>A</code>(scale), 뒤가 <code>B</code>(bias)입니다.
+      그래서 런타임에는 재질의 <code>F0</code>만 알면 <code>F0·A + B</code>로 프레넬·기하 적분 결과를 <em>테이블 조회 한 번</em>으로 복원합니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      BRDF LUT는 <strong>클램프 샘플러</strong>(<code>ADDRESS_CLAMP</code>)로 읽어야 합니다 — 가장자리(<code>NoV→0</code> 또는 거칠기 0/1)에서 wrap되면
+      반대편 값이 새어 프레넬이 폭발합니다. 또 IBL의 기하 항 <code>G</code>는 직접광과 <em>k가 다릅니다</em>(<code>k = a²/2</code> vs 직접광 <code>(a+1)²/8</code>).
+      이 둘을 섞으면 거친 재질의 밝기가 어긋납니다.
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 4. 합치기 -->
+  <!-- ================================================================ -->
+  <section id="combine">
+    <h2>4. 세 조각을 합쳐 앰비언트를 대체 (런타임 셰이딩)</h2>
+    <p>
+      이제 굽는 건 끝났습니다. 런타임 PBR 픽셀 셰이더에서 <a class="btn-link" href="./06-pbr.html">PBR</a> 페이지의 밋밋한 앰비언트
+      <code>albedo * 0.03</code>을 아래 IBL 블록으로 갈아끼우면, 추가 광원 없이도 환경이 재질에 사실적으로 비칩니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>ibl_shading.hlsl (PBR 픽셀 셰이더 일부)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">TextureCube  gIrradiance : register(t3);  // 1절에서 구운 것
+TextureCube  gPrefilter  : register(t4);  // 2절 (밉 체인 있음)
+Texture2D    gBRDFLut    : register(t5);  // 3절
+SamplerState gSamp       : register(s0);
+
+float3 ComputeIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness)
+{
+    float3 F0 = lerp(0.04, albedo, metallic);      // 비금속 0.04, 금속=albedo
+    float  NoV = max(dot(N, V), 0.0);
+
+    // 스치는 각까지 고려한 프레넬(거칠기 반영 roughness-aware Fresnel)
+    float3 F  = F0 + (max(1.0 - roughness, F0) - F0) * pow(1.0 - NoV, 5.0);
+    float3 kd = (1.0 - F) * (1.0 - metallic);      // 디퓨즈 몫(에너지 보존)
+
+    // --- 디퓨즈: irradiance 한 번 샘플 ---
+    float3 irradiance = gIrradiance.Sample(gSamp, N).rgb;
+    float3 diffuse    = irradiance * albedo;
+
+    // --- 스페큘러: 프리필터(밉=거칠기) × BRDF LUT ---
+    float3 R = reflect(-V, N);
+    const float MAX_MIP = 5.0;
+    float3 prefiltered = gPrefilter.SampleLevel(gSamp, R, roughness * MAX_MIP).rgb;
+    float2 brdf        = gBRDFLut.Sample(gSamp, float2(NoV, roughness)).rg;
+    float3 specular    = prefiltered * (F * brdf.x + brdf.y);   // split-sum 합성
+
+    return kd * diffuse + specular;   // (선택) × ambientOcclusion
+}
+</code></pre>
+    </div>
+    <p>
+      마지막 줄이 이 페이지 전체의 결론입니다: <strong>디퓨즈(irradiance×albedo)</strong> + <strong>스페큘러(prefiltered × (F·scale + bias))</strong>.
+      환경 반구 적분이 <em>텍스처 세 번 샘플</em>로 줄었습니다. <code>SampleLevel(..., roughness*MAX_MIP)</code>이 데모에서 만졌던 "거칠기 = 밉" 그 자체입니다.
+    </p>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 5. 리플렉션 프로브 -->
+  <!-- ================================================================ -->
+  <section id="reflection-probe">
+    <h2>5. 리플렉션 프로브 — 환경맵을 씬에 배치하다</h2>
+    <p>
+      지금까지의 환경맵은 <em>하나의 무한히 먼 하늘</em>이었습니다. 하지만 실내를 걸으면 방마다·구석마다 비치는 환경이 다릅니다.
+      <strong>리플렉션 프로브(reflection probe)</strong>는 씬의 특정 위치에 카메라를 놓고 <em>그 지점에서 본 환경을 큐브맵으로 캡쳐</em>해,
+      그 큐브맵으로 위 IBL 파이프라인(프리필터·BRDF LUT)을 그대로 돌립니다. 언리얼의 <strong>리플렉션 캡쳐(Reflection Capture)</strong>가 사실상 같은 개념입니다.
+    </p>
+    <ol class="steps">
+      <li>프로브 위치에 6방향 카메라를 놓고 씬을 렌더 → 로컬 HDR 큐브맵 캡쳐(정적이면 에디터에서 한 번, 동적이면 주기적 갱신).</li>
+      <li>그 큐브맵을 1~3절 파이프라인으로 프리필터·irradiance로 굽는다(프로브마다).</li>
+      <li>런타임에 표면은 <em>가장 가까운/영향 반경 안의 프로브들</em>을 골라 샘플하고, 경계에서 <strong>블렌딩</strong>한다.</li>
+      <li>먼 환경 가정이 깨지지 않도록 <strong>parallax correction</strong>으로 반사 벡터를 프로브의 경계 볼륨에 맞춰 보정한다.</li>
+    </ol>
+
+    <h3>5-1. Parallax correction — 무한 환경 가정을 고치는 한 단락</h3>
+    <p>
+      <strong>문제:</strong> 순수 큐브맵 샘플 <code>gCube.Sample(s, R)</code>은 반사 벡터의 <em>방향만</em> 씁니다. 그래서 방 한쪽 끝에서 보나
+      반대쪽에서 보나 같은 벽면이 같은 방향에 있다고 착각해, 반사가 표면에 "붙어" 미끄러집니다.
+      <strong>해결:</strong> 프로브에 <em>경계 상자(또는 구)</em>를 주고, 반사 광선이 그 상자와 <em>실제로 만나는 지점</em>을 구해,
+      프로브 중심에서 그 교차점으로 향하는 <strong>보정된 방향</strong>으로 큐브맵을 샘플합니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>parallax_box.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 박스 parallax correction: 반사 벡터 R을 프로브 경계 상자에 맞춰 보정한다.
+//   worldPos  : 셰이딩 중인 표면 위치
+//   R         : 원래 반사 벡터(normalize된 방향)
+//   boxMin/Max: 프로브 경계 상자(AABB, 월드)
+//   probePos  : 프로브(큐브맵 캡쳐) 중심 위치
+float3 ParallaxCorrectR(float3 worldPos, float3 R, float3 boxMin, float3 boxMax, float3 probePos)
+{
+    // 광선 worldPos + t·R 이 상자 여섯 평면과 만나는 t들 중, 앞쪽(양수) 최소 교차
+    float3 firstPlane  = (boxMax - worldPos) / R;   // 성분별: 각 축 상한면까지의 t
+    float3 secondPlane = (boxMin - worldPos) / R;   // 각 축 하한면까지의 t
+    float3 furthest    = max(firstPlane, secondPlane);      // 각 축에서 나가는 t
+    float  t           = min(min(furthest.x, furthest.y), furthest.z); // 상자를 빠져나가는 지점
+
+    float3 hitPos = worldPos + R * t;               // 반사가 실제로 닿는 상자 위 점
+    return hitPos - probePos;                        // 프로브 중심 → 그 점 = 보정 방향
+}
+// 사용: float3 Rc = ParallaxCorrectR(P, reflect(-V,N), bMin, bMax, probePos);
+//       float3 env = gPrefilter.SampleLevel(gSamp, Rc, roughness*MAX_MIP).rgb;
+</code></pre>
+    </div>
+    <h4>기하 직관 — 왜 이 몇 줄이 반사를 "고정"하나</h4>
+    <p>
+      <strong>수학:</strong> <code>(boxMax - worldPos)/R</code>는 광선 <code>P + tR</code>이 각 축의 상한 평면과 만나는 매개변수 <code>t</code>를 성분별로 준 것입니다.
+      각 축마다 상·하한 중 <em>나가는 쪽</em>(<code>max</code>)을 고르고, 세 축 중 <em>가장 먼저 상자를 벗어나는</em>(<code>min</code>) <code>t</code>가 실제 교차입니다
+      (표준 slab 방식). 그 교차점 <code>hitPos</code>를 프로브 중심에서 바라본 방향으로 큐브맵을 읽으면, <em>가까운 벽은 가깝게·먼 벽은 멀게</em> 비쳐
+      반사가 표면에 고정됩니다.
+    </p>
+    <p>
+      <strong>직관:</strong> 무한 큐브맵은 "벽이 무한히 멀다"고 가정합니다. parallax correction은 "아니, 이 방은 이만한 상자다"라는 <em>거리 정보</em>를
+      광선-상자 교차로 되살려, 시점을 옮기면 반사도 함께 흐르게(parallax) 만듭니다.
+    </p>
+
+    <h3>5-2. 프로브 블렌딩 — 경계에서 튀지 않게</h3>
+    <p>
+      한 표면이 여러 프로브의 영향 반경 안에 있으면, 가장 가까운 하나만 쓰면 프로브 경계를 넘을 때 반사가 <em>탁 튑니다</em>.
+      그래서 각 프로브에 <strong>가중치</strong>(중심에서 가까울수록·경계에서 멀수록 큼)를 주고 정규화해 섞습니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>probe_blend.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">TextureCube gProbe[4] : register(t6);   // 영향 범위가 겹치는 프로브들(예: 4개)
+cbuffer ProbeSetCB : register(b1)
+{
+    float4 gProbePos[4];     // .xyz = 프로브 중심, .w = 영향 반경
+    float4 gProbeBox[8];     // (min0,max0, min1,max1, ...) parallax용 AABB
+    int    gProbeCount;
+};
+
+float3 SampleBlendedProbes(float3 P, float3 R, float roughness)
+{
+    float3 acc = 0;  float wSum = 0;
+    for (int i = 0; i &lt; gProbeCount; ++i)
+    {
+        float  dist   = distance(P, gProbePos[i].xyz);
+        float  radius = gProbePos[i].w;
+        float  w      = saturate(1.0 - dist / radius);   // 경계(=반경)에서 0, 중심에서 1
+        w *= w;                                          // 부드러운 폴오프
+        if (w &lt;= 0.0) continue;
+
+        float3 Rc  = ParallaxCorrectR(P, R, gProbeBox[i*2].xyz, gProbeBox[i*2+1].xyz, gProbePos[i].xyz);
+        acc  += gProbe[i].SampleLevel(gSamp, Rc, roughness * 5.0).rgb * w;
+        wSum += w;
+    }
+    return wSum &gt; 0.0 ? acc / wSum : gPrefilter.SampleLevel(gSamp, R, roughness*5.0).rgb; // 폴백=전역 IBL
+}
+</code></pre>
+    </div>
+    <div class="callout">
+      <span class="tag warn">실무</span>
+      언리얼은 <strong>Sphere/Box Reflection Capture</strong>(정적, 미리 캡쳐)와 <strong>Planar Reflection</strong>(거울면),
+      그리고 실시간 <strong>Lumen</strong> 반사를 계층으로 섞습니다. 유니티는 <strong>Reflection Probe</strong>(Baked/Realtime)와
+      스카이박스 앰비언트를 프로브 볼륨으로 블렌딩합니다. 공통 원칙은 이 절과 같습니다 —
+      <em>parallax로 위치를 고치고, 가중치로 프로브를 섞고, 반경 밖은 전역 IBL로 폴백</em>.
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정 — SSR과의 관계</span>
+      리플렉션 프로브는 <em>미리 구운 저해상도·지연 갱신</em>이라 <strong>움직이는 물체·정확한 접촉 반사</strong>는 못 담습니다. 반대로
+      <a class="btn-link" href="./06-screenspace.html">스크린 스페이스 반사(SSR)</a>는 <em>화면에 보이는</em> 동적 픽셀을 정확히 반사하지만
+      <em>화면 밖·가려진 것</em>은 못 씁니다. 그래서 실무는 둘을 <strong>폴백 체인</strong>으로 씁니다:
+      <strong>SSR을 먼저 시도 → 광선이 화면을 벗어나거나 히트 실패 → 리플렉션 프로브로 폴백 → 그것도 없으면 전역 IBL</strong>.
+      SSR의 신뢰도(화면 안 히트 여부)로 두 결과를 블렌딩하면 이음매가 사라집니다.
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 마무리 -->
+  <!-- ================================================================ -->
+  <section id="wrap">
+    <h2>6. 마무리 — 무엇을 언제 쓰나</h2>
+    <table class="impl">
+      <thead><tr><th>상황</th><th>추천 조합</th></tr></thead>
+      <tbody>
+        <tr><td>정적 실외·하늘 하나</td><td>전역 IBL(irradiance + 프리필터 + BRDF LUT) 한 세트</td></tr>
+        <tr><td>실내·구역별 다른 환경</td><td>리플렉션 프로브 여러 개 + parallax correction + 블렌딩</td></tr>
+        <tr><td>동적 접촉 반사가 중요</td><td>SSR 우선 → 프로브 폴백 → 전역 IBL 폴백</td></tr>
+        <tr><td>동적 하늘·시간대 변화</td><td>디퓨즈는 <a class="btn-link" href="./06-gi.html#probe">SH 프로브</a>로 매 프레임 갱신, 스페큘러만 프리필터 재굽기</td></tr>
+      </tbody>
+    </table>
+    <p style="color:var(--text-dim); font-size:14px;">
+      IBL은 결국 <a class="btn-link" href="./06-pbr.html">PBR</a>의 반구 적분을 <strong>오프라인으로 미룬 것</strong>입니다 — 디퓨즈는 irradiance 큐브맵으로,
+      스페큘러는 split-sum(프리필터 × BRDF LUT)으로 나눠 굽고, 리플렉션 프로브로 <em>공간마다</em> 배치합니다.
+      이 페이지가 다룬 것은 간접 <strong>스페큘러</strong>의 정석입니다. 간접 <strong>디퓨즈</strong>를 공간에 촘촘히 배치하는 라이트 프로브·DDGI는
+      <a class="btn-link" href="./06-gi.html">전역 조명(GI)</a>에서, 화면 공간 폴백은
+      <a class="btn-link" href="./06-screenspace.html">스크린 스페이스 효과</a>에서 이어집니다.
+    </p>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-pbr.html">← 물리 기반 렌더링 (PBR)</a>
+    <a href="./06-gi.html">전역 조명 (GI) →</a>
+  </nav>
+
+</main>
+
+<script>if (window.GFX && GFX.runPendingDemos) GFX.runPendingDemos();</script>
+
+<!-- ================================================================ -->
+<!-- 히어로 배너: WebGL 프래그먼트 셰이더로 절차적 환경을 반사하는 크롬 구.
+     GPU 레이마칭 — 환경(하늘/태양/바닥)이 곧 광원이라는 IBL의 본질을 실시간으로.
+     실패 시 조용히 캔버스2D 그라디언트로 폴백. 캔버스 크기 피드백 루프 없음. -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  try {
+    var cv = document.getElementById("iblHeroCanvas");
+    if (!cv) return;
+    var gl = cv.getContext("webgl") || cv.getContext("experimental-webgl");
+    if (!gl) { fallback2D(); return; }
+
+    var VS = "attribute vec2 p; varying vec2 uv; void main(){ uv = p; gl_Position = vec4(p,0.0,1.0); }";
+    var FS = [
+      "precision highp float;",
+      "varying vec2 uv;",
+      "uniform vec2 res; uniform float t;",
+      // 절차적 HDR 환경: 하늘 그라디언트 + 태양 + 바닥
+      "vec3 envMap(vec3 d){",
+      "  float sunAng = t*0.25;",
+      "  vec3 sun = normalize(vec3(cos(sunAng), 0.55, sin(sunAng)));",
+      "  float up = clamp(d.y*0.5+0.5, 0.0, 1.0);",
+      "  vec3 sky = mix(vec3(0.55,0.72,0.95), vec3(0.08,0.16,0.34), up);",     // 지평선→천정
+      "  sky = mix(vec3(0.95,0.78,0.55), sky, smoothstep(-0.1,0.25,d.y));",     // 지평선 노을
+      "  float s = max(dot(d, sun), 0.0);",
+      "  vec3 sunGlow = vec3(1.4,1.15,0.75) * (pow(s, 220.0)*8.0 + pow(s,6.0)*0.5);",
+      "  vec3 ground = mix(vec3(0.18,0.16,0.14), vec3(0.05,0.05,0.06), up);",
+      "  vec3 col = d.y > 0.0 ? sky + sunGlow : ground;",
+      "  return col;",
+      "}",
+      "float iSphere(vec3 ro, vec3 rd, float r){",
+      "  float b = dot(ro, rd); float c = dot(ro,ro) - r*r; float h = b*b - c;",
+      "  if (h < 0.0) return -1.0; return -b - sqrt(h);",
+      "}",
+      "void main(){",
+      "  vec2 q = uv; q.x *= res.x/res.y;",
+      "  vec3 ro = vec3(0.0, 0.0, 3.2);",
+      "  vec3 rd = normalize(vec3(q, -1.7));",
+      "  vec3 col;",
+      "  float d = iSphere(ro, rd, 1.0);",
+      "  if (d > 0.0){",
+      "    vec3 pos = ro + rd*d; vec3 n = normalize(pos);",
+      "    vec3 v = -rd; float NoV = max(dot(n,v),0.0);",
+      "    vec3 refl = reflect(rd, n);",
+      "    vec3 env = envMap(refl);",
+      "    float F = 0.04 + 0.96*pow(1.0-NoV, 5.0);",            // 프레넬
+      "    vec3 tint = vec3(0.62,0.66,0.72);",                   // 약한 금속색
+      "    col = env * mix(tint, vec3(1.0), F);",
+      "    col += envMap(n) * 0.12;",                            // 아주 약한 디퓨즈 irradiance
+      "  } else {",
+      "    col = envMap(rd);",
+      "  }",
+      "  col = col/(col+vec3(1.0));",                            // Reinhard 톤맵
+      "  col = pow(col, vec3(1.0/2.2));",                        // 감마
+      "  gl_FragColor = vec4(col, 1.0);",
+      "}"
+    ].join("\n");
+
+    function sh(type, src){ var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    var prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+    var pLoc = gl.getAttribLocation(prog, "p");
+    gl.enableVertexAttribArray(pLoc);
+    gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
+    var uRes = gl.getUniformLocation(prog, "res");
+    var uT   = gl.getUniformLocation(prog, "t");
+
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    function resize(){
+      var r = cv.getBoundingClientRect();
+      var w = Math.max(1, Math.round(r.width * dpr));
+      var h = Math.max(1, Math.round(r.height * dpr));
+      if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; } // 픽셀 버퍼만 갱신
+      gl.viewport(0, 0, cv.width, cv.height);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    var t0 = null, raf = 0;
+    function frame(ts){
+      if (t0 === null) t0 = ts;
+      resize();
+      gl.uniform2f(uRes, cv.width, cv.height);
+      gl.uniform1f(uT, (ts - t0) / 1000);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      raf = requestAnimationFrame(frame);
+    }
+    function start(){ if (!raf) raf = requestAnimationFrame(frame); }
+    function stop(){ if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+    document.addEventListener("visibilitychange", function(){ document.hidden ? stop() : start(); });
+    start();
+
+    function fallback2D(){ /* WebGL 미지원: 정적 그라디언트 */
+      var c = cv.getContext("2d"); if (!c) return;
+      var g = c.createLinearGradient(0, 0, 0, cv.height);
+      g.addColorStop(0, "#12305a"); g.addColorStop(0.55, "#3a5f92"); g.addColorStop(1, "#c8a06a");
+      c.fillStyle = g; c.fillRect(0, 0, cv.width, cv.height);
+    }
+  } catch (e) {
+    try { var c = cv.getContext("2d"); if (c){ c.fillStyle = "#1c3a5e"; c.fillRect(0,0,cv.width,cv.height); } } catch (_) {}
+  }
+})();
+</script>
+
+<!-- ================================================================ -->
+<!-- 인터랙티브 데모: split-sum 시각화 (거칠기=밉, metallic=디퓨즈 비중).
+     절차적 equirect 환경을 오프스크린에 굽고 밉 피라미드를 만들어,
+     구 표면에서 반사 벡터로 밉을 선택 샘플. 캔버스2D, rAF, 숨김 시 정지. -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  try {
+    var cv = document.getElementById("iblDemoCanvas");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+    var rough = document.getElementById("iblRough");
+    var metal = document.getElementById("iblMetal");
+    var rVal = document.getElementById("iblRoughVal");
+    var mVal = document.getElementById("iblMetalVal");
+    var hud = document.getElementById("iblHud");
+    if (!rough || !metal || !hud) return;
+
+    // --- 절차적 equirect 환경(EW×EH)을 밉 피라미드로 굽는다 ---
+    var EW = 256, EH = 128, MIPS = 6;
+    var mip = [];      // 각 원소: {w,h,data(Uint8ClampedArray rgba)}
+    function buildEnv() {
+      var base = document.createElement("canvas"); base.width = EW; base.height = EH;
+      var bc = base.getContext("2d");
+      var img = bc.createImageData(EW, EH);
+      var sunU = 0.62, sunV = 0.30;                 // 태양 위치(equirect uv)
+      for (var y = 0; y < EH; y++) {
+        for (var x = 0; x < EW; x++) {
+          var u = x / EW, vv = y / EH;
+          // 하늘 그라디언트(위=천정 어둡게, 아래=지평선 밝게) + 노을 + 바닥
+          var horizon = 1.0 - Math.abs(vv - 0.5) * 2.0;
+          var r, g, b;
+          if (vv < 0.5) {
+            var up = vv / 0.5;
+            r = 150 - up * 110; g = 185 - up * 120; b = 240 - up * 110;
+            var glow = Math.max(0, 1 - (Math.hypot((u - sunU) * 2.0, (vv - sunV) * 3.2)) * 3.0);
+            r += glow * 255; g += glow * 220; b += glow * 150;      // 태양
+          } else {
+            var dn = (vv - 0.5) / 0.5;
+            r = 60 - dn * 35; g = 52 - dn * 30; b = 46 - dn * 28;    // 바닥
+          }
+          var i = (y * EW + x) * 4;
+          img.data[i] = Math.min(255, r); img.data[i+1] = Math.min(255, g);
+          img.data[i+2] = Math.min(255, b); img.data[i+3] = 255;
+        }
+      }
+      bc.putImageData(img, 0, 0);
+      // 밉 체인: drawImage로 절반씩 다운스케일(박스 블러 근사)
+      mip = [];
+      var prev = base, pw = EW, ph = EH;
+      for (var m = 0; m < MIPS; m++) {
+        var mc = document.createElement("canvas"); mc.width = pw; mc.height = ph;
+        var mctx = mc.getContext("2d");
+        mctx.imageSmoothingEnabled = true;
+        mctx.drawImage(prev, 0, 0, pw, ph);        // 이전(더 큰) 것을 현재 크기로
+        mip.push({ w: pw, h: ph, data: mctx.getImageData(0, 0, pw, ph).data });
+        // 다음 밉을 위해 절반 크기 버퍼 준비
+        var nw = Math.max(1, pw >> 1), nh = Math.max(1, ph >> 1);
+        var half = document.createElement("canvas"); half.width = nw; half.height = nh;
+        half.getContext("2d").drawImage(mc, 0, 0, nw, nh);
+        prev = half; pw = nw; ph = nh;
+      }
+    }
+    buildEnv();
+
+    // 방향 → equirect uv → 밉 레벨 색 샘플(최근접)
+    function sampleMip(dir, lvl) {
+      lvl = Math.max(0, Math.min(MIPS - 1, lvl));
+      var m = mip[Math.round(lvl)];
+      var u = 0.5 + Math.atan2(dir[0], dir[2]) / (2 * Math.PI);
+      var v = 0.5 - Math.asin(Math.max(-1, Math.min(1, dir[1]))) / Math.PI;
+      var x = Math.min(m.w - 1, Math.max(0, (u * m.w) | 0));
+      var y = Math.min(m.h - 1, Math.max(0, (v * m.h) | 0));
+      var i = (y * m.w + x) * 4;
+      return [m.data[i], m.data[i+1], m.data[i+2]];
+    }
+
+    var W = 0, H = 0, dpr = Math.min(2, window.devicePixelRatio || 1);
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    var raf = 0;
+    function draw(ts) {
+      var t = ts / 1000;
+      var roughness = parseFloat(rough.value);
+      var metallic = parseFloat(metal.value);
+      rVal.textContent = roughness.toFixed(2);
+      mVal.textContent = metallic.toFixed(2);
+
+      ctx.clearRect(0, 0, W, H);
+      // 배경(환경 지평선 느낌)
+      var bg = ctx.createLinearGradient(0, 0, 0, H);
+      bg.addColorStop(0, "#16213f"); bg.addColorStop(0.6, "#25406a"); bg.addColorStop(1, "#141310");
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+      // --- 구 렌더링(저해상 픽셀 루프) ---
+      var cx = Math.min(W * 0.34, 300), cy = H * 0.5, R = Math.min(H * 0.40, W * 0.28);
+      var STEP = 3;                            // 픽셀 스텝(성능)
+      var yaw = t * 0.3;                        // 환경 천천히 회전
+      var cosY = Math.cos(yaw), sinY = Math.sin(yaw);
+      var mipLvl = roughness * (MIPS - 1);
+      for (var py = -R; py < R; py += STEP) {
+        for (var px = -R; px < R; px += STEP) {
+          var d2 = px * px + py * py;
+          if (d2 > R * R) continue;
+          var nx = px / R, ny = -py / R, nz = Math.sqrt(Math.max(0, 1 - nx*nx - ny*ny));
+          // 반사 벡터 R = reflect(V, N), V=(0,0,1)  → r = 2*(N·V)*N - V
+          var NoV = nz;
+          var rx = 2 * NoV * nx, ry = 2 * NoV * ny, rz = 2 * NoV * nz - 1;
+          // 환경 회전 적용(yaw)
+          var wrx = rx * cosY + rz * sinY, wrz = -rx * sinY + rz * cosY;
+          var spec = sampleMip([wrx, ry, wrz], mipLvl);
+          // 디퓨즈: 법선 방향 irradiance(최상위 밉 = 완전 확산)
+          var wnx = nx * cosY + nz * sinY, wnz = -nx * sinY + nz * cosY;
+          var diff = sampleMip([wnx, ny, wnz], MIPS - 1);
+          // 프레넬 + split-sum 근사 합성
+          var F = 0.04 + 0.96 * Math.pow(1 - NoV, 5);
+          var kd = (1 - F) * (1 - metallic);
+          var albR = 0.95, albG = 0.78, albB = 0.5;     // 금색 계열
+          var r = kd * diff[0] * albR + spec[0] * (metallic ? (0.5 + F) : F * 3);
+          var g = kd * diff[1] * albG + spec[1] * (metallic ? (0.5 + F) : F * 3);
+          var b = kd * diff[2] * albB + spec[2] * (metallic ? (0.5 + F) : F * 3);
+          ctx.fillStyle = "rgb(" + (r|0) + "," + (g|0) + "," + (b|0) + ")";
+          ctx.fillRect(cx + px, cy + py, STEP, STEP);
+        }
+      }
+
+      // --- 우측 미리보기: 프리필터 밉(위) + irradiance(아래) ---
+      var pvX = Math.min(W - 240, W * 0.62), pvW = Math.min(200, W * 0.32), pvH = 80;
+      function drawEnvPreview(x, y, w, h, lvl, label) {
+        var m = mip[Math.round(Math.max(0, Math.min(MIPS - 1, lvl)))];
+        // 밉 데이터를 임시 캔버스로 올려 스트레치
+        var tmp = document.createElement("canvas"); tmp.width = m.w; tmp.height = m.h;
+        var td = tmp.getContext("2d"); var im = td.createImageData(m.w, m.h);
+        im.data.set(m.data); td.putImageData(im, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(tmp, x, y, w, h);
+        ctx.strokeStyle = "rgba(126,231,135,0.5)"; ctx.lineWidth = 1; ctx.strokeRect(x + .5, y + .5, w, h);
+        ctx.fillStyle = "rgba(230,255,228,0.92)"; ctx.font = "600 11px 'JetBrains Mono',monospace";
+        ctx.fillText(label, x + 6, y + 14);
+      }
+      if (W > 560) {
+        drawEnvPreview(pvX, cy - pvH - 8, pvW, pvH, mipLvl, "PREFILTER  mip " + mipLvl.toFixed(1));
+        drawEnvPreview(pvX, cy + 8, pvW, pvH, MIPS - 1, "IRRADIANCE (diffuse)");
+      }
+
+      hud.innerHTML =
+        "roughness <b>" + roughness.toFixed(2) + "</b> → prefilter mip <b>" + mipLvl.toFixed(1) + " / " + (MIPS-1) + "</b><br>" +
+        "metallic <b>" + metallic.toFixed(2) + "</b> · F0 " + (metallic ? "= albedo" : "= 0.04") + "<br>" +
+        "<span style='opacity:.75'>specular = prefilter × (F·A + B)</span>";
+
+      raf = requestAnimationFrame(draw);
+    }
+    function start() { if (!raf) raf = requestAnimationFrame(draw); }
+    function stop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+    document.addEventListener("visibilitychange", function () { document.hidden ? stop() : start(); });
+    rough.addEventListener("input", function(){}); metal.addEventListener("input", function(){});
+    start();
+  } catch (e) { /* 데모 격리: 실패해도 페이지 유지 */ }
+})();
+</script>
+
+<script src="./highlight.js"></script>
+</body>
+</html>

@@ -104,8 +104,8 @@
 |---|---|---|---|---|
 | PBR (Cook-Torrance D·F·G) | 🟡 | ✅ | ✅ | 06-pbr |
 | HDR·톤매핑(Reinhard/ACES) | 🟡 | ✅ | ✅ | 06-hdr |
-| IBL·환경맵·프리필터·BRDF LUT | ⬜ | ⬜ | ⬜ | 신규 → **06-ibl(예정)** |
-| 리플렉션 프로브·리플렉션 캡쳐(로컬 큐브맵·parallax correction·프로브 블렌딩) | ⬜ | ⬜ | ⬜ | 신규 → **06-ibl(예정)**, 스페큘러 간접광 |
+| IBL·환경맵·프리필터·BRDF LUT | ✅ | 🟡 | ✅ | 06-ibl (원리 split-sum + gdemo + HLSL) |
+| 리플렉션 프로브·리플렉션 캡쳐(로컬 큐브맵·parallax correction·프로브 블렌딩) | ✅ | 🟡 | ✅ | 06-ibl §5, 스페큘러 간접광·SSR 폴백 |
 
 ### 6-C. 그림자
 | 주제 | 원 | 개 | 구 | 파일 |
@@ -120,7 +120,7 @@
 | Ray tracing (CPU) | 🟡 | ✅ | ✅ | 06-raytracing |
 | Path tracing (몬테카를로) | 🟡 | ✅ | ✅ | 06-pathtracing |
 | GI 개관(라이트맵·프로브·SH·라디오시티) | 🟡 | ✅ | 🟡 | 06-gi |
-| 라이트 프로브(디퓨즈 SH 프로브·그리드 배치·삼선형 보간·DDGI 연결) | 🟡 | 🟡 | ⬜ | **06-gi 보강(예정)**, 디퓨즈 간접광 |
+| 라이트 프로브(디퓨즈 SH 프로브·그리드 배치·삼선형 보간·DDGI 연결) | ✅ | 🟡 | ✅ | 06-gi §2-3/2-4, 디퓨즈 간접광 |
 | VXGI·SDFGI·DDGI·SSGI | ⬜ | ⬜ | ⬜ | 신규 |
 | Photon mapping·양방향/MLT | ⬜ | ⬜ | ⬜ | 심화 |
 | 하드웨어 RT(DXR·RTX·BVH) | ⬜ | ⬜ | ⬜ | 신규 |

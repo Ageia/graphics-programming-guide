@@ -371,52 +371,58 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
       <div class="topics">Forward · Forward+ · Clustered · Deferred · Visibility Buffer · 경로 비교표</div>
     </a>
     <a class="hub-card" href="./06-pbr.html">
-      <div class="num">1 / 8</div>
+      <div class="num">1 / 9</div>
       <h3>물리 기반 렌더링 (PBR)</h3>
       <p>Cook-Torrance BRDF(D·F·G 항)를 HLSL로 성분별 해부. 금속/거칠기 워크플로.</p>
       <div class="topics">Cook-Torrance · GGX · Fresnel · metallic/roughness</div>
     </a>
+    <a class="hub-card" href="./06-ibl.html">
+      <div class="num">2 / 9</div>
+      <h3>이미지 기반 조명 (IBL) · 리플렉션 프로브</h3>
+      <p>환경맵 → irradiance·프리필터·split-sum BRDF LUT. 리플렉션 프로브(parallax·블렌딩)와 SSR 폴백.</p>
+      <div class="topics">IBL · split-sum · BRDF LUT · 리플렉션 프로브 · parallax correction</div>
+    </a>
     <a class="hub-card" href="./06-hdr.html">
-      <div class="num">2 / 8</div>
+      <div class="num">3 / 9</div>
       <h3>HDR · 톤 매핑</h3>
       <p>16F 렌더 타깃, 노출, Reinhard/ACES 톤 매핑을 풀스크린 패스로.</p>
       <div class="topics">16F RTV · exposure · tone mapping</div>
     </a>
     <a class="hub-card" href="./06-shadowmap.html">
-      <div class="num">3 / 8</div>
+      <div class="num">4 / 9</div>
       <h3>섀도우 맵</h3>
       <p>라이트 시점 깊이 렌더, 비교 샘플러(SampleCmp)로 PCF. 피터 패닝 대응.</p>
       <div class="topics">깊이 RT → SRV · SamplerComparisonState · PCF</div>
     </a>
     <a class="hub-card" href="./06-deferred.html">
-      <div class="num">4 / 8</div>
+      <div class="num">5 / 9</div>
       <h3>디퍼드 렌더링</h3>
       <p>MRT로 G-buffer 채우기, 라이팅 패스에서 많은 광원 처리.</p>
       <div class="topics">MRT · G-buffer · SV_Target0..N · 라이팅 패스</div>
     </a>
     <a class="hub-card" href="./06-screenspace.html">
-      <div class="num">5 / 8</div>
+      <div class="num">6 / 9</div>
       <h3>스크린 스페이스 효과 (SSAO)</h3>
       <p>깊이/법선에서 화면공간 AO 샘플링, 커널·노이즈·블러 패스.</p>
       <div class="topics">SSAO · 커널 반구 · 노이즈 텍스처 · 블러</div>
     </a>
     <a class="hub-card" href="./06-raytracing.html">
-      <div class="num">6 / 8</div>
+      <div class="num">7 / 9</div>
       <h3>레이 트레이싱 (CPU)</h3>
       <p>레이 생성·교차·셰이딩을 순수 C++로. 반사/그림자 레이.</p>
       <div class="topics">카메라 레이 · 교차 · 재귀 반사 · 그림자 레이</div>
     </a>
     <a class="hub-card" href="./06-pathtracing.html">
-      <div class="num">7 / 8</div>
+      <div class="num">8 / 9</div>
       <h3>패스 트레이싱 (CPU)</h3>
       <p>몬테카를로 적분, 반구 샘플링, 다중 바운스로 전역 조명을 물리적으로.</p>
       <div class="topics">몬테카를로 · 반구 샘플 · 다중 바운스 · 수렴</div>
     </a>
     <a class="hub-card" href="./06-gi.html">
-      <div class="num">8 / 8</div>
+      <div class="num">9 / 9</div>
       <h3>전역 조명 (GI)</h3>
-      <p>직접광 vs 간접광, 실시간 GI 기법 개관과 하드웨어 RT(DXR) 위치.</p>
-      <div class="topics">간접광 · 라이트맵 · 프로브 · DXR</div>
+      <p>간접 디퓨즈: 라이트맵·SH 프로브·프로브 그리드(삼선형·DDGI)·SSGI·VXGI·RTGI.</p>
+      <div class="topics">간접광 · 라이트맵 · SH 프로브 · 프로브 그리드 · DDGI · DXR</div>
     </a>
   </div>
 

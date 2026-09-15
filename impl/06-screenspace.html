@@ -597,6 +597,15 @@ return result / 16.0;</code></pre>
     익힌 "G-buffer 읽기 → 계산 → 한 장 출력" 패턴이 후처리 전체에 그대로 통합니다.
   </div>
 
+  <div class="callout">
+    <span class="tag warn">이웃 기법 — SSR과 반사 폴백</span>
+    같은 화면 공간 계열에 <strong>SSR(Screen-Space Reflections)</strong>이 있습니다. SSAO가 깊이로 <em>가림</em>을 재듯, SSR은
+    깊이 버퍼를 따라 반사 광선을 <em>레이마칭</em>해 화면 안 픽셀을 반사로 가져옵니다. 하지만 <em>화면 밖·가려진</em> 것은 못 비추는
+    한계가 SSAO와 똑같습니다. 그래서 SSR이 실패한 픽셀은 미리 구운 환경 반사로 폴백합니다 —
+    <strong>SSR → <a class="btn-link" href="./06-ibl.html#reflection-probe">리플렉션 프로브</a> → 전역 IBL</strong> 순의 폴백 체인이 표준입니다.
+    그 간접 스페큘러(IBL·프로브) 파이프라인은 <a class="btn-link" href="./06-ibl.html">이미지 기반 조명(IBL)</a>에서 다룹니다.
+  </div>
+
   <!-- ============================================================ -->
   <h2 style="margin-top:48px;">DirectXMath / D3D11 대응 요약</h2>
   <table class="impl">

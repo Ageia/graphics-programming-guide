@@ -182,52 +182,291 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
   <h2 style="margin-top:48px;">구현 챕터</h2>
   <p class="lead">개념 가이드와 같은 순서입니다. 각 챕터는 독립적으로 읽을 수 있지만, 1~3장이 나머지의 토대입니다.</p>
 
+  <h2 style="margin-top:40px;">CHAPTER 1 · 기초 수학</h2>
   <div class="hub-grid">
-    <a class="hub-card" href="./01-math.html">
-      <div class="num">CHAPTER 1</div>
-      <h3>기초 수학</h3>
-      <p>벡터·행렬·변환을 C++로 <strong>한 줄 한 줄</strong> 직접 구현하고 DirectXMath로 넘어가기. 6개 세부 페이지로 분해.</p>
-      <div class="topics">벡터 · 행렬 · 변환 · 내적/외적 · 삼각함수 · 기하 교차</div>
+    <a class="hub-card" href="./01-vector.html">
+      <div class="num">1 / 6</div>
+      <h3>벡터 — Vec3</h3>
+      <p>위치·방향·색을 담는 3차원 벡터. 덧셈·스칼라곱·내적·외적·길이·정규화를 성분 하나까지 해부.</p>
+      <div class="topics">구조체 · 연산자 오버로딩 · dot · cross · length · normalize</div>
     </a>
-    <a class="hub-card" href="./02-raster2d.html">
-      <div class="num">CHAPTER 2</div>
-      <h3>2D 그래픽스</h3>
-      <p>프레임버퍼에 직접 픽셀을 찍어 선·삼각형을 래스터화하기.</p>
-      <div class="topics">픽셀/색 · 래스터화 · 이미지 필터 · 알파 블렌딩 · 스프라이트</div>
+    <a class="hub-card" href="./01-matrix.html">
+      <div class="num">2 / 6</div>
+      <h3>행렬 — Mat4</h3>
+      <p>4×4 행렬을 행 우선으로 저장하고 항등·곱셈·전치를 구현. cbuffer 업로드와 전치의 이유까지.</p>
+      <div class="topics">행 우선 저장 · identity · 행렬 곱 · transpose · cbuffer</div>
     </a>
-    <a class="hub-card" href="./03-opengl3d.html">
-      <div class="num">CHAPTER 3</div>
-      <h3>3D 그래픽스</h3>
-      <p>버텍스 버퍼·입력 레이아웃부터 MVP·카메라·Z버퍼·퐁 조명·텍스처까지 실제 D3D11로.</p>
-      <div class="topics">MVP · 카메라 · 메시 · 깊이버퍼 · 조명 · 텍스처</div>
+    <a class="hub-card" href="./01-transform.html">
+      <div class="num">3 / 6</div>
+      <h3>좌표계와 변환</h3>
+      <p>이동·크기·회전 행렬을 직접 만들고 곱 순서가 결과를 바꾸는 이유, 동차좌표(w) 의미를 파고듭니다.</p>
+      <div class="topics">translate · scale · rotate · 곱 순서 · 동차좌표 · S*R*T</div>
     </a>
-    <a class="hub-card" href="./04-shaders.html">
-      <div class="num">CHAPTER 4</div>
-      <h3>GPU · 셰이더</h3>
-      <p>HLSL 컴파일, 버텍스/픽셀/컴퓨트 셰이더와 상수 버퍼 작성.</p>
-      <div class="topics">셰이더 컴파일 · Vertex · Pixel · Compute · HLSL · cbuffer</div>
+    <a class="hub-card" href="./01-dotcross.html">
+      <div class="num">4 / 6</div>
+      <h3>내적 · 외적의 실전 활용</h3>
+      <p>사잇각·투영·삼각형 법선·2D 감김 부호를 코드로. 내적/외적이 실제로 어디에 쓰이는지.</p>
+      <div class="topics">angleBetween · projectOnto · triangleNormal · cross2D</div>
     </a>
-    <a class="hub-card" href="./05-api.html">
-      <div class="num">CHAPTER 5</div>
-      <h3>그래픽스 API</h3>
-      <p>D3D11 디바이스·상태 관리·렌더 루프의 실전, 그리고 타 API로의 개념 이식.</p>
-      <div class="topics">디바이스/컨텍스트 · 상태관리 · 디버깅 · D3D12/Vulkan/Metal/WebGPU 매핑</div>
+    <a class="hub-card" href="./01-trig.html">
+      <div class="num">5 / 6</div>
+      <h3>삼각함수</h3>
+      <p>도↔라디안 변환, sin/cos로 2D 회전과 공전(orbit)을 구현. deltaTime 기반 애니메이션까지.</p>
+      <div class="topics">라디안 · rotate2D · orbitPosition · deltaTime</div>
     </a>
-    <a class="hub-card" href="./06-advanced.html">
-      <div class="num">CHAPTER 6</div>
-      <h3>고급 렌더링</h3>
-      <p>렌더링 경로 비교(<a href="./06-paths.html">Forward·Forward+·Clustered·Deferred·Visibility</a>),
-      그리고 PBR·HDR·섀도우맵·SSAO와 CPU 레이/패스 트레이서.</p>
-      <div class="topics">렌더링 경로 비교 · PBR · HDR · Shadow Map · Deferred · Screen-Space · Ray/Path Tracing · GI</div>
+    <a class="hub-card" href="./01-geometry.html">
+      <div class="num">6 / 6</div>
+      <h3>선형대수와 기하학</h3>
+      <p>피킹·충돌의 핵심: 무게중심 점-삼각형 판정, 레이-평면, 레이-구 교차를 이차방정식으로.</p>
+      <div class="topics">barycentric · rayPlane · raySphere · picking · 엡실론</div>
     </a>
-    <a class="hub-card" href="./07-techniques.html">
-      <div class="num">CHAPTER 7</div>
-      <h3>실전 렌더링 기법</h3>
-      <p>안티앨리어싱·감마·밉맵·투명·AO·LOD/컬링의 실전 구현.</p>
-      <div class="topics">안티앨리어싱 · 감마 · 밉맵 · 투명 · AO · LOD/컬링</div>
+  </div>
+
+  <h2 style="margin-top:40px;">CHAPTER 2 · 2D 그래픽스</h2>
+  <div class="hub-grid">
+    <a class="hub-card" href="./02-pixel.html">
+      <div class="num">1 / 5</div>
+      <h3>픽셀과 색상 — 프레임버퍼</h3>
+      <p>화면을 픽셀 배열로 보고 색을 직접 채우기. RGBA 바이트 배치와 프레임버퍼 구조.</p>
+      <div class="topics">Color · Framebuffer · setPixel · clear</div>
     </a>
-    <a class="hub-card" href="./08-grass.html">
-      <div class="num">CHAPTER 8 · 사례연구</div>
+    <a class="hub-card" href="./02-raster.html">
+      <div class="num">2 / 5</div>
+      <h3>래스터라이제이션 — 선과 삼각형</h3>
+      <p>브레젠험 선, 무게중심 삼각형 채우기를 픽셀 루프로. 엣지 함수와 감김.</p>
+      <div class="topics">Bresenham · edge function · barycentric fill</div>
+    </a>
+    <a class="hub-card" href="./02-imgproc.html">
+      <div class="num">3 / 5</div>
+      <h3>이미지 처리 — 컨볼루션 필터</h3>
+      <p>커널 컨볼루션으로 블러·샤픈·엣지 검출. 경계 처리와 정규화.</p>
+      <div class="topics">convolution · kernel · blur · sharpen · edge</div>
+    </a>
+    <a class="hub-card" href="./02-blend.html">
+      <div class="num">4 / 5</div>
+      <h3>알파 블렌딩 — over 합성</h3>
+      <p>"source over" 공식을 성분별로. 프리멀티플라이드 알파와 D3D11 BlendState.</p>
+      <div class="topics">over 합성 · premultiplied · BlendState</div>
+    </a>
+    <a class="hub-card" href="./02-sprite.html">
+      <div class="num">5 / 5</div>
+      <h3>스프라이트 · 텍스처 샘플링</h3>
+      <p>UV 좌표로 텍셀 읽기, 최근접·이중선형 샘플링을 직접. 화면 출력은 D3D11로.</p>
+      <div class="topics">UV · nearest · bilinear · 동적 텍스처 blit</div>
+    </a>
+  </div>
+
+  <h2 style="margin-top:40px;">CHAPTER 3 · 3D 그래픽스</h2>
+  <div class="hub-grid">
+    <a class="hub-card" href="./03-mvp.html">
+      <div class="num">1 / 6</div>
+      <h3>Model → World → View → Projection</h3>
+      <p>정점을 버퍼에 올리고 MVP를 cbuffer로 넘겨 첫 삼각형을 띄우기. 전치의 이유까지.</p>
+      <div class="topics">Vertex Buffer · Input Layout · cbuffer · MVP</div>
+    </a>
+    <a class="hub-card" href="./03-camera.html">
+      <div class="num">2 / 6</div>
+      <h3>카메라</h3>
+      <p>LookAtLH 뷰 행렬, FPS 카메라의 yaw/pitch, Win32 입력. 왼손 좌표계 주의점.</p>
+      <div class="topics">XMMatrixLookAtLH · yaw/pitch · WM_MOUSEMOVE</div>
+    </a>
+    <a class="hub-card" href="./03-mesh.html">
+      <div class="num">3 / 6</div>
+      <h3>삼각형과 메시</h3>
+      <p>인덱스 버퍼, 정점 레이아웃(위치·법선·UV), OBJ 로딩과 DrawIndexed.</p>
+      <div class="topics">Index Buffer · 정점 포맷 · OBJ · DrawIndexed</div>
+    </a>
+    <a class="hub-card" href="./03-zbuffer.html">
+      <div class="num">4 / 6</div>
+      <h3>깊이 버퍼 (Z-Buffer)</h3>
+      <p>깊이 텍스처·DepthStencilView·DepthStencilState. z-파이팅과 리버스드-Z.</p>
+      <div class="topics">DepthStencilView · LESS · z-fighting</div>
+    </a>
+    <a class="hub-card" href="./03-lighting.html">
+      <div class="num">5 / 6</div>
+      <h3>조명과 그림자 (퐁 셰이딩)</h3>
+      <p>HLSL 블린-퐁, 법선 행렬, cbuffer 정렬(float3 패딩) 함정을 성분별로.</p>
+      <div class="topics">ambient/diffuse/specular · normal matrix · 16B 정렬</div>
+    </a>
+    <a class="hub-card" href="./03-texmap.html">
+      <div class="num">6 / 6</div>
+      <h3>텍스처 매핑</h3>
+      <p>Texture2D·SamplerState·register(t/s), SRV 생성과 밉맵. UV V축 방향.</p>
+      <div class="topics">SRV · SamplerState · GenerateMips · UV</div>
+    </a>
+  </div>
+
+  <h2 style="margin-top:40px;">CHAPTER 4 · GPU · 셰이더</h2>
+  <div class="hub-grid">
+    <a class="hub-card" href="./04-gpu-intro.html">
+      <div class="num">1 / 6</div>
+      <h3>GPU 병렬 처리</h3>
+      <p>셰이더가 스레드 그룹으로 도는 원리, SIMT, 워프/웨이브프론트 직관.</p>
+      <div class="topics">병렬 실행 · 스레드 그룹 · 파이프라인 스테이지</div>
+    </a>
+    <a class="hub-card" href="./04-shaderprogram.html">
+      <div class="num">2 / 6</div>
+      <h3>셰이더 만들기 (재사용 헬퍼)</h3>
+      <p>D3DCompile로 HLSL 컴파일, 에러 blob 처리, ComPtr 기반 셰이더 클래스.</p>
+      <div class="topics">D3DCompile · ID3DBlob · Create*Shader · cbuffer 헬퍼</div>
+    </a>
+    <a class="hub-card" href="./04-vertexshader.html">
+      <div class="num">3 / 6</div>
+      <h3>Vertex Shader</h3>
+      <p>입출력 구조체와 시맨틱(POSITION/SV_Position), cbuffer, mul() 행렬곱.</p>
+      <div class="topics">SV_Position · 시맨틱 · cbuffer · mul</div>
+    </a>
+    <a class="hub-card" href="./04-fragshader.html">
+      <div class="num">4 / 6</div>
+      <h3>Pixel Shader</h3>
+      <p>SV_Target 반환, SV_Position으로 화면 좌표, 보간된 입력 다루기.</p>
+      <div class="topics">SV_Target · 보간 · 픽셀 단위 연산</div>
+    </a>
+    <a class="hub-card" href="./04-computeshader.html">
+      <div class="num">5 / 6</div>
+      <h3>Compute Shader</h3>
+      <p>[numthreads], RWStructuredBuffer(UAV), Dispatch로 범용 GPU 연산.</p>
+      <div class="topics">numthreads · UAV · SV_DispatchThreadID · Dispatch</div>
+    </a>
+    <a class="hub-card" href="./04-shaderlang.html">
+      <div class="num">6 / 6</div>
+      <h3>HLSL 요점</h3>
+      <p>타입·한정자·내장함수(lerp/frac), 셰이더 모델 프로파일, 타 언어 매핑.</p>
+      <div class="topics">float3/float4x4 · lerp/frac · vs_5_0 · GLSL/WGSL 대응</div>
+    </a>
+  </div>
+
+  <h2 style="margin-top:40px;">CHAPTER 5 · 그래픽스 API</h2>
+  <div class="hub-grid">
+    <a class="hub-card" href="./05-api-overview.html">
+      <div class="num">1 / 4</div>
+      <h3>D3D11의 두 축 — 디바이스와 컨텍스트</h3>
+      <p>Create*(디바이스) vs *Set*/Draw(즉시 컨텍스트), 렌더 루프, Present.</p>
+      <div class="topics">ID3D11Device · DeviceContext · 렌더 루프 · Present</div>
+    </a>
+    <a class="hub-card" href="./05-debug.html">
+      <div class="num">2 / 4</div>
+      <h3>디버깅과 검증</h3>
+      <p>HRESULT 체크, 디버그 레이어, InfoQueue, PIX/RenderDoc, GPU 이름 조회.</p>
+      <div class="topics">HRESULT · D3D11_CREATE_DEVICE_DEBUG · InfoQueue</div>
+    </a>
+    <a class="hub-card" href="./05-resources.html">
+      <div class="num">3 / 4</div>
+      <h3>리소스 관리와 상태 팁</h3>
+      <p>ComPtr 수명, Get/GetAddressOf 함정, 배칭, 인스턴싱(DrawIndexedInstanced).</p>
+      <div class="topics">ComPtr · 배칭 · 인스턴싱 · 상태 객체</div>
+    </a>
+    <a class="hub-card" href="./05-api-compare.html">
+      <div class="num">4 / 4</div>
+      <h3>타 API 개념 매핑</h3>
+      <p>D3D11 → D3D12/Vulkan(PSO·커맨드 리스트·수동 동기화)/OpenGL/Metal/WebGPU 대응.</p>
+      <div class="topics">PSO · 커맨드 리스트 · 디스크립터 · 상태 모델 비교</div>
+    </a>
+  </div>
+
+  <h2 style="margin-top:40px;">CHAPTER 6 · 고급 렌더링</h2>
+  <div class="hub-grid">
+    <a class="hub-card" href="./06-paths.html" style="border-color:var(--accent2);">
+      <div class="num">★ 사례연구 · NEW</div>
+      <h3>렌더링 경로 비교 (Rendering Paths)</h3>
+      <p>같은 씬을 <strong>Forward · Forward+ · Clustered · Deferred · Tiled Deferred · Visibility Buffer</strong>
+      여섯 경로로 그려 보고, 광원 수 처리·MSAA·투명·대역폭으로 어느 경로를 언제 쓰는지 비교하는 사례연구 허브.</p>
+      <div class="topics">Forward · Forward+ · Clustered · Deferred · Visibility Buffer · 경로 비교표</div>
+    </a>
+    <a class="hub-card" href="./06-pbr.html">
+      <div class="num">1 / 8</div>
+      <h3>물리 기반 렌더링 (PBR)</h3>
+      <p>Cook-Torrance BRDF(D·F·G 항)를 HLSL로 성분별 해부. 금속/거칠기 워크플로.</p>
+      <div class="topics">Cook-Torrance · GGX · Fresnel · metallic/roughness</div>
+    </a>
+    <a class="hub-card" href="./06-hdr.html">
+      <div class="num">2 / 8</div>
+      <h3>HDR · 톤 매핑</h3>
+      <p>16F 렌더 타깃, 노출, Reinhard/ACES 톤 매핑을 풀스크린 패스로.</p>
+      <div class="topics">16F RTV · exposure · tone mapping</div>
+    </a>
+    <a class="hub-card" href="./06-shadowmap.html">
+      <div class="num">3 / 8</div>
+      <h3>섀도우 맵</h3>
+      <p>라이트 시점 깊이 렌더, 비교 샘플러(SampleCmp)로 PCF. 피터 패닝 대응.</p>
+      <div class="topics">깊이 RT → SRV · SamplerComparisonState · PCF</div>
+    </a>
+    <a class="hub-card" href="./06-deferred.html">
+      <div class="num">4 / 8</div>
+      <h3>디퍼드 렌더링</h3>
+      <p>MRT로 G-buffer 채우기, 라이팅 패스에서 많은 광원 처리.</p>
+      <div class="topics">MRT · G-buffer · SV_Target0..N · 라이팅 패스</div>
+    </a>
+    <a class="hub-card" href="./06-screenspace.html">
+      <div class="num">5 / 8</div>
+      <h3>스크린 스페이스 효과 (SSAO)</h3>
+      <p>깊이/법선에서 화면공간 AO 샘플링, 커널·노이즈·블러 패스.</p>
+      <div class="topics">SSAO · 커널 반구 · 노이즈 텍스처 · 블러</div>
+    </a>
+    <a class="hub-card" href="./06-raytracing.html">
+      <div class="num">6 / 8</div>
+      <h3>레이 트레이싱 (CPU)</h3>
+      <p>레이 생성·교차·셰이딩을 순수 C++로. 반사/그림자 레이.</p>
+      <div class="topics">카메라 레이 · 교차 · 재귀 반사 · 그림자 레이</div>
+    </a>
+    <a class="hub-card" href="./06-pathtracing.html">
+      <div class="num">7 / 8</div>
+      <h3>패스 트레이싱 (CPU)</h3>
+      <p>몬테카를로 적분, 반구 샘플링, 다중 바운스로 전역 조명을 물리적으로.</p>
+      <div class="topics">몬테카를로 · 반구 샘플 · 다중 바운스 · 수렴</div>
+    </a>
+    <a class="hub-card" href="./06-gi.html">
+      <div class="num">8 / 8</div>
+      <h3>전역 조명 (GI)</h3>
+      <p>직접광 vs 간접광, 실시간 GI 기법 개관과 하드웨어 RT(DXR) 위치.</p>
+      <div class="topics">간접광 · 라이트맵 · 프로브 · DXR</div>
+    </a>
+  </div>
+
+  <h2 style="margin-top:40px;">CHAPTER 7 · 실전 렌더링 기법</h2>
+  <div class="hub-grid">
+    <a class="hub-card" href="./07-antialiasing.html">
+      <div class="num">1 / 6</div>
+      <h3>안티앨리어싱</h3>
+      <p>MSAA(SampleDesc·ResolveSubresource)와 FXAA 포스트프로세스 패스.</p>
+      <div class="topics">MSAA · Resolve · FXAA · alpha-to-coverage</div>
+    </a>
+    <a class="hub-card" href="./07-gamma.html">
+      <div class="num">2 / 6</div>
+      <h3>감마 · 선형 색공간</h3>
+      <p>sRGB 포맷 자동 변환 vs 셰이더 pow, 선형 공간 조명. 이중 보정 함정.</p>
+      <div class="topics">_SRGB 포맷 · 선형 공간 · pow(2.2)</div>
+    </a>
+    <a class="hub-card" href="./07-mipmap.html">
+      <div class="num">3 / 6</div>
+      <h3>밉맵 · 텍스처 필터링</h3>
+      <p>GenerateMips, 필터 모드(POINT/LINEAR/ANISOTROPIC), LOD 바이어스.</p>
+      <div class="topics">GenerateMips · 이방성 · 필터 · LOD</div>
+    </a>
+    <a class="hub-card" href="./07-transparency.html">
+      <div class="num">4 / 6</div>
+      <h3>투명과 렌더링 순서</h3>
+      <p>BlendState, 뒤→앞 정렬, 깊이 쓰기 OFF, OIT 개념.</p>
+      <div class="topics">BlendState · 정렬 · DepthWriteMask · OIT</div>
+    </a>
+    <a class="hub-card" href="./07-ao.html">
+      <div class="num">5 / 6</div>
+      <h3>앰비언트 오클루전</h3>
+      <p>AO의 원리, SSAO/HBAO/GTAO 개념과 화면공간 구현 감각.</p>
+      <div class="topics">AO · SSAO · HBAO · GTAO</div>
+    </a>
+    <a class="hub-card" href="./07-lod.html">
+      <div class="num">6 / 6</div>
+      <h3>LOD · 컬링</h3>
+      <p>거리 기반 LOD, 절두체 컬링(평면 추출), 래스터 상태 컬 모드, 인스턴싱.</p>
+      <div class="topics">LOD · 절두체 컬링 · RSSetState · 인스턴싱</div>
+    </a>
+  </div>
+
+  <h2 style="margin-top:40px;">CHAPTER 8 · 사례연구</h2>
+  <div class="hub-grid">
+    <a class="hub-card" href="./08-grass.html" style="border-color:var(--accent2);">
+      <div class="num">★ 사례연구</div>
       <h3>잔디 렌더링</h3>
       <p>앞 장의 기법들이 실제로 합쳐지는 캡스톤. 대량 잔디 10가지 렌더링 기법을 D3D11/HLSL로.</p>
       <div class="topics">인스턴싱 · 빌보드 · 셸 · 레이마칭 · 밟힘 · 베지어 · 툰 · 바람 · LOD</div>

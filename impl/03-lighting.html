@@ -16,7 +16,7 @@
     <span class="sep">|</span>
     <a href="./index.html">구현 허브</a>
     <span class="sep">|</span>
-    <a href="./03-opengl3d.html">3장. 3D 그래픽스</a>
+    <span style="color:var(--muted)">3장. 3D 그래픽스</span>
     <span class="sep">|</span>
     <span style="color:var(--accent2)">조명과 그림자 (퐁 셰이딩)</span>
   </div>
@@ -44,7 +44,7 @@
 
   <div class="callout">
     <span class="tag">전제</span>
-    이 페이지는 <a href="./03-opengl3d.html">3장 3D 그래픽스</a>의 MVP 변환·상수 버퍼·정점 레이아웃을 이미 세팅했다고
+    이 페이지는 <a href="./03-mvp.html">3장 3D 그래픽스</a>의 MVP 변환·상수 버퍼·정점 레이아웃을 이미 세팅했다고
     가정합니다. 여기서 새로 추가하는 것은 <strong>조명용 상수 버퍼(b1)</strong>와, 정점 셰이더가 픽셀 셰이더로
     넘겨주는 <strong>월드 공간 위치·법선</strong>, 그리고 픽셀 셰이더의 <strong>퐁 계산</strong>입니다.
   </div>
@@ -548,7 +548,7 @@ context-&gt;PSSetConstantBuffers(1, 1, cbLighting.GetAddressOf());</code></pre>
     여기서 계산하는 것은 <strong>직접 조명뿐이고 그림자는 없습니다.</strong> 빛을 등진 면은 어두워지지만, 한 물체가
     다른 물체(또는 자기 자신)에 드리우는 <strong>그림자</strong>는 이 셰이더만으로는 생기지 않습니다. 실제 그림자는
     광원 시점에서 깊이 텍스처를 렌더하는 <strong>섀도우 맵</strong> 별도 패스가 필요합니다 →
-    <a href="./06-advanced.html#shadowmap" style="color:var(--accent)">6장 섀도우 맵</a>.
+    <a href="./06-shadowmap.html" style="color:var(--accent)">6장 섀도우 맵</a>.
   </div>
 
   <!-- 페이지 하단 이전/다음 네비 -->

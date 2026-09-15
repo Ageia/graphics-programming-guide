@@ -256,7 +256,7 @@
     <section id="pixel">
       <h2>픽셀과 색상</h2>
       <p class="lead">화면은 작은 빛 점들의 격자. 각 점은 빨강·초록·파랑의 밝기로 색을 만듭니다.</p>
-      <a class="impl-link" href="impl/02-raster2d.html">이 챕터를 C++/DirectX로 직접 구현하기</a>
+      <a class="impl-link" href="impl/02-pixel.html">픽셀과 프레임버퍼를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>모니터의 모든 색은 <strong>RGB</strong> — 빨강(R), 초록(G), 파랑(B) 세 빛을 섞어 만듭니다.
         각 채널은 0~255. <code>(255,0,0)</code>은 순수 빨강, <code>(255,255,255)</code>는 하양,
@@ -282,6 +282,7 @@
     <section id="raster">
       <h2>래스터라이제이션</h2>
       <p class="lead">수학적 도형(선·삼각형)을 네모난 픽셀 격자로 "칠하는" 과정.</p>
+      <a class="impl-link" href="impl/02-raster.html">래스터라이제이션을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>컴퓨터는 완벽한 선을 그릴 수 없어요. 격자 위에서 <strong>"어느 픽셀을 켤까?"</strong>를
         정해야 하죠. 대각선을 그리면 계단 현상(에일리어싱)이 생기는 이유입니다.</p>
@@ -303,6 +304,7 @@
     <section id="imgproc">
       <h2>이미지 처리</h2>
       <p class="lead">이미지는 숫자 배열. 숫자를 바꾸면 필터가 됩니다 — 밝기, 흑백, 블러.</p>
+      <a class="impl-link" href="impl/02-imgproc.html">이미지 처리(컨볼루션)를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>이미지 = 픽셀들의 2차원 배열입니다. 각 픽셀 값을 수식으로 바꾸면 <strong>필터</strong>가 되죠.
         블러 같은 필터는 <strong>주변 픽셀들의 평균</strong>을 쓰는데, 이걸
@@ -318,6 +320,7 @@
     <section id="blend">
       <h2>알파 블렌딩</h2>
       <p class="lead">반투명 유리처럼, 위 그림과 아래 그림을 비율로 섞기.</p>
+      <a class="impl-link" href="impl/02-blend.html">알파 블렌딩을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>알파(A)는 <strong>불투명도</strong>입니다(0=투명, 1=불투명). 반투명한 층을 아래 층 위에
         올릴 때 최종 색은 이렇게 계산돼요:</p>
@@ -335,6 +338,7 @@
     <section id="sprite">
       <h2>스프라이트 · 텍스처</h2>
       <p class="lead">작은 이미지를 화면에 배치·반복·변형해서 세계를 채우기.</p>
+      <a class="impl-link" href="impl/02-sprite.html">스프라이트·텍스처 샘플링을 C++/DirectX 11로 직접 구현하기</a>
 
       <p><strong>스프라이트</strong>는 게임 캐릭터·아이템 같은 작은 2D 이미지입니다.
         <strong>텍스처</strong>는 표면에 입히는 그림이고요. 텍스처 좌표
@@ -355,7 +359,7 @@
     <section id="mvp">
       <h2>Model → World → View → Projection 변환</h2>
       <p class="lead">3D 점이 화면의 2D 픽셀이 되기까지 거치는 4단계 여행.</p>
-      <a class="impl-link" href="impl/03-opengl3d.html">이 챕터를 C++/DirectX 11로 직접 구현하기</a>
+      <a class="impl-link" href="impl/03-mvp.html">MVP 변환을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>3D 물체 하나가 화면에 그려지려면 네 개의 좌표계를 거칩니다. 이걸 <strong>파이프라인</strong>이라 해요:</p>
       <ul>
@@ -379,6 +383,7 @@
     <section id="camera">
       <h2>카메라</h2>
       <p class="lead">카메라는 "위치 + 바라보는 방향 + 위쪽". 세계를 카메라 앞으로 끌어오는 것.</p>
+      <a class="impl-link" href="impl/03-camera.html">카메라를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>재미있는 사실: 그래픽스에서 카메라는 실제로 움직이지 않아요.
         <strong>카메라를 원점에 고정</strong>하고, 대신 <em>세계 전체를 반대로 움직입니다</em>.
@@ -396,6 +401,7 @@
     <section id="mesh">
       <h2>삼각형과 메시</h2>
       <p class="lead">모든 3D 모델은 결국 삼각형 덩어리. 왜 하필 삼각형일까?</p>
+      <a class="impl-link" href="impl/03-mesh.html">삼각형과 메시를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>구, 사람, 자동차 — 3D의 모든 것은 <strong>삼각형(polygon)의 모음(메시)</strong>입니다.
         왜 삼각형이냐면: 세 점은 <strong>항상 하나의 평면</strong>을 이루기 때문이에요(휘지 않음).
@@ -412,6 +418,7 @@
     <section id="zbuffer">
       <h2>깊이 버퍼 (Z-buffer)</h2>
       <p class="lead">"누가 앞에 있나?" — 픽셀마다 깊이를 기록해 가림 처리를 하는 방법.</p>
+      <a class="impl-link" href="impl/03-zbuffer.html">깊이 버퍼(Z-Buffer)를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>여러 삼각형이 겹칠 때, 화면의 각 픽셀은 <strong>가장 앞(가장 가까운) 것</strong>만 보여야 합니다.
         이를 위해 색 버퍼와 별개로 <strong>깊이 버퍼</strong>를 둬서, 픽셀을 칠하기 전에
@@ -428,6 +435,7 @@
     <section id="lighting">
       <h2>조명과 그림자</h2>
       <p class="lead">표면 법선과 빛 방향의 내적으로 밝기를 정하는 것 — 여기서 내적이 빛납니다.</p>
+      <a class="impl-link" href="impl/03-lighting.html">조명과 그림자(퐁 셰이딩)를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>표면이 밝은지 어두운지는 <strong>표면이 빛을 얼마나 정면으로 받는가</strong>로 정해집니다.
         이건 <strong>표면 법선(normal) · 빛 방향의 내적</strong>이에요(디퓨즈 조명, 램버트 법칙).
@@ -454,6 +462,7 @@
     <section id="texmap">
       <h2>텍스처 매핑</h2>
       <p class="lead">2D 이미지를 3D 표면에 "포장지처럼" 입히기. UV 좌표가 다리 역할.</p>
+      <a class="impl-link" href="impl/03-texmap.html">텍스처 매핑을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>맨질맨질한 3D 면에 벽돌·나무·얼굴을 그려 넣는 방법이 텍스처 매핑입니다.
         메시의 각 꼭짓점에 <strong>UV 좌표</strong>(텍스처 이미지 상의 위치, 0~1)를 붙여두면,
@@ -483,7 +492,7 @@
     <section id="gpu-intro">
       <h2>GPU 병렬 처리</h2>
       <p class="lead">CPU는 몇 명의 천재, GPU는 수천 명의 일꾼. 그래픽스는 "수천 명의 일꾼"이 유리합니다.</p>
-      <a class="impl-link" href="impl/04-shaders.html">이 챕터를 C++/DirectX 11로 직접 구현하기</a>
+      <a class="impl-link" href="impl/04-gpu-intro.html">GPU 병렬 처리를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>화면의 픽셀은 수백만 개. 각 픽셀 계산은 <strong>서로 독립적</strong>이라 동시에 처리해도 됩니다.
         <strong>CPU</strong>는 코어가 몇 개뿐이라 순서대로(직렬) 빠르게 처리하고,
@@ -508,6 +517,7 @@
     <section id="vertexshader">
       <h2>Vertex Shader</h2>
       <p class="lead">정점(vertex) 하나하나의 <strong>위치</strong>를 계산하는 프로그램. MVP 변환이 여기서 일어납니다.</p>
+      <a class="impl-link" href="impl/04-vertexshader.html">Vertex Shader를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>메시의 각 정점에 대해 딱 한 번씩 실행됩니다. 주 임무는 3D 좌표를 화면 클립 좌표로
         변환하는 것(<code>gl_Position = MVP * position</code>). 여기서 정점을 흔들거나 밀면
@@ -525,6 +535,7 @@
     <section id="fragshader">
       <h2>Fragment / Pixel Shader</h2>
       <p class="lead">삼각형을 덮는 <strong>픽셀 하나하나의 색</strong>을 계산하는 프로그램. 조명·텍스처·특수효과의 무대.</p>
+      <a class="impl-link" href="impl/04-fragshader.html">Pixel Shader를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>래스터화로 삼각형이 픽셀들로 쪼개지면, 각 픽셀(프래그먼트)마다 프래그먼트 셰이더가 실행되어
         <strong>최종 색</strong>을 출력합니다(<code>gl_FragColor = ...</code>). 수백만 번 병렬 실행되죠.
@@ -546,6 +557,7 @@
     <section id="computeshader">
       <h2>Compute Shader</h2>
       <p class="lead">그리기와 무관하게 <strong>GPU를 순수 계산기</strong>로 쓰는 셰이더. 물리·파티클·이미지 처리에.</p>
+      <a class="impl-link" href="impl/04-computeshader.html">Compute Shader를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>버텍스/프래그먼트 셰이더는 "그리기 파이프라인"에 묶여 있지만, <strong>컴퓨트 셰이더</strong>는
         화면 출력과 무관하게 <strong>임의의 대규모 병렬 계산</strong>을 합니다. 수만 개 파티클의 위치 갱신,
@@ -564,6 +576,7 @@
     <section id="shaderlang">
       <h2>GLSL · HLSL · WGSL</h2>
       <p class="lead">셰이더를 쓰는 언어들. 문법은 조금 다르지만 <strong>하는 일은 똑같습니다</strong>.</p>
+      <a class="impl-link" href="impl/04-shaderlang.html">HLSL 요점을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>C를 닮은 작은 언어들이에요. 어떤 그래픽스 API를 쓰느냐에 따라 언어가 갈립니다:</p>
       <ul>
@@ -624,7 +637,7 @@ fn main(
     <section id="api-overview">
       <h2>그래픽스 API 지형도</h2>
       <p class="lead">GPU에게 명령을 내리는 통로. "쉽고 자동" ↔ "어렵지만 완전 제어"의 스펙트럼.</p>
-      <a class="impl-link" href="impl/05-api.html">D3D11 실전 + 타 API 매핑 구현 가이드</a>
+      <a class="impl-link" href="impl/05-api-overview.html">그래픽스 API 지형도를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>그래픽스 API는 내 코드와 GPU 드라이버 사이의 <strong>약속(인터페이스)</strong>입니다.
         고수준 API는 많은 걸 알아서 해줘 배우기 쉽지만 세밀한 제어가 어렵고,
@@ -642,6 +655,7 @@ fn main(
     <section id="api-compare">
       <h2>OpenGL · DirectX 12 · Vulkan · Metal · WebGPU</h2>
       <p class="lead">언제 무엇을 골라야 할까? 목적별 정리.</p>
+      <a class="impl-link" href="impl/05-api-compare.html">타 API 개념 매핑을 C++/DirectX 11 기준으로 정리하기</a>
 
       <div style="overflow-x:auto">
       <table style="width:100%; border-collapse:collapse; font-size:14px; margin:16px 0;">
@@ -701,7 +715,7 @@ fn main(
     <section id="pbr">
       <h2>Physically Based Rendering (PBR)</h2>
       <p class="lead">"대충 예뻐 보이게"가 아니라 <strong>실제 빛의 물리 법칙</strong>대로 표면을 계산하기.</p>
-      <a class="impl-link" href="impl/06-advanced.html">이 챕터를 C++/DirectX 11로 직접 구현하기</a>
+      <a class="impl-link" href="impl/06-pbr.html">PBR을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>PBR은 재질을 몇 개의 물리적 파라미터로 표현합니다. 핵심은 두 개:</p>
       <ul>
@@ -728,6 +742,7 @@ fn main(
     <section id="hdr">
       <h2>HDR · 톤 매핑</h2>
       <p class="lead">태양은 종이보다 수만 배 밝다. 이 넓은 밝기를 0~255 화면에 우겨넣는 기술.</p>
+      <a class="impl-link" href="impl/06-hdr.html">HDR·톤 매핑을 C++/DirectX 11로 직접 구현하기</a>
 
       <p><strong>HDR(High Dynamic Range)</strong>은 밝기를 0~1에 가두지 않고 <strong>실제 물리량(수천, 수만)</strong>으로
         계산합니다. 그런데 모니터는 결국 0~255만 표현하죠. 그래서 마지막에 넓은 밝기 범위를 화면 범위로
@@ -746,6 +761,7 @@ fn main(
     <section id="shadowmap">
       <h2>Shadow Mapping</h2>
       <p class="lead">그림자 = "빛의 눈으로 볼 때 가려진 곳". 빛 시점의 깊이 지도를 만들어 판정합니다.</p>
+      <a class="impl-link" href="impl/06-shadowmap.html">섀도우 맵을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>가장 널리 쓰이는 그림자 기법입니다. 2단계로 동작해요:</p>
       <ol>
@@ -766,6 +782,7 @@ fn main(
     <section id="deferred">
       <h2>Deferred Rendering</h2>
       <p class="lead">조명을 나중에! 먼저 화면 정보만 모아두고, 조명은 화면 픽셀에 한 번씩만 계산.</p>
+      <a class="impl-link" href="impl/06-deferred.html">디퍼드 렌더링을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>조명이 수백 개면, 물체마다 모든 빛을 계산하는 <strong>전방 렌더링(Forward)</strong>은 폭발합니다.
         <strong>디퍼드 렌더링</strong>은 순서를 바꿔요:</p>
@@ -787,6 +804,7 @@ fn main(
     <section id="screenspace">
       <h2>Screen-Space Effects</h2>
       <p class="lead">이미 렌더된 "화면 이미지"를 후처리해서 효과를 얹기. 싸고 빠른 눈속임의 예술.</p>
+      <a class="impl-link" href="impl/06-screenspace.html">스크린 스페이스 효과(SSAO)를 C++/DirectX 11로 직접 구현하기</a>
 
       <p>3D를 다시 계산하지 않고, <strong>완성된 2D 화면(과 깊이·법선 정보)</strong>만 가지고 효과를 추가합니다.
         빠르기 때문에 실시간에 애용돼요:</p>
@@ -807,6 +825,7 @@ fn main(
     <section id="raytracing">
       <h2>Ray Tracing</h2>
       <p class="lead">픽셀마다 눈에서 광선을 쏴, 무엇에 맞았는지 추적해 색을 정하기. 반사·굴절이 자연스럽습니다.</p>
+      <a class="impl-link" href="impl/06-raytracing.html">레이 트레이싱(CPU)을 C++로 직접 구현하기</a>
 
       <p>래스터화가 "삼각형 → 픽셀"이라면, 레이 트레이싱은 반대로 <strong>"픽셀 → 광선 → 장면"</strong>입니다.
         각 픽셀에서 광선을 쏘고, 가장 먼저 부딪힌 표면을 찾은 뒤, 거기서 <strong>빛 쪽으로 또 광선</strong>을 쏴
@@ -824,6 +843,7 @@ fn main(
     <section id="pathtracing">
       <h2>Path Tracing</h2>
       <p class="lead">레이 트레이싱을 확률로 확장. 빛의 무작위 경로를 수없이 쌓아 <strong>사진 같은</strong> 그림을 얻기.</p>
+      <a class="impl-link" href="impl/06-pathtracing.html">패스 트레이싱(CPU)을 C++로 직접 구현하기</a>
 
       <p>패스 트레이싱은 각 픽셀에서 광선을 쏘되, 표면에 맞으면 <strong>무작위 방향으로 계속 튕기며</strong>
         빛을 만날 때까지 경로(path)를 추적합니다. 한 번으로는 노이즈(지글지글)투성이라,
@@ -841,6 +861,7 @@ fn main(
     <section id="gi">
       <h2>Global Illumination</h2>
       <p class="lead">빛은 한 번 튕기고 끝나지 않는다. 벽에 튄 빛이 옆면을 물들이는 <strong>간접광</strong>까지 계산.</p>
+      <a class="impl-link" href="impl/06-gi.html">전역 조명(GI)을 C++/DirectX 11로 직접 구현하기</a>
 
       <p><strong>직접광(Direct)</strong>만 계산하면 그림자 속은 새까맣습니다. 하지만 현실에선 빛이 벽·바닥에
         <strong>여러 번 튕기며(bounce)</strong> 온 공간을 은은히 채우고, 빨간 벽 옆 물체는 살짝 붉게 물들죠
@@ -866,7 +887,7 @@ fn main(
     <section id="antialiasing">
       <h2>안티앨리어싱 (Antialiasing)</h2>
       <p class="lead">비스듬한 선의 "계단(지글지글)"을 부드럽게. 픽셀 하나를 여러 번 샘플링해 평균 내기.</p>
-      <a class="impl-link" href="impl/07-techniques.html">이 챕터를 C++/DirectX 11로 직접 구현하기</a>
+      <a class="impl-link" href="impl/07-antialiasing.html">안티앨리어싱을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>픽셀은 네모난데 도형의 경계는 매끈합니다. 그래서 경계가 <strong>계단(재기, jaggies)</strong>처럼
         보이죠. 이건 앞서 본 <a href="#raster">래스터라이제이션</a>의 숙명입니다. 해법의 핵심은
@@ -894,6 +915,7 @@ fn main(
     <section id="gamma">
       <h2>감마 · 선형 색공간</h2>
       <p class="lead">"밝기 0.5는 왜 회색이 아닐까?" 빛 계산은 선형에서, 저장·표시는 sRGB에서.</p>
+      <a class="impl-link" href="impl/07-gamma.html">감마·선형 색공간을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>모니터의 픽셀 값(0~255)은 <strong>빛의 세기에 정비례하지 않습니다</strong>. 사람 눈이 어두운 쪽 차이에
         더 민감해서, 저장은 <strong>sRGB(감마) 공간</strong>에 촘촘하게 하죠. 그런데 <strong>빛의 덧셈·조명 계산은
@@ -917,6 +939,7 @@ fn main(
     <section id="mipmap">
       <h2>밉맵 · 텍스처 필터링</h2>
       <p class="lead">멀리 있는 텍스처가 지글거리는 이유와 해법. 미리 축소해 둔 이미지 사다리.</p>
+      <a class="impl-link" href="impl/07-mipmap.html">밉맵·텍스처 필터링을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>텍스처를 입힌 바닥이 멀어지면, 화면 픽셀 하나가 텍스처의 <strong>수많은 텍셀</strong>을 덮게 됩니다.
         이때 한 점만 콕 집어 읽으면(점 샘플링) 프레임마다 어떤 텍셀이 뽑힐지 튀어서 <strong>지글지글(반짝임)</strong>
@@ -940,6 +963,7 @@ fn main(
     <section id="transparency">
       <h2>투명과 렌더링 순서</h2>
       <p class="lead">반투명은 순서가 생명. <a href="#zbuffer">Z-buffer</a>만으로는 유리를 제대로 못 그립니다.</p>
+      <a class="impl-link" href="impl/07-transparency.html">투명과 렌더링 순서를 C++/DirectX 11로 직접 구현하기</a>
 
       <p><a href="#blend">알파 블렌딩</a>은 "위색 × α + 아래색 × (1−α)"였죠. 문제는 <strong>여러 반투명 물체가
         겹칠 때</strong>입니다. 블렌딩은 <em>이미 그려진 색 위에</em> 섞는 연산이라, <strong>뒤에서 앞으로
@@ -963,6 +987,7 @@ fn main(
     <section id="ao">
       <h2>앰비언트 오클루전 (Ambient Occlusion)</h2>
       <p class="lead">구석·틈이 어두운 이유. 주변광이 얼마나 "가려지는가(차폐)"를 계산해 입체감을 살리기.</p>
+      <a class="impl-link" href="impl/07-ao.html">앰비언트 오클루전을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>주변광(ambient)은 사방에서 은은히 오는 빛인데, <strong>좁은 틈·구석·물체가 맞닿는 곳</strong>은 그 빛이
         주변 기하에 <strong>가려져(차폐, occlusion)</strong> 실제로 더 어둡습니다. 이걸 근사해 어둡게 깔아주면
@@ -981,6 +1006,7 @@ fn main(
     <section id="lod">
       <h2>LOD · 컬링 (상세 수준과 걸러내기)</h2>
       <p class="lead">안 보이거나 멀리 있는 건 대충/아예 안 그리기. 프레임을 지키는 최적화의 기본.</p>
+      <a class="impl-link" href="impl/07-lod.html">LOD·컬링을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>수백만 삼각형을 매 프레임 다 그릴 순 없습니다. 두 가지 큰 아이디어로 일을 줄여요:</p>
       <ul>

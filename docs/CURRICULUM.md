@@ -104,7 +104,7 @@
 |---|---|---|---|---|
 | PBR (Cook-Torrance D·F·G) | 🟡 | ✅ | ✅ | 06-pbr |
 | HDR·톤매핑(Reinhard/ACES) | 🟡 | ✅ | ✅ | 06-hdr |
-| IBL·환경맵·프리필터·BRDF LUT | ✅ | 🟡 | ✅ | 06-ibl (원리 split-sum + gdemo + HLSL) |
+| IBL·환경맵·프리필터·BRDF LUT | ✅ | ✅ | ✅ | 06-ibl + 개념 트랙 #ibl 섹션·데모(split-sum) |
 | 리플렉션 프로브·리플렉션 캡쳐(로컬 큐브맵·parallax correction·프로브 블렌딩) | ✅ | 🟡 | ✅ | 06-ibl §5, 스페큘러 간접광·SSR 폴백 |
 
 ### 6-C. 그림자

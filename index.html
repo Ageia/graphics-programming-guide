@@ -61,6 +61,7 @@
     <div class="nav-group">
       <div class="nav-title">6. 고급 렌더링</div>
       <a href="#pbr">PBR (물리 기반 렌더링)</a>
+      <a href="#ibl">이미지 기반 조명 (IBL)</a>
       <a href="#hdr">HDR · 톤 매핑</a>
       <a href="#shadowmap">Shadow Mapping</a>
       <a href="#paths">렌더링 경로 비교</a>
@@ -737,6 +738,36 @@ fn main(
         ① 얼마나 많은 미세면이 반사 방향을 향하나(<em>법선분포 D</em>), ② 미세면끼리 서로 가리는 정도
         (<em>기하 G</em>), ③ 각도에 따라 반사가 강해지는 <em>프레넬(Fresnel) F</em> — 이 셋을 곱해 스페큘러를 만듭니다.
         <strong>에너지 보존</strong>(반사가 입사보다 많을 수 없음)을 지키는 게 "물리 기반"의 핵심이에요.</div>
+    </section>
+
+    <section id="ibl">
+      <h2>Image-Based Lighting (IBL)</h2>
+      <p class="lead">점광원 몇 개가 아니라 <strong>주변 환경 전체</strong>를 광원으로. 하늘·벽·바닥이 그대로 표면에 비칩니다.</p>
+      <a class="impl-link" href="impl/06-ibl.html">이미지 기반 조명(IBL)·리플렉션 프로브를 C++/DirectX 11로 직접 구현하기</a>
+
+      <p>금속 구가 사실적이려면 <em>환경 전체</em>가 표면에 반사돼야 합니다. <strong>IBL</strong>은 하늘·주변이 담긴
+        <strong>환경맵</strong>을 하나의 거대한 광원으로 쓰는 기법이에요. 문제는 반구 전체를 픽셀마다 적분할 수 없다는 것.
+        그래서 IBL은 이 적분을 <strong>미리 구워</strong> 두고, 런타임엔 텍스처만 몇 번 샘플합니다:</p>
+      <ul>
+        <li><strong>디퓨즈</strong>: 법선 방향으로 들어오는 평균광을 미리 뭉갠 <em>irradiance 맵</em> — 한 번 샘플로 끝.</li>
+        <li><strong>스페큘러</strong>: 거칠기별로 흐려 놓은 <em>프리필터 환경맵</em>(거칠기 = 밉 레벨) × <em>BRDF LUT</em> —
+          이 둘로 쪼개는 게 <strong>split-sum</strong> 근사입니다.</li>
+      </ul>
+      <p>아래 데모에서 <strong>거칠기</strong>를 올리면 반사가 흐려지는데, 이게 곧 <em>더 높은 밉을 읽는 것</em>입니다.
+        <strong>금속성</strong>을 내리면 뭉툭한 디퓨즈(irradiance) 비중이 커지고, 올리면 순수 환경 반사가 지배합니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">환경이 곧 광원: 거칠기 = 반사 흐림(프리필터 밉)</div>
+        <canvas id="c-ibl" height="360"></canvas>
+        <div class="controls" id="ctl-ibl"></div>
+        <p class="hint">구는 절차적 환경(하늘·태양·바닥) 속에 있습니다. 거칠기를 올리면 반사가 뭉개지고,
+          금속성을 내리면 확산 간접광이 드러납니다. 환경을 회전시켜 반사가 함께 흐르는지 보세요.</p>
+      </div>
+
+      <div class="tip"><strong>정리:</strong> IBL = <em>반구 적분을 오프라인으로 미룬 것</em>. 디퓨즈는 irradiance 맵,
+        스페큘러는 split-sum(프리필터 × BRDF LUT)으로 나눠 굽습니다. 이 환경맵을 씬 곳곳에 배치하면
+        <strong>리플렉션 프로브</strong>가 되고, 화면 밖 반사는 SSR·프로브·전역 IBL 순으로 폴백합니다.
+        간접 <em>디퓨즈</em>(프로브 그리드·DDGI)는 <a class="btn-link" href="#gi">전역 조명</a>에서 이어집니다.</div>
     </section>
 
     <section id="hdr">

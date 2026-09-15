@@ -17,6 +17,9 @@
       리플렉션 프로브(박스 parallax correction, 프로브 블렌딩, 정적·실시간 갱신)·리플렉션 캡쳐(UE 용어)까지 §5에서 다루고 SSR 폴백 체인 언급. WebGL 히어로 + split-sum gdemo 포함.
 - [x] **`impl/06-gi.html` 보강** — 라이트 프로브 그리드 배치·삼선형 보간(§2-3)·DDGI 가시성 연결(§2-4) 확장. 히어로 배너 추가, `impl-badge` 제거.
 - [x] 두 페이지 상호 링크 + `06-pbr`(IBL 콜아웃)·`06-screenspace`(SSR→프로브 폴백)에서 교차 링크. 허브 카드 추가(카드 2/9), gi 카드 topics 갱신.
-- [x] `docs/CURRICULUM.md` PART 6-B / 6-D 상태칸 갱신(원 ✅ / 개 🟡 / 구 ✅).
+- [x] `docs/CURRICULUM.md` PART 6-B / 6-D 상태칸 갱신.
+- [x] **개념 트랙 반영**(§5 두 트랙 동시 반영): `index.html`에 `#ibl` 섹션 + 사이드바 링크 추가,
+      `js/demos-adv1.js`에 `initIBL` split-sum 데모(거칠기=프리필터 밉·금속성=디퓨즈/스페큘러) 작성·등록,
+      06-ibl→개념 섹션 역링크. CLAUDE.md에 "구현 트랙 후 개념 트랙 반영" 규칙 추가.
 
-> 남은 후속(선택): 개념 트랙(`index.html`)에 IBL·프로브 그리드 섹션·데모를 추가해 개(개념 트랙) 칸을 ✅로 올리는 작업(§5 두 트랙 동시 반영). 이번 범위(impl 트랙)에는 미포함.
+> 후속(선택): 리플렉션 프로브 전용 개념 데모·GI 프로브 그리드 개념 데모는 미착수(현재 #ibl 데모가 IBL split-sum을 커버, #gi가 GI를 커버). 필요 시 추가.

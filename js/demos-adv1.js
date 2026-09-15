@@ -159,6 +159,155 @@
   }
 
   // ==========================================================
+  // 1-b) IBL — 환경(주변)이 곧 광원. split-sum(거칠기=프리필터 밉) 직관 데모.
+  //   절차적 환경을 배경으로 깔고, 구 표면에서 반사 벡터로 환경을 샘플한다.
+  //   거칠기 → 반사 흐림(밉 근사, 다중 샘플 평균), 금속성 → 디퓨즈 vs 스페큘러.
+  // ==========================================================
+  function initIBL() {
+    if (!document.getElementById("c-ibl")) return;
+    const S = GFX.setup("c-ibl");
+    const ctl = document.getElementById("ctl-ibl");
+
+    const RES = 240;
+    const buf = makeBuffer(RES, RES);
+    let roughness = 0.25, metallic = 1.0, hue = 40, yaw = 0.4;
+
+    const sunDir = norm3([0.5, 0.45, -0.72]);   // 절차적 환경의 태양 방향(뷰 공간)
+
+    function norm3(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0]/l, v[1]/l, v[2]/l]; }
+    function rotY(v, a) {                         // Y축 기준 회전(환경 yaw)
+      const c = Math.cos(a), s = Math.sin(a);
+      return [v[0]*c + v[2]*s, v[1], -v[0]*s + v[2]*c];
+    }
+    // 절차적 HDR 환경: 하늘 그라디언트 + 태양 + 바닥. dir은 단위 벡터, [r,g,b] 반환(1 초과 가능).
+    function env(dir) {
+      const up = clamp(dir[1] * 0.5 + 0.5, 0, 1);
+      if (dir[1] > 0) {
+        // 지평선(따뜻)→천정(짙은 파랑)
+        let r = lerp(0.85, 0.10, up), g = lerp(0.80, 0.20, up), b = lerp(0.72, 0.42, up);
+        const hor = Math.max(0, 1 - Math.abs(dir[1]) * 2.2);   // 지평선 노을
+        r += hor * 0.35; g += hor * 0.20;
+        const s = Math.max(0, dir[0]*sunDir[0] + dir[1]*sunDir[1] + dir[2]*sunDir[2]);
+        const sun = Math.pow(s, 220) * 12 + Math.pow(s, 6) * 0.4;   // 태양 코어 + 헤일로
+        return [r + sun * 1.3, g + sun * 1.05, b + sun * 0.7];
+      }
+      const dn = -dir[1];
+      return [lerp(0.16, 0.05, dn), lerp(0.14, 0.05, dn), lerp(0.13, 0.06, dn)]; // 바닥
+    }
+    // 반구 평균 근사(디퓨즈 irradiance): 환경 몇 방향을 코사인 가중 평균
+    let avgEnv = [0, 0, 0];
+    function computeAvg() {
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let a = 0; a < 12; a++) for (let e = 0; e < 6; e++) {
+        const phi = (a / 12) * Math.PI * 2, th = (e / 6) * Math.PI * 0.5;
+        const d = [Math.sin(th)*Math.cos(phi), Math.cos(th), Math.sin(th)*Math.sin(phi)];
+        const c = env(d), w = Math.cos(th);
+        r += c[0]*w; g += c[1]*w; b += c[2]*w; n += w;
+      }
+      avgEnv = [r/n, g/n, b/n];
+    }
+    // 프리필터 근사: 거칠수록 R 주변을 넓게 흩어 평균(+ 거친 극단은 avgEnv로 수렴)
+    function prefilter(R, rough) {
+      const c = env(R);
+      let r = c[0], g = c[1], b = c[2], wsum = 1;
+      const spread = rough * 0.9;
+      const OFF = [[1,0],[-1,0],[0,1],[0,-1]];
+      for (let k = 0; k < OFF.length; k++) {
+        const d = norm3([R[0] + OFF[k][0]*spread, R[1] + OFF[k][1]*spread, R[2]]);
+        const s = env(d); r += s[0]; g += s[1]; b += s[2]; wsum += 1;
+      }
+      r /= wsum; g /= wsum; b /= wsum;
+      // 아주 거칠면 방향성이 사라져 반구 평균으로 수렴
+      const t = rough * rough;
+      return [lerp(r, avgEnv[0], t), lerp(g, avgEnv[1], t), lerp(b, avgEnv[2], t)];
+    }
+    function reinhard(c) { return [c[0]/(1+c[0]), c[1]/(1+c[1]), c[2]/(1+c[2])]; }
+
+    function render() {
+      computeAvg();
+      const d = buf.img.data;
+      const albedo = hsv2rgb(hue, 0.7, 0.92);
+      const R = RES * 0.40, cx = RES / 2, cy = RES / 2;
+      const F0d = 0.04;
+      for (let py = 0; py < RES; py++) {
+        for (let px = 0; px < RES; px++) {
+          const i = (py * RES + px) * 4;
+          const sx = (px - cx) / R, sy = -(py - cy) / R;   // sy: 위가 +y
+          const r2 = sx * sx + sy * sy;
+          let col;
+          if (r2 > 1) {
+            // 배경 = 환경 그 자체(구가 환경 속에 있는 느낌)
+            const vd = rotY(norm3([sx * 0.9, sy * 0.9, -1]), yaw);
+            col = env(vd);
+          } else {
+            const nz = Math.sqrt(1 - r2);
+            const N = [sx, sy, nz];
+            const NoV = nz;                                  // V = (0,0,1)
+            const Rv = rotY([2*NoV*N[0], 2*NoV*N[1], 2*NoV*nz - 1], yaw);
+            const Nw = rotY(N, yaw);
+            // 스페큘러: 프리필터 × 프레넬
+            const pf = prefilter(Rv, roughness);
+            const fres = F0d + (1 - F0d) * Math.pow(1 - NoV, 5);
+            const F0r = lerp(F0d, albedo[0], metallic);
+            const F0g = lerp(F0d, albedo[1], metallic);
+            const F0b = lerp(F0d, albedo[2], metallic);
+            const Fr = F0r + (1 - F0r) * Math.pow(1 - NoV, 5);
+            const Fg = F0g + (1 - F0g) * Math.pow(1 - NoV, 5);
+            const Fb = F0b + (1 - F0b) * Math.pow(1 - NoV, 5);
+            // 디퓨즈: irradiance(≈avgEnv, 법선으로 약간 기울임) × albedo
+            const irr = [lerp(avgEnv[0], env(Nw)[0], 0.3), lerp(avgEnv[1], env(Nw)[1], 0.3), lerp(avgEnv[2], env(Nw)[2], 0.3)];
+            const kd = (1 - metallic) * (1 - fres);
+            col = [
+              kd * irr[0] * albedo[0] + pf[0] * Fr,
+              kd * irr[1] * albedo[1] + pf[1] * Fg,
+              kd * irr[2] * albedo[2] + pf[2] * Fb
+            ];
+          }
+          col = reinhard(col);
+          d[i] = toByte(col[0]); d[i+1] = toByte(col[1]); d[i+2] = toByte(col[2]); d[i+3] = 255;
+        }
+      }
+      buf.cx.putImageData(buf.img, 0, 0);
+      draw();
+    }
+
+    function draw() {
+      const ctx = S.ctx, w = S.w, h = S.h;
+      GFX.clear(ctx, w, h);
+      const size = Math.min(w * 0.55, h - 40, 300);
+      const ox = 24, oy = (h - size) / 2;
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(buf.cv, ox, oy, size, size);
+
+      const tx = ox + size + 28; let ty = oy + 20;
+      GFX.text(ctx, "split-sum 근사", tx, ty, COL.text, "bold 14px sans-serif"); ty += 28;
+      const mip = (roughness * 5).toFixed(1);
+      GFX.text(ctx, "거칠기 = " + roughness.toFixed(2), tx, ty, COL.dim); ty += 20;
+      GFX.text(ctx, "  → 프리필터 밉 " + mip + " / 5 (반사 흐림)", tx, ty, COL.dim, "12px sans-serif"); ty += 26;
+      GFX.text(ctx, "금속성 = " + metallic.toFixed(2), tx, ty, COL.dim); ty += 20;
+      GFX.text(ctx, "  → " + (metallic > 0.5 ? "F0=재질색, 반사 지배" : "디퓨즈 irradiance 드러남"), tx, ty, COL.dim, "12px sans-serif"); ty += 26;
+      GFX.text(ctx, "spec = prefilter × (F·A + B)", tx, ty, COL.dim, "12px sans-serif"); ty += 24;
+      const sw = hsv2rgb(hue, 0.7, 0.92);
+      ctx.fillStyle = `rgb(${toByte(sw[0])},${toByte(sw[1])},${toByte(sw[2])})`;
+      ctx.fillRect(tx, ty - 8, 18, 18);
+      GFX.text(ctx, "베이스 색상 (Hue " + Math.round(hue) + "°)", tx + 26, ty + 1, COL.dim);
+    }
+
+    GFX.slider(ctl, { label: "거칠기 Roughness", min: 0, max: 1, step: 0.01, value: roughness,
+      onInput: (v) => { roughness = v; render(); } });
+    GFX.slider(ctl, { label: "금속성 Metallic", min: 0, max: 1, step: 0.01, value: metallic,
+      onInput: (v) => { metallic = v; render(); } });
+    GFX.slider(ctl, { label: "베이스 색상 Hue", min: 0, max: 360, step: 1, value: hue,
+      format: (v) => Math.round(v) + "°", onInput: (v) => { hue = v; render(); } });
+    GFX.slider(ctl, { label: "환경 회전", min: -180, max: 180, step: 1, value: GFX.deg(yaw),
+      format: (v) => Math.round(v) + "°", onInput: (v) => { yaw = rad(v); render(); } });
+
+    S.onResize = ((orig) => () => { orig(); draw(); })(S.onResize);
+    window.addEventListener("resize", draw);
+    render();
+  }
+
+  // ==========================================================
   // 2) HDR 톤 매핑 — clip vs Reinhard vs ACES
   // ==========================================================
   function initHDR() {
@@ -666,6 +815,7 @@
   // 부트스트랩
   // ==========================================================
   GFX.deferInit("c-pbr", initPBR);
+  GFX.deferInit("c-ibl", initIBL);
   GFX.deferInit("c-hdr", initHDR);
   GFX.deferInit("c-shadowmap", initShadowMap);
   GFX.deferInit("c-deferred", initDeferred);

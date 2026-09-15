@@ -116,6 +116,39 @@
   </section>
 
   <!-- ================================================================ -->
+  <!-- 먼저 감 잡기 — 직접광 vs 전역 조명 직관 데모 -->
+  <!-- ================================================================ -->
+  <section id="intuition">
+    <h2 style="margin-top:40px;">먼저 감 잡기 — 직접광만 vs 전역 조명</h2>
+    <p>
+      코드로 들어가기 전에, <strong>간접광(GI)이 있고 없고</strong>가 무엇을 바꾸는지 눈으로 먼저 봅시다. 아래는 코넬 박스 단면입니다.
+      <strong>간접광 세기를 0으로 내리면 직접광만</strong> — 광원이 직접 비추는 곳만 밝고 그림자 속은 새까맣습니다.
+      <strong>세기를 올리면 전역 조명</strong> — 빛이 벽·바닥에 튕겨 그림자 속을 은은히 채우고, <em>빨간 벽은 왼쪽 바닥을·초록 벽은 오른쪽 바닥을</em>
+      물들입니다(<strong>color bleeding</strong>). 슬라이더를 0 ↔ 최대로 오가며 차이를 느껴 보세요. 이 "정답"을 각 기법이 저마다의 예산으로 근사하는 것이 이 챕터입니다.
+    </p>
+    <div class="gdemo">
+      <div class="gcanvas-wrap">
+        <canvas id="gi-intro-demo" class="gcanvas" width="900" height="360"></canvas>
+        <div class="hud" id="gi-intro-hud">렌더링…</div>
+      </div>
+      <div class="gctrls">
+        <div class="gctl">
+          <label>간접광(GI) 세기 <span class="gval" id="gi-intro-val">0.80</span></label>
+          <input type="range" id="gi-intro-gi" min="0" max="1" step="0.01" value="0.8" />
+        </div>
+        <div class="gctl">
+          <label>바운스 채움 <span class="gval" id="gi-intro-bval">0.60</span></label>
+          <input type="range" id="gi-intro-bounce" min="0" max="1" step="0.01" value="0.6" />
+        </div>
+      </div>
+      <p class="ghint">
+        <strong>간접광 세기 = 0</strong>이면 직접광만(그림자 새까맘), 올릴수록 그림자가 채워지고 빨강·초록 벽이 바닥을 물들입니다.
+        <strong>바운스 채움</strong>은 그림자 속을 메우는 간접광의 양입니다. 값은 개념 이해용 근사입니다.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
   <!-- 기법별 세부 페이지 카드 -->
   <!-- ================================================================ -->
   <h2 style="margin-top:40px;">기법별로 들어가기 — 각 페이지에 비주얼 데모 + 직접 구현</h2>
@@ -259,6 +292,122 @@
     document.addEventListener("visibilitychange", function () { document.hidden ? stop() : start(); });
     start();
   } catch (e) { /* 히어로 격리: 실패해도 본문 유지 */ }
+})();
+</script>
+
+<!-- 먼저 감 잡기 데모: 코넬 박스 단면. 왼쪽 절반=직접광만, 오른쪽 절반=전역 조명(간접 채움 + color bleeding).
+     Canvas2D 저해상 버퍼 per-pixel 셰이딩(개념 이해용 근사). rAF·hidden 정지·try/catch 격리·피드백 루프 없음. -->
+<script>
+(function () {
+  try {
+    var cv = document.getElementById("gi-intro-demo");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+    var giS = document.getElementById("gi-intro-gi");
+    var bnS = document.getElementById("gi-intro-bounce");
+    var giV = document.getElementById("gi-intro-val");
+    var bnV = document.getElementById("gi-intro-bval");
+    var hud = document.getElementById("gi-intro-hud");
+    if (!giS || !bnS || !hud) return;
+
+    // 씬(정규 좌표 u,v ∈ [0,1], v 아래로 증가)
+    var B = 0.05;                         // 벽 두께
+    var OX = 0.52, OY = 0.60, OR = 0.15;  // 물체 원
+    var RED = [0.85, 0.12, 0.12], GREEN = [0.12, 0.72, 0.2], GRAY = [0.78, 0.78, 0.78], WHITE = [0.92, 0.92, 0.92];
+
+    function clamp(x, a, b) { return x < a ? a : (x > b ? b : x); }
+    // 픽셀 P→광원 L 선분이 물체 원을 지나면 그림자(soft)
+    function shadow(u, v, lu, lv) {
+      var abx = lu - u, aby = lv - v;
+      var t = clamp(((OX - u) * abx + (OY - v) * aby) / (abx * abx + aby * aby + 1e-6), 0, 1);
+      var cxp = u + abx * t, cyp = v + aby * t;
+      var dx = OX - cxp, dy = OY - cyp;
+      return (dx * dx + dy * dy < OR * OR) ? 0.05 : 1.0;
+    }
+
+    var W = 0, H = 0, bw = 0, bh = 0, buf = null, dpr = Math.min(2, window.devicePixelRatio || 1);
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);   // 픽셀 버퍼만 갱신
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      bw = Math.max(80, Math.round(W * 0.45)); bh = Math.max(60, Math.round(H * 0.45));
+      buf = ctx.createImageData(bw, bh);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function render(t) {
+      var gi = parseFloat(giS.value), bounce = parseFloat(bnS.value);
+      giV.textContent = gi.toFixed(2); bnV.textContent = bounce.toFixed(2);
+      var lu = 0.5 + 0.12 * Math.sin(t * 0.0006);   // 광원이 천장에서 좌우로 살짝 이동
+      var lv = 0.085;
+      var d = buf.data;
+      for (var py = 0; py < bh; py++) {
+        for (var px = 0; px < bw; px++) {
+          var u = px / bw, v = py / bh;
+          var giEff = gi;    // 전체 씬에 GI 세기 적용(0이면 직접광만)
+          var alb, nx = 0, ny = 0, hasN = true, isObj = false;
+          var dxo = u - OX, dyo = v - OY;
+          if (dxo * dxo + dyo * dyo < OR * OR) {                 // 물체
+            alb = WHITE; var l = Math.sqrt(dxo * dxo + dyo * dyo) + 1e-6; nx = dxo / l; ny = dyo / l; isObj = true;
+          } else if (v > 1 - B) { alb = GRAY; nx = 0; ny = -1; } // 바닥
+          else if (v < B) { alb = GRAY; nx = 0; ny = 1; }        // 천장
+          else if (u < B) { alb = RED; nx = 1; ny = 0; }         // 좌벽(빨강)
+          else if (u > 1 - B) { alb = GREEN; nx = -1; ny = 0; }  // 우벽(초록)
+          else { alb = GRAY; hasN = false; }                     // 뒷벽
+
+          // 직접광
+          var ldx = lu - u, ldy = lv - v, ld = Math.sqrt(ldx * ldx + ldy * ldy) + 1e-6;
+          ldx /= ld; ldy /= ld;
+          var att = 1.0 / (0.28 + 3.2 * ld * ld);
+          var ndl = hasN ? Math.max(0, nx * ldx + ny * ldy) : 0.42;
+          var sh = isObj ? 1.0 : shadow(u, v, lu, lv);
+          var direct = 2.3 * att * ndl * sh;
+
+          // 간접광(GI): 그림자 채움(bounce) + 벽 색 번짐(color bleeding)
+          var floorish = clamp((v - 0.25) / 0.75, 0, 1);          // 아래로 갈수록 번짐 큼
+          var lB = clamp((0.55 - u) * 2.2, 0, 1) * (0.55 + floorish);
+          var rB = clamp((u - 0.45) * 2.2, 0, 1) * (0.55 + floorish);
+          var ambient = 0.34 * bounce;
+          var inr = ambient + (RED[0] * lB + GREEN[0] * rB) * 1.45;
+          var ing = ambient + (RED[1] * lB + GREEN[1] * rB) * 1.45;
+          var inb = ambient + (RED[2] * lB + GREEN[2] * rB) * 1.45;
+
+          var cr = alb[0] * direct + alb[0] * giEff * inr;
+          var cg = alb[1] * direct + alb[1] * giEff * ing;
+          var cb = alb[2] * direct + alb[2] * giEff * inb;
+          // reinhard + 감마
+          cr = Math.pow(cr / (1 + cr), 1 / 2.2); cg = Math.pow(cg / (1 + cg), 1 / 2.2); cb = Math.pow(cb / (1 + cb), 1 / 2.2);
+          var i = (py * bw + px) * 4;
+          d[i] = cr * 255; d[i + 1] = cg * 255; d[i + 2] = cb * 255; d[i + 3] = 255;
+        }
+      }
+      // 저해상 버퍼를 오프스크린에 올려 캔버스 전체로 확대
+      if (!render._tmp || render._tmp.width !== bw || render._tmp.height !== bh) {
+        render._tmp = document.createElement("canvas"); render._tmp.width = bw; render._tmp.height = bh;
+        render._tctx = render._tmp.getContext("2d");
+      }
+      render._tctx.putImageData(buf, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(render._tmp, 0, 0, cv.width, cv.height);
+
+      hud.innerHTML = (gi < 0.02
+        ? "<b>직접광만</b> — 그림자 속이 새까맘"
+        : "<b>전역 조명</b> · GI " + gi.toFixed(2) + " — 그림자 채움 + 색번짐")
+        + "<br>바운스 채움 " + bounce.toFixed(2) + " · 좌 빨강벽/우 초록벽이 바닥을 물들임";
+    }
+
+    var raf = 0;
+    function frame(ts) { render(ts || 0); raf = requestAnimationFrame(frame); }
+    function start() { if (!raf) raf = requestAnimationFrame(frame); }
+    function stop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+    giS.addEventListener("input", function () { render(performance.now ? performance.now() : 0); });
+    bnS.addEventListener("input", function () { render(performance.now ? performance.now() : 0); });
+    document.addEventListener("visibilitychange", function () { document.hidden ? stop() : start(); });
+    start();
+  } catch (e) { /* 데모 격리 */ }
 })();
 </script>
 

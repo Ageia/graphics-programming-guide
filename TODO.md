@@ -38,3 +38,4 @@
 - [x] `06-gi-rtgi.html` — DXR RTGI + WebGL 노이즈→디노이즈 데모.
 - [x] 06-ibl `#probe` 링크 → `06-gi-probe.html` 갱신, 허브 카드·CURRICULUM 6-D 갱신.
 - [x] 5페이지 헤드리스 렌더 검증(히어로·데모·본문·JS문법·nav) 후 일괄 커밋·푸시.
+- [x] 개념 트랙 `#gi`를 허브(06-gi.html) iframe 임베드로 전환(paths 패턴). 개념 트랙 GI 데모는 허브 안 "먼저 감 잡기" 직관 데모로 이관(전체 씬 GI 슬라이더: 0=직접광만 → 색번짐·그림자 채움).

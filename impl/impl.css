@@ -101,7 +101,7 @@
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  color: #0b0d13;
+  color: var(--bg-code);
   background: var(--accent2);
   padding: 3px 10px;
   border-radius: 999px;
@@ -147,14 +147,14 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
-  background: #0b0d13;
+  background: var(--bg-code);
 }
 .code-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 7px 14px;
-  background: #12151d;
+  background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   font-family: "JetBrains Mono", Consolas, monospace;
   font-size: 12px;
@@ -176,7 +176,7 @@
   line-height: 1.6;
   font-size: 13.5px;
 }
-.code pre code { color: #e6e8ee; }
+.code pre code { color: var(--text); }
 
 /* 단독 pre 도 동일 톤 */
 .content pre { line-height: 1.6; }
@@ -205,7 +205,7 @@ ol.steps > li::before {
   left: 0; top: 6px;
   width: 26px; height: 26px;
   background: var(--accent);
-  color: #0b0d13;
+  color: var(--bg-code);
   border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   font-weight: 700; font-size: 13px;
@@ -281,7 +281,7 @@ table.impl code { font-size: 0.86em; }
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
-  background: #0a0f0d;
+  background: var(--bg-code);
   margin: 18px 0 26px;
 }
 .gcanvas-wrap { position: relative; }
@@ -289,7 +289,7 @@ table.impl code { font-size: 0.86em; }
   display: block;
   width: 100%;
   height: 360px;
-  background: #0a0f0d;
+  background: var(--bg-code);
   touch-action: none;
   cursor: grab;
 }
@@ -342,7 +342,7 @@ table.impl code { font-size: 0.86em; }
 }
 .gdemo .gbtns button.on {
   background: var(--accent2);
-  color: #08120c;
+  color: var(--bg-code);
   border-color: var(--accent2);
 }
 .gdemo .ghint {

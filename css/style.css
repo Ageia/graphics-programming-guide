@@ -2,21 +2,7 @@
    그래픽스 프로그래밍 비주얼 가이드 - 스타일
    ============================================================ */
 
-:root {
-  --bg: #0f1117;
-  --bg-panel: #171a23;
-  --bg-card: #1e222e;
-  --border: #2a2f3d;
-  --text: #e6e8ee;
-  --text-dim: #9aa1b2;
-  --accent: #6ea8fe;
-  --accent2: #7ee787;
-  --accent3: #ff7b72;
-  --accent4: #ffd166;
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  --radius: 14px;
-  --sidebar-w: 280px;
-}
+/* 디자인 토큰은 css/theme.css(:root)에 단일 정의되어 있다. 이 파일은 토큰만 참조한다. */
 
 * { box-sizing: border-box; }
 
@@ -24,8 +10,7 @@ html { scroll-behavior: smooth; }
 
 body {
   margin: 0;
-  font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "Malgun Gothic", sans-serif;
+  font-family: var(--font-ui);
   background: var(--bg);
   color: var(--text);
   line-height: 1.75;
@@ -78,9 +63,9 @@ body {
 }
 .sidebar a:hover { color: var(--text); background: rgba(255, 255, 255, 0.03); }
 .sidebar a.active {
-  color: var(--accent);
-  border-left-color: var(--accent);
-  background: rgba(110, 168, 254, 0.08);
+  color: var(--text-bright);
+  border-left-color: var(--accent4);
+  background: var(--bg-hover);
 }
 
 .content {
@@ -149,11 +134,11 @@ body {
 .hero {
   padding: 40px;
   border-radius: var(--radius);
-  background: linear-gradient(135deg, #1b2233, #171a23);
+  background: var(--bg-card);
   border: 1px solid var(--border);
   margin-bottom: 48px;
 }
-.hero h1 { font-size: 32px; margin: 0 0 12px; }
+.hero h1 { font-size: 32px; margin: 0 0 12px; letter-spacing: 0.02em; }
 .hero p { color: var(--text-dim); margin: 0; font-size: 16px; }
 
 section { margin-bottom: 72px; scroll-margin-top: 24px; }
@@ -175,7 +160,7 @@ p { margin: 12px 0; }
 .lead { color: var(--text-dim); font-size: 15px; margin-top: 0; }
 
 code {
-  background: #0b0d13;
+  background: var(--bg-code);
   padding: 2px 7px;
   border-radius: 6px;
   font-family: "JetBrains Mono", Consolas, monospace;
@@ -183,7 +168,7 @@ code {
   color: var(--accent4);
 }
 pre {
-  background: #0b0d13;
+  background: var(--bg-code);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 16px 18px;
@@ -191,7 +176,7 @@ pre {
 }
 pre code { background: none; padding: 0; color: var(--text); }
 
-strong { color: #fff; }
+strong { color: var(--text-bright); }
 
 /* ---------- 카드/데모 ---------- */
 .demo {
@@ -216,7 +201,7 @@ strong { color: #fff; }
 
 .demo canvas {
   display: block;
-  background: #0b0d13;
+  background: var(--bg-code);
   border-radius: 10px;
   width: 100%;
   max-width: 100%;
@@ -245,7 +230,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 
 button {
   background: var(--accent);
-  color: #0b0d13;
+  color: var(--bg-code);
   border: none;
   padding: 8px 16px;
   border-radius: 8px;
@@ -260,7 +245,7 @@ button.ghost { background: transparent; color: var(--text-dim); border: 1px soli
 .readout {
   font-family: "JetBrains Mono", monospace;
   font-size: 13px;
-  background: #0b0d13;
+  background: var(--bg-code);
   border-radius: 8px;
   padding: 10px 14px;
   margin-top: 12px;

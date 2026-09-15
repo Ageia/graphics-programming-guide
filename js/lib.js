@@ -39,12 +39,15 @@
   }
 
   // ---- 색상 팔레트 ------------------------------------------
+  // 캔버스 "기본색"(배경·격자·텍스트)은 css/theme.css 토큰에서 읽어와
+  // UI 테마와 자동으로 일치시킨다. "데이터 색"(축/벡터 등 구분용)은
+  // 가독성을 위해 고정값을 유지한다(레퍼런스도 검은 HUD 안 컬러 렌더).
   const COL = {
-    bg: "#0b0d13",
-    grid: "#1c2130",
-    gridAxis: "#3a4257",
-    text: "#e6e8ee",
-    dim: "#9aa1b2",
+    bg: "#0a0a0d",
+    grid: "#17171c",
+    gridAxis: "#3a3a44",
+    text: "#e7e7e2",
+    dim: "#8a8a84",
     accent: "#6ea8fe",   // 파랑
     green: "#7ee787",
     red: "#ff7b72",
@@ -52,6 +55,15 @@
     purple: "#c792ea",
     cyan: "#56d4dd",
   };
+  // 테마 토큰 → 캔버스 기본색 동기화(있으면 덮어씀). 실패해도 위 기본값 사용.
+  try {
+    const cs = getComputedStyle(document.documentElement);
+    const pick = (name, fb) => (cs.getPropertyValue(name).trim() || fb);
+    COL.bg = pick("--bg-code", COL.bg);
+    COL.text = pick("--text", COL.text);
+    COL.dim = pick("--text-dim", COL.dim);
+    COL.gridAxis = pick("--border-bright", COL.gridAxis);
+  } catch (e) { /* 토큰 못 읽어도 기본값으로 동작 */ }
 
   // ---- 드로잉 프리미티브 ------------------------------------
   function clear(ctx, w, h, color) {

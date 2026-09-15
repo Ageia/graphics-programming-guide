@@ -1,0 +1,174 @@
+/* ============================================================
+   theme.css — 단일 테마/디자인 토큰 (유일한 진실 원천)
+   모든 HTML이 이 파일 하나를 가장 먼저 링크한다.
+   테마를 바꾸려면 아래 :root 토큰만 수정하면 전 페이지에 반영된다.
+   (개념 트랙 css/style.css, 구현 트랙 impl/impl.css 는 이 토큰만 참조)
+
+   현재 테마: "Tactical HUD" — 거의 흑색 배경 · 모노스페이스 · 하이라인 보더
+   · 코너 브래킷 프레임 · 상태 pill · 바 미터. 감시/전술 대시보드 무드.
+   ※ 캔버스 데모 색과 코드 하이라이트 색은 "콘텐츠"라 흑백화하지 않는다
+     (레퍼런스도 검은 HUD 안에 컬러 렌더가 들어간다).
+   ============================================================ */
+
+:root {
+  /* ── 서피스(면) ─────────────────────────────── */
+  --bg:        #08080a;   /* 페이지 배경 (거의 흑색) */
+  --bg-panel:  #0d0d10;   /* 사이드바/툴바 등 패널 */
+  --bg-card:   #111116;   /* 카드/데모 표면 */
+  --bg-code:   #0a0a0d;   /* 코드/리드아웃 배경 */
+  --bg-hover:  rgba(255,255,255,0.035);
+
+  /* ── 라인(테두리) ───────────────────────────── */
+  --border:        #24242a;   /* 기본 하이라인 */
+  --border-bright: #3a3a44;   /* 강조 테두리 */
+
+  /* ── 텍스트 ─────────────────────────────────── */
+  --text:        #e7e7e2;
+  --text-dim:    #8a8a84;
+  --text-bright: #ffffff;
+
+  /* ── UI 액센트(단색 택티컬) ─────────────────── */
+  --accent:  #d8d8d2;   /* 1차 UI 강조: 밝은 회백 (활성/제목/버튼) */
+  --accent2: #cfcfc8;   /* 2차: 회백 (섹션 제목/배지) */
+  --accent3: #cf6159;   /* 위험/함정: 뮤트 레드 */
+  --accent4: #d8ab4c;   /* 주의/신호: 앰버 (레퍼런스의 signal 색) */
+  --cyan:    #6fa9af;   /* 정보: 뮤트 시안 */
+
+  /* ── 상태 표시(pill/dot) ───────────────────── */
+  --ok:   #4ea45f;   /* ACTIVE  (초록 dot) */
+  --warn: #d8ab4c;   /* MODERATE(앰버 dot) */
+  --bad:  #cf5049;   /* INACTIVE(빨강 dot) */
+  --idle: #55555b;   /* DISABLED(회색 dot) */
+
+  /* ── 기하 ───────────────────────────────────── */
+  --radius:    4px;    /* 택티컬: 각지게 (기존 14px → 4px) */
+  --radius-lg: 6px;
+  --sidebar-w: 272px;
+  --shadow:    0 6px 26px rgba(0,0,0,0.55);
+  --hair:      1px;    /* 하이라인 두께 */
+
+  /* ── 폰트 ───────────────────────────────────── */
+  --font-mono: "JetBrains Mono","Consolas","D2Coding",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --font-ui:   "JetBrains Mono","Consolas","D2Coding",ui-monospace,monospace; /* 전술 무드: UI도 모노스페이스 */
+
+  /* ── 코너 브래킷 유틸 파라미터 ─────────────── */
+  --bkt-size:  14px;   /* 코너 길이 */
+  --bkt-thick: 1px;    /* 코너 굵기 */
+  --bkt-color: var(--border-bright);
+}
+
+/* ============================================================
+   전역 택티컬 톤
+   ============================================================ */
+body {
+  font-family: var(--font-ui);
+  letter-spacing: 0.01em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 제목류 살짝 넓은 자간 + 회백 (형광 컬러 제거) */
+h1, h2, h3, h4 {
+  letter-spacing: 0.005em;
+}
+
+/* 링크/포커스 접근성 */
+a:focus-visible, button:focus-visible, input:focus-visible {
+  outline: 1px solid var(--accent4);
+  outline-offset: 2px;
+}
+
+/* 스크롤바(웹킷) — 얇고 어둡게 */
+* { scrollbar-width: thin; scrollbar-color: var(--border-bright) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 0; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   코너 브래킷 프레임 유틸 (.hud)
+   background-image 그라디언트 8조각으로 네 모서리 ㄱ/ㄴ 브래킷을 그린다.
+   단일 요소·의사요소 안 씀 → 다른 ::before/::after와 충돌 없음.
+   ============================================================ */
+.hud,
+.demo,
+.hero,
+.grass-hero {
+  position: relative;
+}
+.hud, .demo, .hero, .grass-hero {
+  background-image:
+    /* top-left */
+    linear-gradient(var(--bkt-color), var(--bkt-color)),
+    linear-gradient(var(--bkt-color), var(--bkt-color)),
+    /* top-right */
+    linear-gradient(var(--bkt-color), var(--bkt-color)),
+    linear-gradient(var(--bkt-color), var(--bkt-color)),
+    /* bottom-left */
+    linear-gradient(var(--bkt-color), var(--bkt-color)),
+    linear-gradient(var(--bkt-color), var(--bkt-color)),
+    /* bottom-right */
+    linear-gradient(var(--bkt-color), var(--bkt-color)),
+    linear-gradient(var(--bkt-color), var(--bkt-color));
+  background-repeat: no-repeat;
+  background-size:
+    var(--bkt-size) var(--bkt-thick), var(--bkt-thick) var(--bkt-size),  /* TL: h,v */
+    var(--bkt-size) var(--bkt-thick), var(--bkt-thick) var(--bkt-size),  /* TR */
+    var(--bkt-size) var(--bkt-thick), var(--bkt-thick) var(--bkt-size),  /* BL */
+    var(--bkt-size) var(--bkt-thick), var(--bkt-thick) var(--bkt-size);  /* BR */
+  background-position:
+    left top, left top,
+    right top, right top,
+    left bottom, left bottom,
+    right bottom, right bottom;
+}
+/* .demo/.hero는 원래 배경색이 있으므로 코너색 위에 표면색이 안 덮이도록
+   배경색은 background-color 로만 유지(위 background-image 는 색과 별개). */
+
+/* ============================================================
+   상태 pill (ACTIVE / MODERATE / INACTIVE / DISABLED)
+   사용: <span class="pill ok">ACTIVE</span>
+   ============================================================ */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+  border: var(--hair) solid var(--border-bright);
+  padding: 3px 9px 3px 8px;
+  border-radius: 2px;
+  background: var(--bg-code);
+}
+.pill::before {
+  content: "";
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--idle);
+  box-shadow: 0 0 6px currentColor;
+}
+.pill.ok::before   { background: var(--ok);   }
+.pill.warn::before { background: var(--warn); }
+.pill.bad::before  { background: var(--bad);  }
+.pill.idle::before { background: var(--idle); }
+
+/* ============================================================
+   바 미터 (||||||····) — 진행/레벨 표시
+   사용: <span class="meter" style="--v:.8"></span>
+   ============================================================ */
+.meter {
+  display: inline-block;
+  width: 120px;
+  height: 12px;
+  vertical-align: middle;
+  --v: 0.5;
+  background:
+    repeating-linear-gradient(90deg,
+      var(--text) 0 2px, transparent 2px 5px);
+  -webkit-mask: linear-gradient(90deg, #000 0 calc(var(--v) * 100%), transparent 0);
+          mask: linear-gradient(90deg, #000 0 calc(var(--v) * 100%), transparent 0);
+}
+.meter.dim { background:
+    repeating-linear-gradient(90deg, var(--text-dim) 0 2px, transparent 2px 5px); }

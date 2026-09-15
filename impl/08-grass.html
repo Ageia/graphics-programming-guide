@@ -144,85 +144,262 @@
 </main>
 <script src="./highlight.js"></script>
 <script>
-/* 잔디 히어로 배너: 바람에 흔들리는 2D 실루엣 잔디 애니메이션.
-   빌드 없음 · 격리 실행 · 캔버스 크기 피드백 루프 방지(논리 크기 최초 1회만 읽음). */
+/* 잔디 히어로 배너 — 이 페이지 주제(GPU 인스턴싱 + 버텍스 바람)를 그대로 시연한다.
+   · WebGL2로 수천 포기의 잔디 blade를 단일 드로우콜 인스턴싱, 버텍스 셰이더에서 바람으로 휨.
+   · 위에 부유 꽃가루(GL_POINTS + 가산 블렌딩)로 화려함 보강.
+   · WebGL2 실패 시 Canvas 2D 실루엣으로 폴백. 탭 숨김/화면 밖이면 rAF 루프 정지(자원 절약).
+   · 격리 실행(try/catch), 캔버스 크기 피드백 루프 방지(논리 크기는 표시 크기에서만 읽음). */
 (function () {
+  var cv = document.getElementById("grassHeroCanvas");
+  if (!cv) return;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // ---------- 공용: 표시 크기 → 픽셀 버퍼(피드백 루프 없음) ----------
+  var W = 1, H = 1, dpr = 1;
+  function measure() {
+    var r = cv.getBoundingClientRect();
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.round(r.width * dpr));
+    H = Math.max(1, Math.round(r.height * dpr));
+    if (cv.width !== W) cv.width = W;
+    if (cv.height !== H) cv.height = H;
+  }
+
+  // ---------- 루프 수명 관리: 숨김/화면 밖이면 정지 ----------
+  var onScreen = true, rafId = 0, tick = null;
+  function running() { return onScreen && !document.hidden; }
+  function start() { if (tick && running() && !rafId) rafId = requestAnimationFrame(tick); }
+  function stop() { if (rafId) { cancelAnimationFrame(rafId); rafId = 0; } }
+  document.addEventListener("visibilitychange", function () { running() ? start() : stop(); });
+  if ("IntersectionObserver" in window) {
+    new IntersectionObserver(function (es) {
+      onScreen = es[0].isIntersecting;
+      running() ? start() : stop();
+    }, { threshold: 0.01 }).observe(cv);
+  }
+
   try {
-    var cv = document.getElementById("grassHeroCanvas");
-    if (!cv) return;
+    var gl = cv.getContext("webgl2", { alpha: true, antialias: true, premultipliedAlpha: false });
+    if (!gl) throw new Error("no webgl2");
+    initWebGL(gl);
+  } catch (e) {
+    try { init2D(); } catch (e2) { /* 히어로 실패해도 페이지는 계속 */ }
+  }
+
+  // ================= WebGL2: 인스턴싱 잔디 + 꽃가루 =================
+  function initWebGL(gl) {
+    function sh(type, src) {
+      var s = gl.createShader(type);
+      gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) || "shader");
+      return s;
+    }
+    function prog(vs, fs) {
+      var p = gl.createProgram();
+      gl.attachShader(p, sh(gl.VERTEX_SHADER, vs));
+      gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) || "link");
+      return p;
+    }
+
+    // --- 잔디 blade: 단일 드로우콜 인스턴싱, 버텍스에서 바람 휨 ---
+    var grassVS =
+      "#version 300 es\n" +
+      "precision highp float;\n" +
+      "layout(location=0) in float aT;\n" +      // blade 세로 파라미터 0..1
+      "layout(location=1) in float aSide;\n" +   // -1/+1 좌우
+      "layout(location=2) in vec4 aBase;\n" +    // x01, layer, hpx, wpx
+      "layout(location=3) in vec4 aWind;\n" +    // phase, speed, swayAmp(px), lean(px)
+      "layout(location=4) in vec2 aTint;\n" +    // shade, hue
+      "uniform vec2 uRes; uniform float uTime;\n" +
+      "out float vT; out float vLayer; out vec2 vTint; out float vBend;\n" +
+      "void main(){\n" +
+      "  float x01=aBase.x, layer=aBase.y, hpx=aBase.z, wpx=aBase.w;\n" +
+      "  float baseX=x01*uRes.x, baseY=uRes.y+4.0;\n" +
+      "  float gust=sin(uTime*0.5 + x01*2.3)*0.5+0.5;\n" +
+      "  float wind=sin(uTime*aWind.y + aWind.x + x01*6.2831)*aWind.z + gust*aWind.z*0.7;\n" +
+      "  float bend=aWind.w + wind;\n" +          // 끝으로 갈수록 더 휨
+      "  vBend=bend/max(1.0,hpx);\n" +
+      "  float t=aT, tb=pow(t,1.55);\n" +
+      "  float w=wpx*(1.0 - t*0.92);\n" +          // 끝으로 가늘어짐
+      "  float x=baseX + bend*tb + aSide*(w*0.5);\n" +
+      "  float y=baseY - t*hpx;\n" +
+      "  gl_Position=vec4(x/uRes.x*2.0-1.0, 1.0 - y/uRes.y*2.0, 0.0, 1.0);\n" +
+      "  vT=t; vLayer=layer; vTint=aTint;\n" +
+      "}\n";
+    var grassFS =
+      "#version 300 es\n" +
+      "precision highp float;\n" +
+      "in float vT; in float vLayer; in vec2 vTint; in float vBend;\n" +
+      "out vec4 frag;\n" +
+      "void main(){\n" +
+      "  vec3 far=vec3(0.09,0.27,0.20), near=vec3(0.30,0.74,0.31);\n" +
+      "  vec3 base=mix(far,near,vLayer);\n" +
+      "  base=mix(base, base*vec3(1.12,1.06,0.62)+vec3(0.0,0.04,0.0), vTint.y*0.4);\n" +
+      "  float grad=mix(0.5,1.28,vT);\n" +          // 밑동 어둡게, 끝 밝게
+      "  vec3 col=base*grad*vTint.x;\n" +
+      "  float tip=smoothstep(0.7,1.0,vT);\n" +
+      "  col += vec3(0.95,1.0,0.6)*tip*0.2*(0.5+0.5*abs(vBend));\n" + // 끝 하이라이트
+      "  col *= mix(0.65,1.0, smoothstep(0.0,0.28,vT));\n" +          // 밑동 AO
+      "  frag=vec4(col,1.0);\n" +
+      "}\n";
+
+    // --- 꽃가루: GL_POINTS + 가산 블렌딩 ---
+    var polVS =
+      "#version 300 es\n" +
+      "precision highp float;\n" +
+      "layout(location=0) in vec4 aP;\n" + // x01, y01, size, seed
+      "uniform vec2 uRes; uniform float uTime;\n" +
+      "out float vA;\n" +
+      "void main(){\n" +
+      "  float drift=sin(uTime*0.3 + aP.w*6.2831)*0.03;\n" +
+      "  float y=fract(aP.y + uTime*0.012*(0.5+aP.w));\n" +
+      "  vec2 clip=vec2((aP.x+drift)*2.0-1.0, 1.0-y*2.0);\n" +
+      "  gl_Position=vec4(clip,0.0,1.0);\n" +
+      "  gl_PointSize=aP.z*(uRes.y/300.0);\n" +
+      "  vA=0.35+0.65*aP.w;\n" +
+      "}\n";
+    var polFS =
+      "#version 300 es\n" +
+      "precision highp float;\n" +
+      "in float vA; out vec4 frag;\n" +
+      "void main(){\n" +
+      "  vec2 d=gl_PointCoord-0.5; float a=smoothstep(0.5,0.0,length(d));\n" +
+      "  frag=vec4(vec3(1.0,0.95,0.7)*a*vA, a);\n" +
+      "}\n";
+
+    var gp = prog(grassVS, grassFS), pp = prog(polVS, polFS);
+    var uG = { res: gl.getUniformLocation(gp, "uRes"), time: gl.getUniformLocation(gp, "uTime") };
+    var uP = { res: gl.getUniformLocation(pp, "uRes"), time: gl.getUniformLocation(pp, "uTime") };
+
+    // blade 기본 형상(삼각형 스트립): (SEG+1)*2 정점
+    var SEG = 7, baseArr = [];
+    for (var s = 0; s <= SEG; s++) { var t = s / SEG; baseArr.push(t, -1, t, 1); }
+    var baseVertCount = (SEG + 1) * 2;
+
+    // 인스턴스 데이터: 원경(짧고 어두움) → 근경(길고 선명) 여러 층
+    var BLADES = 1600, inst = new Float32Array(BLADES * 10), tmp = [];
+    for (var i = 0; i < BLADES; i++) {
+      var li = Math.pow(Math.random(), 0.85);
+      tmp.push([
+        rand(-0.02, 1.02),                 // x01
+        li,                                // layer
+        (38 + 172 * li) * rand(0.82, 1.15) * dpr, // hpx
+        (3.0 + 3.6 * li) * dpr,            // wpx
+        rand(0, Math.PI * 2),              // phase
+        rand(0.6, 1.4),                    // speed
+        (7 + 22 * li) * dpr,               // swayAmp(px)
+        rand(-16, 16) * dpr,               // lean(px)
+        rand(0.8, 1.06),                   // shade
+        Math.random()                      // hue
+      ]);
+    }
+    tmp.sort(function (a, b) { return a[1] - b[1]; }); // 원경 먼저 그려 근경이 위로
+    for (var j = 0; j < BLADES; j++) inst.set(tmp[j], j * 10);
+
+    // 꽃가루
+    var PN = 80, pol = new Float32Array(PN * 4);
+    for (var k = 0; k < PN; k++) {
+      pol.set([Math.random(), Math.random(), rand(1.5, 4.5) * dpr, Math.random()], k * 4);
+    }
+
+    // VAO(잔디)
+    var vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    var baseBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, baseBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(baseArr), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 8, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 8, 4);
+    var instBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, inst, gl.STATIC_DRAW);
+    var st = 40;
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, st, 0);  gl.vertexAttribDivisor(2, 1);
+    gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 4, gl.FLOAT, false, st, 16); gl.vertexAttribDivisor(3, 1);
+    gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 2, gl.FLOAT, false, st, 32); gl.vertexAttribDivisor(4, 1);
+    gl.bindVertexArray(null);
+
+    // VAO(꽃가루)
+    var pvao = gl.createVertexArray(); gl.bindVertexArray(pvao);
+    var polBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, polBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, pol, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+
+    function syncSize() { measure(); gl.viewport(0, 0, W, H); }
+    window.addEventListener("resize", syncSize);
+    syncSize();
+
+    var t0 = null;
+    tick = function (ts) {
+      rafId = 0;
+      if (!running()) return;
+      if (t0 === null) t0 = ts;
+      var time = (ts - t0) / 1000;
+      if (cv.width !== W || cv.height !== H) syncSize();
+
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      gl.disable(gl.BLEND);
+      gl.useProgram(gp);
+      gl.uniform2f(uG.res, W, H); gl.uniform1f(uG.time, time);
+      gl.bindVertexArray(vao);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, baseVertCount, BLADES);
+
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.useProgram(pp);
+      gl.uniform2f(uP.res, W, H); gl.uniform1f(uP.time, time);
+      gl.bindVertexArray(pvao);
+      gl.drawArrays(gl.POINTS, 0, PN);
+      gl.bindVertexArray(null);
+
+      start();
+    };
+    start();
+  }
+
+  // ================= 폴백: Canvas 2D 실루엣 =================
+  function init2D() {
     var ctx = cv.getContext("2d");
     if (!ctx) return;
-
-    // 논리(CSS 픽셀) 크기는 실제 표시 크기에서 얻는다. height 속성은 재대입하지 않는다.
-    var W = 0, H = 0, dpr = 1;
+    var cw = 1, ch = 1;
     function resize() {
-      var r = cv.getBoundingClientRect();
-      W = Math.max(1, Math.round(r.width));
-      H = Math.max(1, Math.round(r.height));
-      dpr = Math.min(2, window.devicePixelRatio || 1);
-      cv.width = Math.round(W * dpr);   // 실제 픽셀 버퍼
-      cv.height = Math.round(H * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // 이후 좌표는 CSS 픽셀 기준
+      measure(); cw = W / dpr; ch = H / dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
     window.addEventListener("resize", resize);
     resize();
 
-    // 잔디 포기 생성: 여러 층(원경=어둡고 짧음, 근경=밝고 길음)
-    function rand(a, b) { return a + Math.random() * (b - a); }
     var layers = [
-      { count: 70, hMin: 40, hMax: 90,  color: "rgba(20,70,45,",  sway: 10, w: 3 },
+      { count: 70, hMin: 40, hMax: 90, color: "rgba(20,70,45,", sway: 10, w: 3 },
       { count: 90, hMin: 70, hMax: 140, color: "rgba(38,110,58,", sway: 16, w: 4 },
       { count: 110, hMin: 110, hMax: 210, color: "rgba(70,170,86,", sway: 26, w: 5 }
     ];
     var blades = [];
     layers.forEach(function (L, li) {
       for (var i = 0; i < L.count; i++) {
-        blades.push({
-          x: rand(-20, 1000) / 1000,      // 0~1 정규화 x (resize 대응)
-          h: rand(L.hMin, L.hMax),
-          sway: L.sway,
-          phase: rand(0, Math.PI * 2),
-          speed: rand(0.6, 1.3),
-          w: L.w,
-          color: L.color,
-          depth: li,
-          lean: rand(-0.25, 0.25),
-          shade: rand(0.78, 1.0)
-        });
+        blades.push({ x: rand(-0.02, 1.02), h: rand(L.hMin, L.hMax), sway: L.sway,
+          phase: rand(0, Math.PI * 2), speed: rand(0.6, 1.3), w: L.w, color: L.color,
+          depth: li, lean: rand(-0.25, 0.25), shade: rand(0.78, 1.0) });
       }
     });
     blades.sort(function (a, b) { return a.depth - b.depth; });
 
     var t0 = null;
-    function draw(ts) {
+    tick = function (ts) {
+      rafId = 0;
+      if (!running()) return;
       if (t0 === null) t0 = ts;
       var t = (ts - t0) / 1000;
-      ctx.clearRect(0, 0, W, H);
-
-      // 은은한 원경 안개
-      var fog = ctx.createLinearGradient(0, H * 0.3, 0, H);
-      fog.addColorStop(0, "rgba(120,190,150,0.05)");
-      fog.addColorStop(1, "rgba(120,190,150,0)");
-      ctx.fillStyle = fog;
-      ctx.fillRect(0, 0, W, H);
-
-      // 전역 돌풍(느린 파동)
+      ctx.clearRect(0, 0, cw, ch);
       var gust = Math.sin(t * 0.6) * 0.5 + 0.5;
-
       for (var i = 0; i < blades.length; i++) {
-        var b = blades[i];
-        var bx = b.x * W;
-        var baseY = H + 6;
-        // 흔들림: 개별 위상 + 전역 돌풍
+        var b = blades[i], bx = b.x * cw, baseY = ch + 6;
         var wind = Math.sin(t * b.speed + b.phase) * b.sway + b.lean * b.h;
         wind += gust * b.sway * 0.6 * (b.depth + 1) / 3;
-
-        var tipX = bx + wind;
-        var tipY = baseY - b.h;
-        var ctrlX = bx + wind * 0.45;
-        var ctrlY = baseY - b.h * 0.55;
-
-        // 잎: 밑동에서 끝으로 가늘어지는 곡선(채워진 blade)
+        var tipX = bx + wind, tipY = baseY - b.h;
+        var ctrlX = bx + wind * 0.45, ctrlY = baseY - b.h * 0.55;
         ctx.beginPath();
         ctx.moveTo(bx - b.w * 0.5, baseY);
         ctx.quadraticCurveTo(ctrlX - b.w * 0.2, ctrlY, tipX, tipY);
@@ -232,10 +409,10 @@
         ctx.fillStyle = b.color + a.toFixed(3) + ")";
         ctx.fill();
       }
-      rafId = window.requestAnimationFrame(draw);
-    }
-    var rafId = window.requestAnimationFrame(draw);
-  } catch (e) { /* 히어로 실패해도 페이지는 계속 */ }
+      start();
+    };
+    start();
+  }
 })();
 </script>
 </body>

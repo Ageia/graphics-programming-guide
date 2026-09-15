@@ -76,11 +76,21 @@
    코드·표·카드그리드·데모·히어로는 전폭을 쓴다. impl.css는 impl 페이지에서만
    로드되므로 개념 트랙에는 영향 없음. */
 .content > p,
-.content > ul,
-.content > ol,
 .content > .callout,
 .content > .lead {
   max-width: 82ch;
+}
+/* 설명 리스트는 폭 기반 동적 다열(가로 폭에 맞춰 열 수 자동). 단계 리스트는 제외. */
+.content > ul,
+.content > ol:not(.steps) {
+  columns: 340px;
+  column-gap: 44px;
+}
+.content > ul > li,
+.content > ol:not(.steps) > li {
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  margin-bottom: 8px;
 }
 .content > .code,
 .content > table.impl,

@@ -95,20 +95,49 @@ body {
    컨테이너는 넓게 쓰되, 본문 글줄은 읽기 좋은 폭으로 제한하고
    데모·표·카드그리드는 컨테이너 전폭을 쓴다(세로로만 길어지지 않게). */
 .layout main.content > section > p,
-.layout main.content > section > ul,
-.layout main.content > section > ol,
-.layout main.content > section > .tip,
-.layout main.content > section > h3 {
+.layout main.content > section > .tip {
   max-width: 74ch;
+}
+/* 설명 리스트는 세로로만 쌓지 말고 가로 다열로 펼친다(줄넘김 낭비 방지).
+   각 항목은 컬럼 사이에서 쪼개지지 않게 break-inside 고정. */
+.layout main.content > section > ul,
+.layout main.content > section > ol {
+  columns: 320px;          /* 폭 기반: 한 열 최소 320px, 들어가는 만큼 자동 열 */
+  column-gap: 44px;
+  max-width: none;
+}
+.layout main.content > section > ul > li,
+.layout main.content > section > ol > li {
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  margin-bottom: 10px;
 }
 .layout .demo,
 .layout table,
 .layout .grid2,
-.layout .grid3 { width: 100%; max-width: none; }
+.layout .grid3,
+.layout .feature-grid { width: 100%; max-width: none; }
 
-/* 다열 유틸: 카드/짧은 블록을 가로로 배치 */
-.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-@media (max-width: 960px) { .grid3 { grid-template-columns: 1fr; } }
+/* 다열 유틸: 폭 기반 동적 열(미디어쿼리 없이 가로 폭에 맞춰 열 수 자동 조절) */
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+
+/* 설명 항목 카드 그리드 — 세로 리스트 대신 가로로 채운다 */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 14px;
+  margin: 22px 0;
+}
+.feature {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-size: 14px;
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+.feature .ft-name { display: block; color: var(--accent2); font-weight: 700; margin-bottom: 5px; font-size: 15px; }
 
 /* 본문 + 그림/데모 2단 (넓은 화면에서 나란히) */
 .split { display: grid; grid-template-columns: 1fr; gap: 28px; align-items: start; }
@@ -252,8 +281,7 @@ button.ghost { background: transparent; color: var(--text-dim); border: 1px soli
 
 .hint { font-size: 13px; color: var(--text-dim); font-style: italic; }
 
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-@media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
 
 /* ---------- 반응형 ---------- */
 .menu-toggle {

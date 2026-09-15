@@ -944,24 +944,30 @@ fn main(
 
     <section id="mipmap">
       <h2>밉맵 · 텍스처 필터링</h2>
-      <p class="lead">멀리 있는 텍스처가 지글거리는 이유와 해법. 미리 축소해 둔 이미지 사다리.</p>
+      <div class="split">
+        <div class="col-text">
+          <p class="lead">멀리 있는 텍스처가 지글거리는 이유와 해법. 미리 축소해 둔 이미지 사다리.</p>
 
-      <p>텍스처를 입힌 바닥이 멀어지면, 화면 픽셀 하나가 텍스처의 <strong>수많은 텍셀</strong>을 덮게 됩니다.
-        이때 한 점만 콕 집어 읽으면(점 샘플링) 프레임마다 어떤 텍셀이 뽑힐지 튀어서 <strong>지글지글(반짝임)</strong>
-        거려요 — 텍스처의 앨리어싱이죠.</p>
-      <p><strong>밉맵(mipmap)</strong>은 텍스처를 미리 절반씩 줄인 이미지들(1/2, 1/4, 1/8…)로 만들어 두고,
-        거리(축소 정도)에 맞는 크기를 골라 씁니다. 여기에 필터링을 더해요:</p>
-      <ul>
-        <li><strong>이중선형(Bilinear)</strong>: 가까운 4텍셀을 섞어 매끈하게</li>
-        <li><strong>삼중선형(Trilinear)</strong>: 인접한 두 밉맵 레벨 사이도 섞어 경계 없이</li>
-        <li><strong>이방성(Anisotropic)</strong>: 비스듬히 볼 때 뭉개짐을 줄여 바닥·벽이 선명</li>
-      </ul>
+          <p>텍스처를 입힌 바닥이 멀어지면, 화면 픽셀 하나가 텍스처의 <strong>수많은 텍셀</strong>을 덮게 됩니다.
+            이때 한 점만 콕 집어 읽으면(점 샘플링) 프레임마다 어떤 텍셀이 뽑힐지 튀어서 <strong>지글지글(반짝임)</strong>
+            거려요 — 텍스처의 앨리어싱이죠.</p>
+          <p><strong>밉맵(mipmap)</strong>은 텍스처를 미리 절반씩 줄인 이미지들(1/2, 1/4, 1/8…)로 만들어 두고,
+            거리(축소 정도)에 맞는 크기를 골라 씁니다. 여기에 필터링을 더해요:</p>
+          <ul>
+            <li><strong>이중선형(Bilinear)</strong>: 가까운 4텍셀을 섞어 매끈하게</li>
+            <li><strong>삼중선형(Trilinear)</strong>: 인접한 두 밉맵 레벨 사이도 섞어 경계 없이</li>
+            <li><strong>이방성(Anisotropic)</strong>: 비스듬히 볼 때 뭉개짐을 줄여 바닥·벽이 선명</li>
+          </ul>
+        </div>
 
-      <div class="demo">
-        <div class="demo-title">지글거리는 바닥 vs 밉맵 + 필터링</div>
-        <canvas id="c-mipmap" height="360"></canvas>
-        <div class="controls" id="ctl-mipmap"></div>
-        <p class="hint">밉맵/필터를 껐다 켜보세요. 끄면 먼 곳이 지글거리고, 켜면 부드럽게 정리됩니다. 밉맵 사다리도 함께 보여줘요.</p>
+        <div class="figure">
+          <div class="demo">
+            <div class="demo-title">지글거리는 바닥 vs 밉맵 + 필터링</div>
+            <canvas id="c-mipmap" height="360"></canvas>
+            <div class="controls" id="ctl-mipmap"></div>
+            <p class="hint">밉맵/필터를 껐다 켜보세요. 끄면 먼 곳이 지글거리고, 켜면 부드럽게 정리됩니다. 밉맵 사다리도 함께 보여줘요.</p>
+          </div>
+        </div>
       </div>
     </section>
 

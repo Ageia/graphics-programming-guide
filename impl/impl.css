@@ -3,8 +3,20 @@
    ../css/style.css 위에 얹어 코드 중심 레이아웃을 보강한다.
    ============================================================ */
 
+/* 각 페이지 좌상단 뒤로가기 (표준: 모든 impl 페이지 공통) */
+.back-link {
+  display: inline-block;
+  margin: 0 0 12px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+.back-link:hover { color: var(--accent4); }
+
 /* 부모 페이지에 iframe으로 임베드된 상태: 자체 페이지 크롬을 숨겨 병합돼 보이게 */
 html.embedded body { background: transparent; }
+html.embedded .back-link,
 html.embedded .impl-topbar,
 html.embedded .page-nav { display: none; }
 html.embedded main.content { padding: 4px 0 24px; max-width: none; }

@@ -44,6 +44,20 @@
 
     // 방금 보이게 된 섹션의 데모를 (아직 init 안 됐다면) 지금 초기화한다.
     if (window.GFX && GFX.runPendingDemos) GFX.runPendingDemos();
+
+    // 활성 섹션에 임베드된 iframe이 있으면 reflow 신호를 보낸다.
+    // (숨겨진 동안 폭 0으로 그려진 임베드 데모가 새로고침 없이 다시 그려지도록.)
+    var active = sections.filter(function (s) { return s.id === id; })[0];
+    if (active) {
+      var frames = active.querySelectorAll("iframe");
+      var poke = function () {
+        for (var i = 0; i < frames.length; i++) {
+          try { frames[i].contentWindow.postMessage({ t: "reflow" }, "*"); } catch (e) {}
+        }
+      };
+      poke();
+      setTimeout(poke, 60);   // 레이아웃 반영 후 한 번 더
+    }
   }
 
   // 해시 → 섹션

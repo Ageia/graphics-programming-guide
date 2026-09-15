@@ -238,10 +238,20 @@
     let gr = makeGrid(S.w, S.h, CELL);
 
     // 드래그 핸들 (화면 px). 초기 위치는 격자 안쪽으로.
+    // 주의: 이 섹션이 숨겨진(display:none) 상태로 init되면 캔버스 폭이 0이라
+    // 격자가 cols=0으로 계산된다. 그때 핸들을 배치하면 좌측으로 쏠리므로,
+    // 유효한 폭이 생긴 첫 draw에서 한 번만 배치한다(사용자 드래그는 보존).
     const pts = [
-      { x: gr.ox + gr.cell * 3.5, y: gr.oy + gr.cell * 3.5, color: G.COL.green, label: "A" },
-      { x: gr.ox + gr.cell * (gr.cols - 4) + gr.cell * 0.5, y: gr.oy + gr.cell * (gr.rows - 4) + gr.cell * 0.5, color: G.COL.red, label: "B" },
+      { x: 0, y: 0, color: G.COL.green, label: "A" },
+      { x: 0, y: 0, color: G.COL.red, label: "B" },
     ];
+    let placed = false;
+    function placeHandles() {
+      pts[0].x = gr.ox + gr.cell * 3.5;
+      pts[0].y = gr.oy + gr.cell * 3.5;
+      pts[1].x = gr.ox + gr.cell * (gr.cols - 4) + gr.cell * 0.5;
+      pts[1].y = gr.oy + gr.cell * (gr.rows - 4) + gr.cell * 0.5;
+    }
     const drag = G.draggable(S.canvas, pts, () => draw(), 10);
 
     // 정수 격자 좌표를 켜는 Bresenham
@@ -263,6 +273,7 @@
 
     function draw() {
       const { ctx, w, h } = S;
+      if (!placed && gr.cols > 4 && gr.rows > 4) { placeHandles(); placed = true; }
       G.clear(ctx, w, h);
       drawGridLines(ctx, gr);
 
@@ -304,11 +315,22 @@
     const CELL = 18;
     let gr = makeGrid(S.w, S.h, CELL);
 
+    // 숨겨진 섹션은 init 시 폭이 0이라 격자가 cols=0이 된다.
+    // 유효한 폭이 생긴 첫 draw에서 한 번만 꼭짓점을 배치한다(드래그 보존).
     const pts = [
-      { x: gr.ox + gr.cell * (gr.cols * 0.5), y: gr.oy + gr.cell * 2, color: G.COL.green, label: "1" },
-      { x: gr.ox + gr.cell * 3, y: gr.oy + gr.cell * (gr.rows - 3), color: G.COL.yellow, label: "2" },
-      { x: gr.ox + gr.cell * (gr.cols - 3), y: gr.oy + gr.cell * (gr.rows - 4), color: G.COL.purple, label: "3" },
+      { x: 0, y: 0, color: G.COL.green, label: "1" },
+      { x: 0, y: 0, color: G.COL.yellow, label: "2" },
+      { x: 0, y: 0, color: G.COL.purple, label: "3" },
     ];
+    let placed = false;
+    function placeHandles() {
+      pts[0].x = gr.ox + gr.cell * (gr.cols * 0.5);
+      pts[0].y = gr.oy + gr.cell * 2;
+      pts[1].x = gr.ox + gr.cell * 3;
+      pts[1].y = gr.oy + gr.cell * (gr.rows - 3);
+      pts[2].x = gr.ox + gr.cell * (gr.cols - 3);
+      pts[2].y = gr.oy + gr.cell * (gr.rows - 4);
+    }
     const drag = G.draggable(S.canvas, pts, () => draw(), 10);
 
     // 외적 부호로 한 변 기준 어느 쪽인지 판정
@@ -326,6 +348,7 @@
 
     function draw() {
       const { ctx, w, h } = S;
+      if (!placed && gr.cols > 4 && gr.rows > 4) { placeHandles(); placed = true; }
       G.clear(ctx, w, h);
       drawGridLines(ctx, gr);
 

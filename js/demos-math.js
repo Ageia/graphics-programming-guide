@@ -22,15 +22,22 @@
     const readout = document.getElementById("r-vector");
     let cs = G.centered(canvas._cssW, canvas._cssH, 40);
 
-    // 드래그 핸들(화면 픽셀). 초깃값을 수학좌표 기준으로 배치.
+    // 드래그 핸들(화면 픽셀). 숨겨진 섹션은 init 시 폭이 0이라 좌표계가
+    // 어긋나므로, 유효한 폭이 생긴 첫 draw에서 한 번만 배치한다(드래그 보존).
     const pts = [
-      { x: cs.sx(2), y: cs.sy(1), color: COL.accent, label: "A" },
-      { x: cs.sx(1), y: cs.sy(2), color: COL.green, label: "B" },
+      { x: 0, y: 0, color: COL.accent, label: "A" },
+      { x: 0, y: 0, color: COL.green, label: "B" },
     ];
+    let placed = false;
+    function placeHandles() {
+      pts[0].x = cs.sx(2); pts[0].y = cs.sy(1);
+      pts[1].x = cs.sx(1); pts[1].y = cs.sy(2);
+    }
     const drag = G.draggable(canvas, pts, () => draw());
 
     function draw() {
       cs = G.centered(canvas._cssW, canvas._cssH, 40);
+      if (!placed && canvas._cssW > 0) { placeHandles(); placed = true; }
       const w = canvas._cssW, h = canvas._cssH;
       G.clear(ctx, w, h);
       cs.drawGrid(ctx);
@@ -79,11 +86,15 @@
     const readout = document.getElementById("r-normalize");
     let cs = G.centered(canvas._cssW, canvas._cssH, 60);
 
-    const pts = [{ x: cs.sx(2.5), y: cs.sy(1.5), color: COL.accent, label: "v" }];
+    // 숨겨진 섹션 대비: 유효 폭이 생긴 첫 draw에서 한 번만 배치.
+    const pts = [{ x: 0, y: 0, color: COL.accent, label: "v" }];
+    let placed = false;
+    function placeHandles() { pts[0].x = cs.sx(2.5); pts[0].y = cs.sy(1.5); }
     const drag = G.draggable(canvas, pts, () => draw());
 
     function draw() {
       cs = G.centered(canvas._cssW, canvas._cssH, 60);
+      if (!placed && canvas._cssW > 0) { placeHandles(); placed = true; }
       const w = canvas._cssW, h = canvas._cssH;
       G.clear(ctx, w, h);
       cs.drawGrid(ctx);
@@ -293,14 +304,21 @@
     const readout = document.getElementById("r-dot");
     let cs = G.centered(canvas._cssW, canvas._cssH, 45);
 
+    // 숨겨진 섹션 대비: 유효 폭이 생긴 첫 draw에서 한 번만 배치.
     const pts = [
-      { x: cs.sx(2.5), y: cs.sy(0.5), color: COL.accent, label: "A" },
-      { x: cs.sx(1), y: cs.sy(2.2), color: COL.green, label: "B" },
+      { x: 0, y: 0, color: COL.accent, label: "A" },
+      { x: 0, y: 0, color: COL.green, label: "B" },
     ];
+    let placed = false;
+    function placeHandles() {
+      pts[0].x = cs.sx(2.5); pts[0].y = cs.sy(0.5);
+      pts[1].x = cs.sx(1); pts[1].y = cs.sy(2.2);
+    }
     const drag = G.draggable(canvas, pts, () => draw());
 
     function draw() {
       cs = G.centered(canvas._cssW, canvas._cssH, 45);
+      if (!placed && canvas._cssW > 0) { placeHandles(); placed = true; }
       const w = canvas._cssW, h = canvas._cssH;
       G.clear(ctx, w, h);
       cs.drawGrid(ctx);
@@ -364,14 +382,21 @@
     const readout = document.getElementById("r-cross");
     let cs = G.centered(canvas._cssW, canvas._cssH, 45);
 
+    // 숨겨진 섹션 대비: 유효 폭이 생긴 첫 draw에서 한 번만 배치.
     const pts = [
-      { x: cs.sx(2.5), y: cs.sy(0.3), color: COL.accent, label: "A" },
-      { x: cs.sx(0.8), y: cs.sy(2), color: COL.green, label: "B" },
+      { x: 0, y: 0, color: COL.accent, label: "A" },
+      { x: 0, y: 0, color: COL.green, label: "B" },
     ];
+    let placed = false;
+    function placeHandles() {
+      pts[0].x = cs.sx(2.5); pts[0].y = cs.sy(0.3);
+      pts[1].x = cs.sx(0.8); pts[1].y = cs.sy(2);
+    }
     const drag = G.draggable(canvas, pts, () => draw());
 
     function draw() {
       cs = G.centered(canvas._cssW, canvas._cssH, 45);
+      if (!placed && canvas._cssW > 0) { placeHandles(); placed = true; }
       const w = canvas._cssW, h = canvas._cssH;
       G.clear(ctx, w, h);
       cs.drawGrid(ctx);
@@ -526,14 +551,23 @@
     const { canvas, ctx } = G.setup("c-inside");
     const readout = document.getElementById("r-inside");
 
-    // 화면 픽셀 좌표 그대로 사용 (중심 좌표계 불필요)
-    const W = canvas._cssW, H = canvas._cssH;
+    // 화면 픽셀 좌표 그대로 사용 (중심 좌표계 불필요).
+    // 숨겨진 섹션은 init 시 폭이 0이라 핸들이 좌상단에 쏠린다.
+    // 유효한 폭이 생긴 첫 draw에서 한 번만 배치한다(드래그 보존).
     const pts = [
-      { x: W * 0.3, y: H * 0.25, color: COL.accent, label: "P1" },
-      { x: W * 0.7, y: H * 0.35, color: COL.accent, label: "P2" },
-      { x: W * 0.45, y: H * 0.75, color: COL.accent, label: "P3" },
-      { x: W * 0.48, y: H * 0.45, color: COL.red, label: "T" },
+      { x: 0, y: 0, color: COL.accent, label: "P1" },
+      { x: 0, y: 0, color: COL.accent, label: "P2" },
+      { x: 0, y: 0, color: COL.accent, label: "P3" },
+      { x: 0, y: 0, color: COL.red, label: "T" },
     ];
+    let placed = false;
+    function placeHandles() {
+      const W = canvas._cssW, H = canvas._cssH;
+      pts[0].x = W * 0.3; pts[0].y = H * 0.25;
+      pts[1].x = W * 0.7; pts[1].y = H * 0.35;
+      pts[2].x = W * 0.45; pts[2].y = H * 0.75;
+      pts[3].x = W * 0.48; pts[3].y = H * 0.45;
+    }
     const drag = G.draggable(canvas, pts, () => draw());
 
     // 세 점 부호 (화면좌표는 y가 아래로 향함 → 부호 규약이 반대지만 일관성만 있으면 됨)
@@ -543,6 +577,7 @@
 
     function draw() {
       const w = canvas._cssW, h = canvas._cssH;
+      if (!placed && w > 0) { placeHandles(); placed = true; }
       G.clear(ctx, w, h);
       G.grid(ctx, w, h, 40, COL.grid);
 

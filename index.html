@@ -63,7 +63,7 @@
       <a href="#pbr">PBR (물리 기반 렌더링)</a>
       <a href="#hdr">HDR · 톤 매핑</a>
       <a href="#shadowmap">Shadow Mapping</a>
-      <a href="impl/06-paths.html">렌더링 경로 비교 ⚡</a>
+      <a href="#paths">렌더링 경로 비교 ⚡</a>
       <a href="#deferred">Deferred Rendering</a>
       <a href="#screenspace">Screen-Space Effects</a>
       <a href="#raytracing">Ray Tracing</a>
@@ -776,6 +776,15 @@ fn main(
         <canvas id="c-shadowmap" height="360"></canvas>
         <div class="controls" id="ctl-shadowmap"></div>
         <p class="hint">빛과 가림막을 움직여보세요. 빛에서 각 방향으로 쏜 광선이 가림막에 막히면 그 뒤가 그림자가 됩니다.</p>
+      </div>
+    </section>
+
+    <section id="paths">
+      <h2>렌더링 경로 비교 — 사례연구 ⚡</h2>
+      <p class="lead">같은 장면을 그리는 여섯 경로(Forward·Forward+·Clustered·Deferred·Tiled·Visibility)를
+        네 잣대로 비교하고 C++/HLSL로 파고드는 사례연구입니다. 아래 오른쪽 화면에서 바로 볼 수 있어요.</p>
+      <div class="embed-frame">
+        <iframe src="impl/06-paths.html" title="렌더링 경로 사례연구 (구현)" loading="lazy"></iframe>
       </div>
     </section>
 

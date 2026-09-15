@@ -232,6 +232,8 @@
 <!-- 개념 트랙에서 병합한 인터랙티브 데모: GFX(lib.js) + demos-paths.js -->
 <script src="../js/lib.js"></script>
 <script src="../js/demos-paths.js"></script>
+<!-- impl 페이지엔 main.js(runPendingDemos)가 없으므로 지연 등록된 데모를 직접 초기화 -->
+<script>if (window.GFX && GFX.runPendingDemos) GFX.runPendingDemos();</script>
 <script>
 /* 렌더링 경로 히어로 배너: 같은 씬을 여러 경로로 그리는 느낌.
    화면을 타일 → 클러스터 → G-buffer 처럼 주기적으로 분할하는 애니메이션.

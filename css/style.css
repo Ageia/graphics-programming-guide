@@ -85,9 +85,36 @@ body {
 
 .content {
   flex: 1;
-  max-width: 860px;
+  max-width: 1200px;
+  width: 100%;
   margin: 0 auto;
-  padding: 48px 40px 120px;
+  padding: 48px 56px 120px;
+}
+
+/* ---------- 가로 여백 활용 레이아웃 ----------
+   컨테이너는 넓게 쓰되, 본문 글줄은 읽기 좋은 폭으로 제한하고
+   데모·표·카드그리드는 컨테이너 전폭을 쓴다(세로로만 길어지지 않게). */
+.layout main.content > section > p,
+.layout main.content > section > ul,
+.layout main.content > section > ol,
+.layout main.content > section > .tip,
+.layout main.content > section > h3 {
+  max-width: 74ch;
+}
+.layout .demo,
+.layout table,
+.layout .grid2,
+.layout .grid3 { width: 100%; max-width: none; }
+
+/* 다열 유틸: 카드/짧은 블록을 가로로 배치 */
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+@media (max-width: 960px) { .grid3 { grid-template-columns: 1fr; } }
+
+/* 본문 + 그림/데모 2단 (넓은 화면에서 나란히) */
+.split { display: grid; grid-template-columns: 1fr; gap: 28px; align-items: start; }
+@media (min-width: 1040px) {
+  .split { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); }
+  .split > .figure { position: sticky; top: 24px; }
 }
 
 /* ---------- 타이포 ---------- */

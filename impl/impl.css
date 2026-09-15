@@ -71,6 +71,24 @@
   .grass-hero .gh-caption { left: 20px; bottom: 18px; }
 }
 
+/* ---------- 가로 여백 활용 (구현 트랙 전용) ----------
+   컨테이너(1200px)를 넓게 쓰되 본문 글줄은 읽기 좋은 폭으로 제한하고,
+   코드·표·카드그리드·데모·히어로는 전폭을 쓴다. impl.css는 impl 페이지에서만
+   로드되므로 개념 트랙에는 영향 없음. */
+.content > p,
+.content > ul,
+.content > ol,
+.content > .callout,
+.content > .lead {
+  max-width: 82ch;
+}
+.content > .code,
+.content > table.impl,
+.content > .hub-grid,
+.content > .gdemo,
+.content > .grass-hero,
+.content > .page-nav { max-width: none; }
+
 /* 구현 페이지 상단 배지 */
 .impl-badge {
   display: inline-block;

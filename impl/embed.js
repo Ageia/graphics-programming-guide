@@ -8,6 +8,19 @@
   var el = document.documentElement;
   el.classList.add("embedded");
 
+  // 임베드 안 뒤로가기 표시 제어 (file://은 referrer가 비어 판별 불가 →
+  // 부모가 "지금 로드된 게 랜딩이냐"를 판정해 show/hideBack 을 알려준다):
+  //  - 탭 랜딩(부모가 연 첫 페이지)에선 숨김(사이드바가 내비 역할).
+  //  - 임베드 안에서 다른 impl 페이지로 이동해 왔으면 표시 → history.back()으로 복귀.
+  var setBack = function (show) {
+    var back = document.querySelector(".back-link");
+    if (back) back.style.display = show ? "" : "none";
+  };
+  document.addEventListener("DOMContentLoaded", function () {
+    setBack(false); // 기본 숨김(부모 응답 전)
+    parent.postMessage({ t: "embedLoaded", page: location.pathname.split("/").pop() }, "*");
+  });
+
   function postHeight() {
     var h = Math.max(
       document.documentElement.scrollHeight,
@@ -31,12 +44,14 @@
   // 부모가 섹션을 보이게 한 뒤 보내는 reflow 신호 → 내부 데모를 다시 그린다.
   // (숨겨진 동안 폭 0으로 그려진 캔버스 데모가 갱신 안 되던 문제 해결.)
   window.addEventListener("message", function (e) {
-    if (e.data && e.data.t === "reflow") {
+    if (!e.data) return;
+    if (e.data.t === "reflow") {
       // 숨겨진 채 로드되면 offsetParent가 null이라 데모 init이 건너뛰어졌을 수 있다.
       // 보이게 된 지금 다시 초기화(runPendingDemos)하고 resize로 다시 그린다.
       if (window.GFX && GFX.runPendingDemos) GFX.runPendingDemos();
       window.dispatchEvent(new Event("resize"));
       postHeight();
-    }
+    } else if (e.data.t === "showBack") { setBack(true); }
+    else if (e.data.t === "hideBack") { setBack(false); }
   });
 })();

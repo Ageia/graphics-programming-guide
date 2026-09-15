@@ -1052,12 +1052,20 @@ fn main(
 <script src="js/demos-adv4.js"></script>
 <script src="js/main.js"></script>
 <script>
-/* 임베드된 구현 사례연구(#paths iframe)가 postMessage로 알려온 내용 높이에 맞춰
-   iframe 높이를 조절 → 내부 스크롤 없이 부모 페이지와 한 화면처럼 병합돼 보인다. */
+/* 임베드된 구현 사례연구(#paths iframe) 제어:
+   - embedHeight: 내용 높이에 맞춰 iframe 높이 조절 → 내부 스크롤 없이 병합돼 보임.
+   - embedLoaded: 지금 로드된 게 랜딩(iframe 초기 src)이면 뒤로가기 숨김, 임베드 안에서
+     다른 세부 페이지로 이동해 온 것이면 뒤로가기 표시(hideBack/showBack 응답). */
 window.addEventListener("message", function (e) {
-  if (!e.data || e.data.t !== "embedHeight") return;
+  if (!e.data) return;
   var f = document.getElementById("paths-embed");
-  if (f && e.data.h > 0) f.style.height = e.data.h + "px";
+  if (e.data.t === "embedHeight") {
+    if (f && e.data.h > 0) f.style.height = e.data.h + "px";
+  } else if (e.data.t === "embedLoaded") {
+    var landing = f ? (f.getAttribute("src") || "").split("/").pop() : "";
+    var isLanding = e.data.page === landing;
+    if (e.source) e.source.postMessage({ t: isLanding ? "hideBack" : "showBack" }, "*");
+  }
 });
 </script>
 </body>

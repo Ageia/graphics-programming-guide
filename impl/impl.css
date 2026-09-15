@@ -16,8 +16,8 @@
 
 /* 부모 페이지에 iframe으로 임베드된 상태: 자체 페이지 크롬을 숨겨 병합돼 보이게 */
 html.embedded body { background: transparent; }
-html.embedded .back-link,
 html.embedded .page-nav { display: none; }
+/* 임베드 뒤로가기는 embed.js가 상황에 따라 표시/숨김을 제어(랜딩=숨김, 하위이동=표시) */
 html.embedded main.content { padding: 4px 0 24px; max-width: none; }
 
 /* 8장 잔디 히어로 배너 (타이틀 이미지) */

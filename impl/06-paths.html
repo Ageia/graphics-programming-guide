@@ -59,6 +59,33 @@
   </div>
 
   <!-- =========================================================
+       개념 먼저 잡기 (개념 트랙 #paths 병합) — 직관 + 인터랙티브 데모
+       ========================================================= -->
+  <h2 style="margin-top:40px;">먼저 감 잡기 — 다섯 경로 한눈에</h2>
+  <p>
+    화면 하나를 그릴 때, <strong>물체를 그리면서 곧바로 조명을 계산</strong>할 수도 있고,
+    <strong>정보만 모아뒀다가 나중에 한꺼번에 조명</strong>할 수도 있습니다. 이 선택이
+    광원을 몇 개까지 감당하는지, 투명·안티앨리어싱이 쉬운지, 메모리 대역폭을 얼마나 먹는지를 결정합니다.
+    코드로 들어가기 전에, 각 경로의 성격을 먼저 직관적으로 잡아 봅시다.
+  </p>
+
+  <div class="feature-grid">
+    <div class="feature"><span class="ft-name">Forward</span>물체마다 <em>모든 광원</em>을 계산. 단순하고 투명·MSAA가 쉽지만, 광원이 많아지면 <em>물체 × 광원</em>으로 폭발.</div>
+    <div class="feature"><span class="ft-name">Forward+ (Tiled Forward)</span>화면을 <em>타일</em>로 나눠, 컴퓨트 셰이더로 <em>각 타일에 닿는 광원 목록</em>만 추려 계산. 투명은 유지하면서 광원 수백 개.</div>
+    <div class="feature"><span class="ft-name">Clustered</span>타일에 <em>깊이(Z) 슬라이스</em>까지 더한 3D 클러스터. 깊이 방향으로도 광원을 좁혀 Forward+보다 촘촘.</div>
+    <div class="feature"><span class="ft-name">Deferred</span>먼저 <em>G-buffer</em>(색·법선·깊이)만 채우고, 조명은 <em>화면 픽셀당 한 번</em>. 오버드로우 0, 광원 대량. 대신 투명·MSAA가 까다롭고 대역폭을 많이 씀.</div>
+    <div class="feature"><span class="ft-name">Visibility Buffer</span>G-buffer 대신 <em>삼각형/인스턴스 ID</em>만 얇게 저장하고, 재질은 나중에 리졸브. 대역폭을 더 아끼는 최신 경로.</div>
+  </div>
+
+  <div class="demo" style="max-width:880px;">
+    <div class="demo-title">경로별 셰이딩 계산량 비교 (광원·물체 수를 바꿔보세요)</div>
+    <canvas id="c-paths" height="380"></canvas>
+    <div class="controls" id="ctl-paths"></div>
+    <p class="hint">경로 버튼으로 전환하고, 광원 수를 늘려보세요. 타일 경로는 화면 격자에 <strong>타일당 광원 수 히트맵</strong>이 뜨고,
+      오른쪽 막대는 Forward를 1로 둔 상대 계산량입니다. 값은 개념 이해용 근사입니다.</p>
+  </div>
+
+  <!-- =========================================================
        경로 비교표
        ========================================================= -->
   <h2 style="margin-top:40px;">경로 한눈에 비교</h2>
@@ -202,6 +229,9 @@
   <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
 </main>
 <script src="./highlight.js"></script>
+<!-- 개념 트랙에서 병합한 인터랙티브 데모: GFX(lib.js) + demos-paths.js -->
+<script src="../js/lib.js"></script>
+<script src="../js/demos-paths.js"></script>
 <script>
 /* 렌더링 경로 히어로 배너: 같은 씬을 여러 경로로 그리는 느낌.
    화면을 타일 → 클러스터 → G-buffer 처럼 주기적으로 분할하는 애니메이션.

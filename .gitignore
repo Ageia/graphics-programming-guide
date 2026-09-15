@@ -4,3 +4,7 @@ node_modules/
 *.log
 .vscode/
 .idea/
+
+# 로컬 검증용(puppeteer 등) — 리포에는 포함하지 않음
+package.json
+package-lock.json

@@ -317,22 +317,24 @@
     var RED = [0.85, 0.12, 0.12], GREEN = [0.12, 0.72, 0.2], GRAY = [0.78, 0.78, 0.78], WHITE = [0.92, 0.92, 0.92];
 
     function clamp(x, a, b) { return x < a ? a : (x > b ? b : x); }
-    // 픽셀 P→광원 L 선분이 물체 원을 지나면 그림자(soft)
+    // 픽셀 P→광원 L 선분이 물체 원을 지나면 그림자(soft). x축은 aspect 보정한 공간에서 판정.
     function shadow(u, v, lu, lv) {
-      var abx = lu - u, aby = lv - v;
-      var t = clamp(((OX - u) * abx + (OY - v) * aby) / (abx * abx + aby * aby + 1e-6), 0, 1);
-      var cxp = u + abx * t, cyp = v + aby * t;
-      var dx = OX - cxp, dy = OY - cyp;
+      var pux = u * aspect, plux = lu * aspect, oxx = OX * aspect;
+      var abx = plux - pux, aby = lv - v;
+      var t = clamp(((oxx - pux) * abx + (OY - v) * aby) / (abx * abx + aby * aby + 1e-6), 0, 1);
+      var cxp = pux + abx * t, cyp = v + aby * t;
+      var dx = oxx - cxp, dy = OY - cyp;
       return (dx * dx + dy * dy < OR * OR) ? 0.05 : 1.0;
     }
 
-    var W = 0, H = 0, bw = 0, bh = 0, buf = null, dpr = Math.min(2, window.devicePixelRatio || 1);
+    var W = 0, H = 0, bw = 0, bh = 0, buf = null, aspect = 1, dpr = Math.min(2, window.devicePixelRatio || 1);
     function resize() {
       var r = cv.getBoundingClientRect();
       W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
       cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);   // 픽셀 버퍼만 갱신
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       bw = Math.max(80, Math.round(W * 0.45)); bh = Math.max(60, Math.round(H * 0.45));
+      aspect = bw / bh;                 // 물체 원이 화면에서 정원으로 보이도록 x축 보정 비율
       buf = ctx.createImageData(bw, bh);
     }
     window.addEventListener("resize", resize);
@@ -349,8 +351,8 @@
           var u = px / bw, v = py / bh;
           var giEff = gi;    // 전체 씬에 GI 세기 적용(0이면 직접광만)
           var alb, nx = 0, ny = 0, hasN = true, isObj = false;
-          var dxo = u - OX, dyo = v - OY;
-          if (dxo * dxo + dyo * dyo < OR * OR) {                 // 물체
+          var dxo = (u - OX) * aspect, dyo = v - OY;             // x축 aspect 보정 → 화면에서 정원
+          if (dxo * dxo + dyo * dyo < OR * OR) {                 // 물체(구)
             alb = WHITE; var l = Math.sqrt(dxo * dxo + dyo * dyo) + 1e-6; nx = dxo / l; ny = dyo / l; isObj = true;
           } else if (v > 1 - B) { alb = GRAY; nx = 0; ny = -1; } // 바닥
           else if (v < B) { alb = GRAY; nx = 0; ny = 1; }        // 천장

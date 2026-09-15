@@ -3,6 +3,12 @@
    ../css/style.css 위에 얹어 코드 중심 레이아웃을 보강한다.
    ============================================================ */
 
+/* 부모 페이지에 iframe으로 임베드된 상태: 자체 페이지 크롬을 숨겨 병합돼 보이게 */
+html.embedded body { background: transparent; }
+html.embedded .impl-topbar,
+html.embedded .page-nav { display: none; }
+html.embedded main.content { padding: 4px 0 24px; max-width: none; }
+
 /* 8장 잔디 히어로 배너 (타이틀 이미지) */
 .grass-hero {
   position: relative;

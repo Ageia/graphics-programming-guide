@@ -8,6 +8,11 @@
 <link rel="stylesheet" href="../css/theme.css" />
 <link rel="stylesheet" href="../css/style.css" />
 <link rel="stylesheet" href="./impl.css" />
+<script>
+/* iframe으로 임베드되면 페이지 크롬(상단바·하단 네비)을 숨겨 부모와 병합돼 보이게 한다.
+   렌더 전에 class를 붙여 상단바가 잠깐 보였다 사라지는 깜빡임을 막는다. */
+if (window.self !== window.top) document.documentElement.classList.add("embedded");
+</script>
 </head>
 <body>
 <main class="content" style="max-width:1200px;">
@@ -234,6 +239,20 @@
 <script src="../js/demos-paths.js"></script>
 <!-- impl 페이지엔 main.js(runPendingDemos)가 없으므로 지연 등록된 데모를 직접 초기화 -->
 <script>if (window.GFX && GFX.runPendingDemos) GFX.runPendingDemos();</script>
+<script>
+/* 임베드 상태면 내용 높이를 부모(index.html)에 알려 iframe이 내부 스크롤 없이
+   내용에 맞춰지게 한다. 폰트/데모 로드·창 크기 변화에 맞춰 반복 보고. */
+if (window.self !== window.top) {
+  var postH = function () {
+    var h = document.documentElement.scrollHeight;
+    parent.postMessage({ t: "embedHeight", h: h }, "*");
+  };
+  window.addEventListener("load", postH);
+  window.addEventListener("resize", postH);
+  if (window.ResizeObserver) new ResizeObserver(postH).observe(document.body);
+  setTimeout(postH, 300); setTimeout(postH, 1200);
+}
+</script>
 <script>
 /* 렌더링 경로 히어로 배너: 같은 씬을 여러 경로로 그리는 느낌.
    화면을 타일 → 클러스터 → G-buffer 처럼 주기적으로 분할하는 애니메이션.

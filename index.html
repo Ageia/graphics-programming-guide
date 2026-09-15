@@ -780,11 +780,11 @@ fn main(
     </section>
 
     <section id="paths">
-      <h2>렌더링 경로 비교 — 사례연구 ⚡</h2>
-      <p class="lead">같은 장면을 그리는 여섯 경로(Forward·Forward+·Clustered·Deferred·Tiled·Visibility)를
-        네 잣대로 비교하고 C++/HLSL로 파고드는 사례연구입니다. 아래 오른쪽 화면에서 바로 볼 수 있어요.</p>
+      <!-- 구현 사례연구 페이지를 오른쪽 화면에 그대로 병합해 보여준다.
+           임베드 시 impl 페이지가 자기 상단바/네비를 숨기고(embedded), 높이를
+           postMessage로 알려와 iframe이 내용 높이에 맞춰져 내부 스크롤 없이 한 페이지처럼 보인다. -->
       <div class="embed-frame">
-        <iframe src="impl/06-paths.html" title="렌더링 경로 사례연구 (구현)" loading="lazy"></iframe>
+        <iframe id="paths-embed" src="impl/06-paths.html" title="렌더링 경로 사례연구 (구현)"></iframe>
       </div>
     </section>
 
@@ -1051,5 +1051,14 @@ fn main(
 <script src="js/demos-adv3.js"></script>
 <script src="js/demos-adv4.js"></script>
 <script src="js/main.js"></script>
+<script>
+/* 임베드된 구현 사례연구(#paths iframe)가 postMessage로 알려온 내용 높이에 맞춰
+   iframe 높이를 조절 → 내부 스크롤 없이 부모 페이지와 한 화면처럼 병합돼 보인다. */
+window.addEventListener("message", function (e) {
+  if (!e.data || e.data.t !== "embedHeight") return;
+  var f = document.getElementById("paths-embed");
+  if (f && e.data.h > 0) f.style.height = e.data.h + "px";
+});
+</script>
 </body>
 </html>

@@ -216,7 +216,5 @@
     draw();
   }
 
-  document.addEventListener("DOMContentLoaded", function () {
-    try { initRenderPaths(); } catch (e) { console.error("[demos-paths] 초기화 실패:", e); }
-  });
+  GFX.deferInit("c-paths", initRenderPaths);
 })();

@@ -24,12 +24,10 @@
     ctx.imageSmoothingEnabled = true;
   }
 
-  document.addEventListener("DOMContentLoaded", function () {
-    initScreenSpace();
-    initRayTracing();
-    initPathTracing();
-    initGI();
-  });
+  GFX.deferInit("c-screenspace", initScreenSpace);
+  GFX.deferInit("c-raytracing", initRayTracing);
+  GFX.deferInit("c-pathtracing", initPathTracing);
+  GFX.deferInit("c-gi", initGI);
 
   /* ==========================================================
      1) 스크린 스페이스 후처리
@@ -551,7 +549,7 @@
           addSamples(1);
           present();
         }
-      });
+      }, S.canvas);
 
       GFX.button(ctl, "누적 시작/정지", (e) => {
         running = !running;

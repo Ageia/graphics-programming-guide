@@ -24,11 +24,9 @@
     ctx.imageSmoothingEnabled = true;
   }
 
-  document.addEventListener("DOMContentLoaded", function () {
-    initAA();
-    initGamma();
-    initMipmap();
-  });
+  GFX.deferInit("c-aa", initAA);
+  GFX.deferInit("c-gamma", initGamma);
+  GFX.deferInit("c-mipmap", initMipmap);
 
   /* ==========================================================
      1) 안티앨리어싱 — 슈퍼샘플링
@@ -538,7 +536,7 @@
         anim = GFX.loop((dt) => {
           scroll += dt * 1.2; // 천천히 앞으로 스크롤
           draw();
-        });
+        }, S.canvas);
       }
 
       draw();

@@ -189,7 +189,7 @@
         GFX.text(ctx, "▶ " + t, 12, 20 + i * 18, cols[i], "bold 12px 'JetBrains Mono', monospace");
       });
     }
-    GFX.loop(draw);
+    GFX.loop(draw, S.canvas);
   }
 
   // ============================================================
@@ -397,7 +397,7 @@
         }
       });
     }
-    GFX.loop(draw);
+    GFX.loop(draw, S.canvas);
   }
 
   // ============================================================
@@ -568,7 +568,7 @@
       GFX.arrow(ctx, lx, ly, lx + L[0]*r, ly - L[2]*r, COL.yellow, 2);
       GFX.text(ctx, "빛", lx - 8, ly + r + 12, COL.yellow, "11px 'JetBrains Mono', monospace");
     }
-    GFX.loop(draw);
+    GFX.loop(draw, S.canvas);
   }
 
   // ============================================================
@@ -679,19 +679,16 @@
       ctx.drawImage(tex, 0, 0);
       ctx.restore();
     }
-    GFX.loop(draw);
+    GFX.loop(draw, S.canvas);
   }
 
   // ============================================================
   // 초기화
   // ============================================================
-  document.addEventListener("DOMContentLoaded", function () {
-    const inits = [
-      ["MVP", initMVP], ["Camera", initCamera], ["Mesh", initMesh],
-      ["ZBuffer", initZBuffer], ["Light", initLight], ["TexCube", initTexCube],
-    ];
-    inits.forEach(([name, fn]) => {
-      try { fn(); } catch (e) { console.error("[demos-3d] " + name + " 초기화 실패:", e); }
-    });
-  });
+  GFX.deferInit("c-mvp", initMVP);
+  GFX.deferInit("c-camera", initCamera);
+  GFX.deferInit("c-mesh", initMesh);
+  GFX.deferInit("c-zbuffer", initZBuffer);
+  GFX.deferInit("c-light", initLight);
+  GFX.deferInit("c-texcube", initTexCube);
 })();

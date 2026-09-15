@@ -665,10 +665,8 @@
   // ==========================================================
   // 부트스트랩
   // ==========================================================
-  document.addEventListener("DOMContentLoaded", function () {
-    const demos = [initPBR, initHDR, initShadowMap, initDeferred];
-    for (const d of demos) {
-      try { d(); } catch (e) { console.error("[demos-adv1] 데모 초기화 실패:", e); }
-    }
-  });
+  GFX.deferInit("c-pbr", initPBR);
+  GFX.deferInit("c-hdr", initHDR);
+  GFX.deferInit("c-shadowmap", initShadowMap);
+  GFX.deferInit("c-deferred", initDeferred);
 })();

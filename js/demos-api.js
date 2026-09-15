@@ -4,7 +4,7 @@
    (A) 추상화↔제어권 산점도, (B) 코드량 막대그래프로 비교한다.
    전역 GFX(lib.js)를 사용한다. 순수 바닐라 JS.
    ============================================================ */
-document.addEventListener("DOMContentLoaded", function () {
+window.GFX.deferInit("c-apichart", function initApiChart() {
   try {
     // 대상 캔버스가 없으면 조용히 종료
     if (!document.getElementById("c-apichart")) return;

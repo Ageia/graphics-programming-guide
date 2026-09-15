@@ -10,12 +10,10 @@
   "use strict";
   const G = window.GFX;
 
-  document.addEventListener("DOMContentLoaded", function () {
-
-    /* =========================================================
-       1) GPU 병렬 경주 — CPU(직렬) vs GPU(병렬) 픽셀 처리
-       ========================================================= */
-    function initParallel() {
+  /* =========================================================
+     1) GPU 병렬 경주 — CPU(직렬) vs GPU(병렬) 픽셀 처리
+     ========================================================= */
+  function initParallel() {
       if (!document.getElementById("c-parallel")) return;
       const { canvas, ctx } = G.setup("c-parallel");
       const ctl = document.getElementById("ctl-parallel");
@@ -495,6 +493,8 @@
       // 애니메이션 루프
       let start = performance.now();
       function frame() {
+        // 숨겨진 섹션이면 렌더 생략(페이지 SPA — 안 보이는 데모는 그리지 않음)
+        if (canvas.offsetParent === null) { requestAnimationFrame(frame); return; }
         const time = (performance.now() - start) / 1000;
         if (glOk) {
           gl.viewport(0, 0, canvas.width, canvas.height);
@@ -604,9 +604,9 @@
       });
     }
 
-    // ---- 각 데모를 try/catch로 격리 실행 ----
-    [initParallel, initVertexShader, initFragShader, initCompute].forEach((fn) => {
-      try { fn(); } catch (e) { console.error("[demos-gpu] 데모 초기화 실패:", fn.name, e); }
-    });
-  });
+  // ---- 각 데모를 지연 초기화로 등록 (보이는 섹션만 init) ----
+  G.deferInit("c-parallel", initParallel);
+  G.deferInit("c-vertexshader", initVertexShader);
+  G.deferInit("c-fragshader", initFragShader);
+  G.deferInit("c-compute", initCompute);
 })();

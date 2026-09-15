@@ -366,10 +366,20 @@
   }
 
   // requestAnimationFrame 루프 헬퍼. fn(dt) 매 프레임 호출.
-  function loop(fn) {
+  // el(선택): 이 요소가 숨겨진 섹션(display:none → offsetParent === null)에 있으면
+  //   그리기 콜백을 건너뛴다. 이 페이지는 섹션 하나만 보이는 SPA라, 안 보이는
+  //   수십 개 데모의 rAF가 매 프레임 계산하면 페이지 전체가 느려진다. el을 넘기면
+  //   보이는 데모만 실제로 그리고 나머지는 유휴 상태가 된다. (rAF 자체는 유지 —
+  //   다시 보이면 즉시 재개, 백그라운드 탭은 브라우저가 알아서 rAF를 늦춘다.)
+  function loop(fn, el) {
     let raf, prev = 0, running = true;
     function step(t) {
       if (!running) return;
+      if (el && el.offsetParent === null) {
+        prev = 0; // 다시 보일 때 dt가 크게 튀지 않도록 리셋
+        raf = requestAnimationFrame(step);
+        return;
+      }
       const dt = prev ? (t - prev) / 1000 : 0;
       prev = t;
       fn(dt);
@@ -379,9 +389,26 @@
     return { stop() { running = false; cancelAnimationFrame(raf); } };
   }
 
+  // 데모 지연 초기화 레지스트리. 각 데모를 canvasId와 함께 등록해 두고,
+  // 그 캔버스가 화면에 보일 때(offsetParent !== null) 딱 한 번 init을 실행한다.
+  // index.html은 섹션 하나만 보이는 SPA라, 보이는 섹션 데모만 초기화되어 로드가 빨라진다.
+  const _pendingDemos = [];
+  function deferInit(canvasId, fn) { _pendingDemos.push({ canvasId, fn, done: false }); }
+  function runPendingDemos() {
+    for (const d of _pendingDemos) {
+      if (d.done) continue;
+      const el = document.getElementById(d.canvasId);
+      if (el && el.offsetParent !== null) {
+        d.done = true;
+        try { d.fn(); } catch (e) { console.error("[demo] init 실패:", d.canvasId, e); }
+      }
+    }
+  }
+
   window.GFX = {
     setup, COL, clear, arrow, dot, line, text, grid, centered,
     draggable, slider, button, checkbox,
     V, M4, clamp, lerp, rad, deg, orbitControl, loop,
+    deferInit, runPendingDemos,
   };
 })();

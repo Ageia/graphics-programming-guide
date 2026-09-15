@@ -41,6 +41,9 @@
     // resize 이벤트를 쏘면 lib.js가 캔버스를 다시 크기 맞추고
     // 각 데모가 등록한 리스너가 다시 그린다.
     window.dispatchEvent(new Event("resize"));
+
+    // 방금 보이게 된 섹션의 데모를 (아직 init 안 됐다면) 지금 초기화한다.
+    if (window.GFX && GFX.runPendingDemos) GFX.runPendingDemos();
   }
 
   // 해시 → 섹션

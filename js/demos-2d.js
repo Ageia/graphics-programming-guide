@@ -720,10 +720,11 @@
   // ============================================================
   // 부팅: 각 데모를 try/catch 로 격리
   // ============================================================
-  document.addEventListener("DOMContentLoaded", function () {
-    const inits = [initRGB, initPixelZoom, initLine, initFill, initFilter, initBlend, initSprite];
-    inits.forEach((fn) => {
-      try { fn(); } catch (e) { console.error("[demos-2d] 데모 초기화 실패:", fn.name, e); }
-    });
-  });
+  G.deferInit("c-rgb", initRGB);
+  G.deferInit("c-pixelzoom", initPixelZoom);
+  G.deferInit("c-line", initLine);
+  G.deferInit("c-fill", initFill);
+  G.deferInit("c-filter", initFilter);
+  G.deferInit("c-blend", initBlend);
+  G.deferInit("c-sprite", initSprite);
 })();

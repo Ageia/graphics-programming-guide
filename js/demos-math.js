@@ -619,20 +619,12 @@
   // ==========================================================
   // 부팅: 각 데모를 try/catch로 격리해 초기화
   // ==========================================================
-  function boot() {
-    const demos = [
-      initVectorAdd, initNormalize, initMatrix, initTransform,
-      initDot, initCross, initTrig, initInside,
-    ];
-    demos.forEach((fn) => {
-      try { fn(); }
-      catch (e) { console.error("데모 초기화 실패:", fn.name, e); }
-    });
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot);
-  } else {
-    boot();
-  }
+  G.deferInit("c-vector", initVectorAdd);
+  G.deferInit("c-normalize", initNormalize);
+  G.deferInit("c-matrix", initMatrix);
+  G.deferInit("c-transform", initTransform);
+  G.deferInit("c-dot", initDot);
+  G.deferInit("c-cross", initCross);
+  G.deferInit("c-trig", initTrig);
+  G.deferInit("c-inside", initInside);
 })();

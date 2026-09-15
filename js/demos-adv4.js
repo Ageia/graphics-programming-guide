@@ -9,11 +9,9 @@
   "use strict";
   const G = window.GFX;
 
-  document.addEventListener("DOMContentLoaded", function () {
-    initTransparency();
-    initAO();
-    initLOD();
-  });
+  G.deferInit("c-transparency", initTransparency);
+  G.deferInit("c-ao", initAO);
+  G.deferInit("c-lod", initLOD);
 
   /* ==========================================================
      1) 투명도와 정렬

@@ -93,7 +93,7 @@
 - **개념 트랙** `index.html`:
   1. 사이드바 `nav-group`에 `<a href="#새섹션">` 링크 추가
   2. 본문에 `<section id="새섹션">` 추가(설명 + `.demo` 캔버스 + `.controls`)
-  3. `js/demos-*.js`에 데모 `init함수` 작성 + 부트 배열/`DOMContentLoaded`에 등록, `<script>` 태그 로드 확인
+  3. `js/demos-*.js`에 데모 `init함수` 작성 + **`GFX.deferInit("c-캔버스id", init함수)`로 등록**(DOMContentLoaded 직접 호출 금지 — 지연 초기화로 활성 섹션만 init), `<script>` 태그 로드 확인
   4. 개념 섹션에서 대응 구현 페이지로 링크(`impl/06-paths.html` 등)
 - **구현 트랙** `impl/`:
   5. 세부 페이지 `impl/0N-*.html`(표준 템플릿) + 챕터 허브 카드 + `impl/index.html` 카드
@@ -101,7 +101,8 @@
 - **문서**: `docs/CURRICULUM.md` 해당 행 상태 갱신
 
 > 개념 트랙 데모 주의: 캔버스는 `height` 속성만 주고(폭은 CSS), `GFX.setup`이 논리 높이를 1회만 읽는다.
-> 섹션은 숨겨질 때 폭이 0이므로 `resize` 리스너에서 다시 그린다(`main.js`가 섹션 활성화 시 resize를 dispatch). `demos-paths.js`가 표준 예시.
+> 섹션은 숨겨질 때 폭이 0이므로 `resize` 리스너에서 다시 그린다(`main.js`가 섹션 활성화 시 resize를 dispatch 후 `GFX.runPendingDemos()`로 지연 init 실행). `demos-paths.js`가 표준 예시.
+> 데모 등록은 `GFX.deferInit(캔버스id, init)`로만 한다 — 보이는 섹션만 초기화되고, rAF 루프는 `GFX.loop(fn, canvas)`처럼 캔버스를 넘겨 숨김 시 렌더를 건너뛴다(성능).
 
 ## 5-b. 상호 참조(원리 ↔ 개념 ↔ 구현)
 - 원리(PART 0) 페이지는 그 원리를 쓰는 기법 페이지로 정방향 링크한다. 예: 프레넬 원리 → 06-pbr.

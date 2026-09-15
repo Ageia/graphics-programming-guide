@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: Forward+ / Tiled Forward — C++/DirectX 11</title>
+<meta name="description" content="화면을 타일로 나눠 각 타일에 영향 주는 광원만 컴퓨트 셰이더로 컬링(light culling)하는 Forward+ / Tiled Forward를 C++/HLSL로 구현하고, forward의 O(P×N) 비용을 어떻게 줄이는지 원리부터 라이트 컬링 컴퓨트 셰이더 골격까지 해부합니다." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <a href="./06-paths.html">렌더링 경로</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">Forward+ / Tiled Forward</span>
+  </div>
+
+  <!-- 타이틀 히어로 배너: 화면 타일 그리드에 광원 컬링을 표현하는 2D 애니메이션 -->
+  <div class="grass-hero" id="fpHero">
+    <canvas id="fpHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-sun"></div>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Forward<span class="accent">+</span></h2>
+      <p class="gh-sub">화면을 타일로 나눠 광원을 컬링 · Path Case Study</p>
+    </div>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6 · RENDERING PATH</span>
+  <h1>Forward+ / Tiled Forward — 타일마다 영향 광원만 추린다</h1>
+  <p class="lead">
+    광원이 수백 개인 장면을 <strong>포워드(forward)</strong>로 그리면, 픽셀 셰이더마다 <em>모든 광원</em>을 반복문으로 돕니다.
+    대부분의 광원은 그 픽셀에서 멀어 기여가 0인데도 비용은 똑같이 들죠 — 비용이 <code>픽셀 수 × 광원 수</code>로 폭발합니다.
+    <strong>Forward+ (Tiled Forward)</strong>는 여기에 딱 한 단계를 끼워 넣습니다: <strong>렌더링 전에 화면을 작은 타일로 나누고,
+    각 타일에 실제로 닿는 광원 목록만 컴퓨트 셰이더로 미리 추려(light culling) 둡니다.</strong> 그러면 픽셀 셰이더는
+    <em>자기 타일의 광원(평균 k개, k ≪ N)</em>만 돌면 됩니다. 이 페이지에서는 그 <strong>라이트 컬링 컴퓨트 셰이더</strong>의
+    골격과, 그것을 읽어 도는 포워드 픽셀 셰이더를 <strong>구조와 함정 위주로</strong> 해부합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행렬 <strong>행 우선</strong> 저장, <strong>왼손 좌표계</strong>, 클립 공간 <code>z ∈ [0, 1]</code>, 텍스처 V축은
+    위→아래입니다. 컬링과 조명 계산은 모두 <strong>뷰 공간(view space)</strong>에서 이뤄집니다 — 카메라가 원점(0,0,0)이라
+    타일 절두체·거리 계산이 단순해집니다.
+  </div>
+
+  <!-- =========================================================
+       1. 원리 (Why)
+       ========================================================= -->
+  <h2 style="margin-top:40px;">1. 원리 — forward의 O(P×N)을 어떻게 줄이나</h2>
+  <p>
+    한 문장으로: <strong>"픽셀마다 모든 광원을 도는 대신, 미리 타일별로 광원을 걸러 놓고 픽셀은 자기 타일 것만 돌게 하자."</strong>
+    이게 Forward+의 전부입니다.
+  </p>
+  <p>
+    평범한 포워드 렌더링에서 조명 비용은 대략 <code>P × N</code>입니다(<code>P</code> = 셰이딩한 픽셀 수,
+    <code>N</code> = 광원 수). 광원 256개짜리 장면이라면 픽셀 하나마다 256번의 조명 계산이 들어갑니다 — 그 픽셀에서
+    255개가 너무 멀어 기여가 0이어도 말이죠. 명백한 낭비입니다.
+  </p>
+  <p>
+    Forward+는 렌더링 <em>전에</em> 한 단계를 추가합니다.
+  </p>
+  <ol class="steps">
+    <li>
+      <strong>화면을 타일로 분할</strong>: 화면을 예컨대 <code>16×16 px</code> 타일 격자로 나눕니다. Full HD면
+      <code>120 × 68 ≈ 8160</code>개의 타일이 생깁니다.
+    </li>
+    <li>
+      <strong>라이트 컬링(light culling)</strong>: 컴퓨트 셰이더가 <em>타일마다 하나의 스레드 그룹</em>을 맡아,
+      그 타일이 화면에서 차지하는 영역으로 <strong>절두체(frustum)</strong>를 만들고, 광원 <code>N</code>개를 훑어
+      <em>그 절두체와 겹치는 광원만</em> per-tile 광원 목록에 담습니다.
+    </li>
+    <li>
+      <strong>포워드 셰이딩</strong>: 실제 지오메트리를 평소처럼 포워드로 그리되, 픽셀 셰이더는 자기 픽셀이 속한
+      타일의 광원 목록만 읽어 <em>평균 k개</em>만 돕니다.
+    </li>
+  </ol>
+  <p>
+    그래서 조명 비용이 <code>P × N</code>에서 <code>P × k</code>(<code>k</code> = 타일 평균 영향 광원 수)로 줄어듭니다.
+    광원이 화면 곳곳에 흩어져 있으면 <code>k</code>는 <code>N</code>보다 훨씬 작아, 사실상
+    <strong>"픽셀당 실제로 닿는 광원만" 계산</strong>하게 됩니다. 여기에 컬링 패스 비용(<code>타일 수 × N</code>의
+    교차 검사)이 더해지지만, 컬링은 픽셀이 아니라 <em>타일 단위</em>라 훨씬 저렴합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">직관</span>
+    비유하자면, 우편물을 <strong>온 도시에 다 돌리는 대신</strong>(포워드) 먼저 <strong>동네(타일)별로 분류</strong>해 두고
+    각 집(픽셀)엔 자기 동네 우편만 배달하는 것입니다. 분류(컬링)에 시간이 조금 들지만, 배달(셰이딩) 총량이 확 줄어듭니다.
+  </div>
+
+  <p>
+    <strong>절두체–구 교차로 컬링</strong>: 각 타일은 화면의 작은 사각형이고, 이 사각형을 카메라에서 밀어내면 좌·우·상·하
+    네 평면으로 둘러싸인 <strong>타일 절두체</strong>가 됩니다(근/원 평면까지 더하면 6평면). 점광원을 <em>중심 + 반경의
+    구(sphere)</em>로 보면, "이 광원이 타일에 영향을 주는가?"는 곧 <strong>구가 타일 절두체와 겹치는가?</strong>로 판정됩니다.
+    각 평면에 대해 구 중심의 부호거리(signed distance)가 <code>−반경</code>보다 크면 그 평면 안쪽 — 6평면을 다 통과하면
+    타일에 담습니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    타일 절두체는 <strong>깊이(z) 방향으로는 나뉘지 않습니다.</strong> 근/원 평면을 타일 안 픽셀들의 최소·최대 깊이로
+    좁히더라도, <em>z로 길쭉하게 늘어선 장면</em>(예: 긴 복도)에서는 한 타일의 near–far 사이가 넓어져, 실제로는 그 픽셀에
+    안 닿는 광원이 <strong>false positive</strong>로 목록에 끼기 쉽습니다. 이 깊이 방향 낭비를 없애려고 화면을 <em>깊이까지</em>
+    3D 셀로 쪼갠 것이 <strong>Clustered Shading</strong>입니다 — 다음 페이지(<a href="./06-clustered.html">06-clustered</a>)에서
+    이어집니다.
+  </div>
+
+  <!-- =========================================================
+       2. 직관 데모 (What)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">2. 직관 데모 — 타일 그리드에 광원 겹침 보기</h2>
+  <p>
+    아래는 화면을 <strong>타일 격자</strong>로 나눈 뒤, 각 타일이 겹치는 광원 수에 따라 색을 칠하는 히트맵입니다.
+    광원 하나는 <em>영향 반경을 가진 원</em>으로 그려집니다. 타일에 닿는 광원이 <strong>0이면 투명(계산 안 함)</strong>,
+    많을수록 <strong>초록→노랑→빨강</strong>으로 뜨거워집니다. 슬라이더로 <strong>타일 크기</strong>와 <strong>광원 수</strong>를
+    바꿔 보세요. 타일을 잘게 쪼갤수록 타일당 평균 광원 수 <code>k</code>가 줄고(그만큼 픽셀당 조명이 싸짐), 대신 타일 수가
+    늘어(컬링 패스가 비싸짐) 트레이드오프가 눈에 보입니다.
+  </p>
+
+  <div class="gdemo" id="fpDemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="fpDemoCanvas"></canvas>
+      <div class="hud">타일 컬링 준비 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl">
+        <label>타일 크기 <span class="gval">32 px</span></label>
+        <input type="range" id="fpTile" min="8" max="64" step="4" value="32" />
+      </div>
+      <div class="gctl">
+        <label>광원 수 <span class="gval">18 개</span></label>
+        <input type="range" id="fpLights" min="4" max="48" step="1" value="18" />
+      </div>
+    </div>
+    <div class="ghint">
+      빨간 타일 = 그 타일 안 픽셀이 여러 광원을 도는 <strong>병목 타일</strong>. 투명 타일 = 광원 0 → 조명 계산 자체를 건너뜀.
+      이 "타일별 광원 목록"을 렌더링 전에 컴퓨트 셰이더로 미리 만드는 것이 라이트 컬링입니다.
+    </div>
+  </div>
+
+  <!-- =========================================================
+       3. 비교표
+       ========================================================= -->
+  <h2 style="margin-top:44px;">3. Forward vs Forward+ vs Deferred</h2>
+  <p>
+    세 렌더링 경로를 <strong>광원 처리·타일 컬링·MSAA·투명·대역폭</strong> 축으로 비교합니다. 세 문단 설명보다 표 한 줄이
+    선택 기준을 더 또렷하게 보여줍니다.
+  </p>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead>
+      <tr><th>경로</th><th>광원 처리</th><th>타일 컬링</th><th>MSAA</th><th>투명</th><th>대역폭</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Forward</strong></td>
+        <td>픽셀마다 <code>N</code>개 전부 → <code>O(P×N)</code>, 광원 많으면 폭발</td>
+        <td>없음</td>
+        <td><strong>강함</strong>(하드웨어 MSAA 그대로)</td>
+        <td><strong>강함</strong>(같은 패스에서 블렌드)</td>
+        <td>낮음(G-buffer 없음)</td>
+      </tr>
+      <tr>
+        <td><strong>Forward+</strong></td>
+        <td>타일 컬링 후 픽셀은 <code>k</code>개만 → <code>O(P×k)</code>, <strong>많은 광원 OK</strong></td>
+        <td><strong>있음</strong>(컴퓨트 컬링 패스 추가 — 단점)</td>
+        <td><strong>강함</strong>(포워드라 MSAA 유지)</td>
+        <td><strong>강함</strong>(포워드라 투명 자연스러움)</td>
+        <td>중간(per-tile 광원 리스트 버퍼)</td>
+      </tr>
+      <tr>
+        <td><strong>Deferred</strong></td>
+        <td>G-buffer 후 보이는 픽셀만 1회 → <code>O(P×N)</code>이지만 오버드로우 제거</td>
+        <td>선택(타일드/클러스터드 디퍼드로 확장)</td>
+        <td><strong>어려움</strong>(G-buffer MSAA 까다로워 보통 후처리 AA)</td>
+        <td><strong>약함</strong>(별도 포워드 패스 필요)</td>
+        <td><strong>높음</strong>(넓은 G-buffer 읽고 쓰기)</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    핵심 대비: <strong>Forward+는 포워드의 장점(MSAA·투명·재질 자유도)을 그대로 유지하면서</strong> 디퍼드처럼 많은
+    광원을 감당합니다. 대가는 <strong>렌더링 전 컬링 컴퓨트 패스 한 번</strong>과 per-tile 광원 리스트 버퍼의 메모리·대역폭입니다.
+    "많은 광원 + MSAA + 투명이 동시에 필요"할 때 디퍼드보다 유리한 이유입니다.
+  </p>
+
+  <!-- =========================================================
+       4. 구현 (How)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">4. 구현 — 라이트 컬링 컴퓨트 셰이더 골격</h2>
+  <p>
+    컬링 패스의 핵심은 <strong>타일 하나 = 스레드 그룹 하나</strong>라는 매핑입니다. <code>[numthreads(16,16,1)]</code>이면
+    한 그룹이 <code>16×16 = 256</code> 스레드이고, 이 그룹이 화면의 <code>16×16 px</code> 타일 하나를 통째로 담당합니다.
+    그룹 안 스레드들은 <strong><code>groupshared</code> 메모리</strong>로 협력합니다 — 타일 절두체를 함께 만들고, 광원 <code>N</code>개를
+    스레드끼리 나눠 검사하고, 통과한 광원 인덱스를 공유 리스트에 <code>InterlockedAdd</code>로 append합니다. 아래는
+    <strong>구조를 보여주는 골격</strong>입니다(그대로 컴파일되진 않고, 절두체 계산 등 일부는 요지만 표기).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>light_culling.hlsl (컴퓨트 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// ── 입력/출력 ──
+StructuredBuffer&lt;Light&gt;  gLights      : register(t0);  // 광원 배열(중심+반경)
+Texture2D&lt;float&gt;         gDepth       : register(t1);  // 이번 프레임 깊이(뷰공간 재구성용)
+
+// per-tile 결과: [타일마다 (개수 + 최대 MAX개 인덱스)]로 평평하게 저장
+RWStructuredBuffer&lt;uint&gt; gTileLightList : register(u0);
+
+cbuffer CullConstants : register(b0) {
+    float4x4 gInvProj;      // 클립→뷰 역투영 (타일 절두체 평면 계산용)
+    uint2    gScreen;       // 화면 픽셀 크기
+    uint     gLightCount;   // N
+    uint     gTilePixels;   // 타일 한 변 픽셀 수(=16)
+};
+
+#define TILE       16
+#define MAX_LIGHTS 256          // 타일당 담을 수 있는 광원 상한
+
+// ── groupshared: 그룹(=타일) 내부에서만 공유되는 초고속 메모리 ──
+groupshared uint  gsCount;                 // 이 타일에 담긴 광원 수(원자적 증가)
+groupshared uint  gsIndices[MAX_LIGHTS];   // 통과한 광원 인덱스 목록
+groupshared float gsMinZ, gsMaxZ;          // 타일 깊이 범위(near/far 평면용)
+
+[numthreads(TILE, TILE, 1)]
+void main(uint3 gid : SV_GroupID,          // 어느 타일인가(타일 좌표)
+          uint3 dtid : SV_DispatchThreadID,// 이 스레드가 맡은 화면 픽셀
+          uint  gi : SV_GroupIndex)        // 그룹 안 스레드 번호 0..255
+{
+    // 1) 대표 스레드가 공유 카운터 초기화
+    if (gi == 0) { gsCount = 0; gsMinZ = 1.0; gsMaxZ = 0.0; }
+    GroupMemoryBarrierWithGroupSync();     // ★ 초기화가 모두에게 보이도록 동기화
+
+    // 2) 각 스레드가 자기 픽셀 깊이를 읽어 타일 깊이 범위를 원자적으로 좁힘
+    float z = gDepth.Load(int3(dtid.xy, 0));
+    InterlockedMin(gsMinZ, asuint(z));     // (실무는 float→uint 단조 인코딩)
+    InterlockedMax(gsMaxZ, asuint(z));
+    GroupMemoryBarrierWithGroupSync();     // ★ 깊이 범위 확정까지 대기
+
+    // 3) 타일 절두체 6평면 계산 (요지):
+    //    - 타일의 좌/우/상/하 화면 경계를 클립좌표로 만들고
+    //    - gInvProj로 뷰 공간으로 되돌려 4개 측면 평면을 세운다
+    //    - near/far 평면은 위에서 구한 gsMinZ/gsMaxZ로 좁힌다
+    Frustum tile = BuildTileFrustum(gid.xy, gsMinZ, gsMaxZ, gInvProj, gScreen);
+
+    // 4) 광원 N개를 256개 스레드가 나눠 검사 (그룹당 stride = 256)
+    for (uint i = gi; i &lt; gLightCount; i += TILE * TILE) {
+        Light L = gLights[i];
+        // 구(중심 L.posVS, 반경 L.radius) vs 타일 절두체 교차
+        if (SphereInsideFrustum(L.posVS, L.radius, tile)) {
+            uint slot;
+            InterlockedAdd(gsCount, 1, slot);   // 통과 → 공유 리스트에 append
+            if (slot &lt; MAX_LIGHTS) gsIndices[slot] = i;   // ★ 오버플로 가드
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();     // ★ 모든 스레드가 append를 끝낼 때까지
+
+    // 5) 대표 스레드가 groupshared 결과를 전역 버퍼로 flush
+    if (gi == 0) {
+        uint tileIndex = gid.y * ((gScreen.x + TILE - 1) / TILE) + gid.x;
+        uint base = tileIndex * (MAX_LIGHTS + 1);
+        uint n = min(gsCount, MAX_LIGHTS);
+        gTileLightList[base] = n;                        // [0] = 개수
+        for (uint k = 0; k &lt; n; ++k)
+            gTileLightList[base + 1 + k] = gsIndices[k];  // [1..] = 인덱스들
+    }
+}</code></pre>
+  </div>
+
+  <h3 style="margin-top:30px;">4-1. 왜 <code>groupshared</code> + 배리어인가</h3>
+  <ul>
+    <li>
+      <code>groupshared</code>는 <strong>같은 스레드 그룹(=타일) 안에서만</strong> 공유되는 온칩 초고속 메모리입니다.
+      256개 스레드가 <em>하나의</em> 광원 리스트(<code>gsIndices</code>)와 카운터(<code>gsCount</code>)를 함께 채우려면
+      전역 메모리 왕복 없이 여기서 협력하는 게 압도적으로 빠릅니다.
+    </li>
+    <li>
+      <code>GroupMemoryBarrierWithGroupSync()</code>는 <strong>"그룹의 모든 스레드가 여기까지 오고, groupshared 쓰기가
+      서로에게 보일 때까지 기다려라"</strong>는 동기화 장벽입니다. 초기화(1) → 깊이 범위 확정(2) → append 완료(4) 사이마다
+      필요합니다. 이걸 빼면 어떤 스레드는 초기화 전 카운터를 읽거나, flush가 append보다 먼저 실행돼 <strong>리스트가
+      비거나 뒤섞입니다.</strong>
+    </li>
+    <li>
+      <code>InterlockedAdd(gsCount, 1, slot)</code>는 <strong>원자적</strong>으로 카운터를 1 올리고 <em>올리기 직전 값</em>을
+      <code>slot</code>으로 돌려줍니다. 256개 스레드가 동시에 append해도 서로 다른 슬롯을 받아 충돌 없이 리스트를 채웁니다.
+    </li>
+  </ul>
+
+  <p>
+    렌더링 쪽에서는 이 <code>gTileLightList</code>를 SRV로 읽어, 포워드 픽셀 셰이더가 <strong>자기 타일 광원만</strong> 돕니다.
+    아래가 그 소비 부분입니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>forward_shade.hlsl (픽셀 셰이더, 타일 광원만 순회)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">StructuredBuffer&lt;Light&gt; gLights       : register(t0);
+StructuredBuffer&lt;uint&gt;  gTileLightList : register(t1);  // 컬링 패스가 채운 결과
+
+#define TILE       16
+#define MAX_LIGHTS 256
+
+float4 main(float4 posH : SV_Position, PSIn i) : SV_Target {
+    // 1) 이 픽셀이 속한 타일 좌표 → 타일 인덱스
+    uint2 tileXY  = uint2(posH.xy) / TILE;
+    uint  tilesX  = (gScreenX + TILE - 1) / TILE;
+    uint  tileIndex = tileXY.y * tilesX + tileXY.x;
+    uint  base = tileIndex * (MAX_LIGHTS + 1);
+
+    // 2) 이 타일에 담긴 광원 수를 읽고, 그 개수만큼만 순회 (N이 아니라 k번!)
+    uint  count = gTileLightList[base];
+    float3 lit = i.albedo * 0.1;                 // 앰비언트
+
+    for (uint t = 0; t &lt; count; ++t) {
+        uint li = gTileLightList[base + 1 + t];  // 타일 광원 목록에서 실제 인덱스
+        Light L = gLights[li];
+        lit += ShadeOneLight(L, i);              // 블린-퐁 등 한 광원 셰이딩
+    }
+    return float4(lit, 1.0);
+}</code></pre>
+  </div>
+  <p>
+    핵심은 <strong>루프 상한이 전체 광원 수 <code>N</code>이 아니라 이 타일의 <code>count</code>(≈ k)</strong>라는 점입니다.
+    같은 코드가 광원 4개 타일에선 4번, 40개 타일에선 40번만 돕니다. 컬링이 잘 될수록 픽셀당 조명이 싸집니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    가장 흔한 두 실수입니다. (1) <strong><code>GroupMemoryBarrierWithGroupSync()</code>를 빠뜨리면</strong> 초기화·append·flush의
+    순서가 보장되지 않아 어떤 프레임엔 광원이 통째로 누락되고 어떤 픽셀엔 쓰레기가 뜹니다 — 재현이 들쭉날쭉해 디버깅이
+    악몽입니다. (2) <strong>타일당 광원 상한(<code>MAX_LIGHTS</code>) 오버플로</strong>: 광원이 한 타일에 몰리면 <code>gsCount</code>가
+    상한을 넘습니다. <code>InterlockedAdd</code>가 돌려준 <code>slot</code>이 상한 미만일 때만 쓰도록 <em>반드시 가드</em>해야
+    <code>gsIndices</code> 배열 밖 쓰기(정의되지 않은 동작)를 막습니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    Forward+의 병목은 <strong>광원이 밀집한 타일</strong>입니다. GPU는 타일(스레드 그룹)을 워프 단위로 굴리는데,
+    한 타일의 픽셀들이 <code>count</code>가 크면 그 워프 전체가 오래 붙잡혀 <em>가장 빽빽한 타일이 프레임 시간을 지배</em>합니다.
+    광원 반경을 실제 영향 범위로 <strong>타이트하게 잡고</strong>, 타일 near/far를 깊이로 <strong>좁혀</strong> false positive를
+    줄이는 게 핵심 최적화입니다. 반대로 타일을 너무 잘게 쪼개면 절두체·컬링 오버헤드가 커지니, <code>16×16</code> 안팎이
+    보통 균형점입니다.
+  </div>
+
+  <!-- =========================================================
+       5. 실무 노트
+       ========================================================= -->
+  <h2 style="margin-top:44px;">5. 언제 쓰나 — 실무 노트</h2>
+  <p>
+    Forward+는 2012년 AMD의 <strong>Takahiro Harada 외</strong>가 정리하며 이름이 굳었고(내부 데모 "Leo/Leonardo's Day"에서
+    수천 광원을 타일 컬링으로 시연), 이후 많은 엔진이 채택하면서 <strong>"포워드 셰이딩의 부활"</strong>을 이끌었습니다.
+    디퍼드가 오랫동안 "많은 광원 = 디퍼드"의 공식을 만들었지만, Forward+는 포워드의 장점을 지키며 그 벽을 넘습니다.
+  </p>
+  <div class="callout">
+    <span class="tag warn">실무</span>
+    <ul style="margin:6px 0 0 0;">
+      <li>
+        <strong>Unreal Engine</strong>은 모바일·VR 경로와 <em>Clustered Forward</em>(Forward+의 깊이 확장)로 많은 광원을
+        포워드에서 처리합니다. 데스크톱 기본은 디퍼드지만, MSAA·투명·VR이 중요한 프로젝트는 포워드 경로를 켭니다.
+      </li>
+      <li>
+        <strong>모바일·VR에서 특히 선호</strong>: 하드웨어 MSAA를 그대로 쓸 수 있어 에지 품질이 좋고, 타일드 모바일
+        GPU의 대역폭 부담이 큰 G-buffer를 피할 수 있습니다. VR은 투명·안티앨리어싱이 몰입에 직결돼 포워드 계열이 유리합니다.
+      </li>
+      <li>
+        <strong>"많은 광원 + MSAA + 투명"이 동시에 필요한 씬</strong>이 Forward+의 결정적 스위트스폿입니다. 반대로 광원이
+        적거나(포워드로 충분) 깊이 복잡도가 극단적이면(디퍼드/클러스터드가 유리) 굳이 컬링 패스 비용을 낼 이유가 적습니다.
+      </li>
+    </ul>
+  </div>
+  <p>
+    깊이 방향 false positive가 문제가 될 만큼 z로 복잡한 장면이라면, 화면을 깊이까지 3D 셀로 쪼개는
+    <strong><a href="./06-clustered.html">Clustered Shading</a></strong>으로 넘어가는 것이 자연스러운 다음 수순입니다.
+  </p>
+
+  <!-- =========================================================
+       6. 더 읽기
+       ========================================================= -->
+  <h2 style="margin-top:44px;">6. 더 읽기</h2>
+  <ul>
+    <li>
+      <a href="https://takahiroharada.wordpress.com/wp-content/uploads/2015/04/forward_plus.pdf" target="_blank" rel="noopener">
+        Takahiro Harada, Jay McKee, Jason C. Yang — "Forward+: Bringing Deferred Lighting to the Next Level" (Eurographics 2012)</a>
+      — Forward+를 정립한 원 논문.
+    </li>
+    <li>
+      <a href="https://efficientshading.com/wp-content/uploads/tiled_shading_preprint.pdf" target="_blank" rel="noopener">
+        Ola Olsson, Ulf Assarsson — "Tiled Shading" (Journal of Graphics Tools, 2011)</a>
+      — 타일드 포워드/디퍼드의 이론적 토대.
+    </li>
+    <li>
+      <a href="https://www.aortiz.me/2018/12/21/CG.html" target="_blank" rel="noopener">
+        Ángel Ortiz — "A Primer On Efficient Rendering Algorithms &amp; Clustered Shading" (2018)</a>
+      — 타일드→클러스터드로 이어지는 실전 정리.
+    </li>
+    <li>
+      <a href="https://www.gdcvault.com/play/1015493/A-Tiled-Deferred-Shading-Approach" target="_blank" rel="noopener">
+        DICE / Frostbite — "Deferred / Tiled Shading" (SIGGRAPH·GDC 강연 자료)</a>
+      — 프로덕션 엔진의 타일드 컬링 적용 사례.
+    </li>
+  </ul>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-forward.html">← Forward 렌더링</a>
+    <a href="./06-clustered.html">Clustered Shading →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0(Compute)</div>
+</main>
+<script src="./highlight.js"></script>
+<script>
+/* ── 히어로 배너: 화면을 타일로 나눠 광원 컬링을 표현하는 2D 애니메이션.
+   빌드 없음 · 격리 실행 · 캔버스 크기 피드백 루프 방지(논리 크기를 표시 크기에서 얻고 height 속성 재대입 안 함). */
+(function () {
+  try {
+    var cv = document.getElementById("fpHeroCanvas");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    var W = 0, H = 0, dpr = 1;
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function rand(a, b) { return a + Math.random() * (b - a); }
+    var lights = [];
+    for (var i = 0; i < 22; i++) {
+      lights.push({
+        x: rand(0, 1), y: rand(0, 1),
+        r: rand(60, 130),
+        vx: rand(-0.03, 0.03), vy: rand(-0.03, 0.03),
+        hue: rand(90, 190)
+      });
+    }
+
+    var t0 = null;
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+
+      var TILE = 44;
+      var cols = Math.ceil(W / TILE);
+      var rows = Math.ceil(H / TILE);
+
+      // 광원 이동
+      for (var i = 0; i < lights.length; i++) {
+        var L = lights[i];
+        L.x += L.vx * 0.016 + Math.sin(t * 0.5 + i) * 0.0004;
+        L.y += L.vy * 0.016;
+        if (L.x < -0.1) L.x = 1.1; if (L.x > 1.1) L.x = -0.1;
+        if (L.y < -0.1) L.y = 1.1; if (L.y > 1.1) L.y = -0.1;
+      }
+
+      // 타일별 광원 겹침 카운트 → 초록 히트맵
+      for (var cy = 0; cy < rows; cy++) {
+        for (var cx = 0; cx < cols; cx++) {
+          var px = cx * TILE, py = cy * TILE;
+          var ccx = px + TILE / 2, ccy = py + TILE / 2;
+          var count = 0;
+          for (var k = 0; k < lights.length; k++) {
+            var lx = lights[k].x * W, ly = lights[k].y * H;
+            var dx = lx - ccx, dy = ly - ccy;
+            if (dx * dx + dy * dy < lights[k].r * lights[k].r) count++;
+          }
+          if (count > 0) {
+            var a = Math.min(0.5, count * 0.09);
+            ctx.fillStyle = "rgba(126,231,135," + a.toFixed(3) + ")";
+            ctx.fillRect(px, py, TILE - 1, TILE - 1);
+          }
+        }
+      }
+
+      // 타일 그리드 선
+      ctx.strokeStyle = "rgba(126,231,135,0.10)";
+      ctx.lineWidth = 1;
+      for (var gx = 0; gx <= cols; gx++) {
+        ctx.beginPath(); ctx.moveTo(gx * TILE, 0); ctx.lineTo(gx * TILE, H); ctx.stroke();
+      }
+      for (var gy = 0; gy <= rows; gy++) {
+        ctx.beginPath(); ctx.moveTo(0, gy * TILE); ctx.lineTo(W, gy * TILE); ctx.stroke();
+      }
+
+      // 광원(영향 반경 원 + 중심점)
+      for (var m = 0; m < lights.length; m++) {
+        var Lm = lights[m];
+        var mx = Lm.x * W, my = Lm.y * H;
+        var g = ctx.createRadialGradient(mx, my, 0, mx, my, Lm.r);
+        g.addColorStop(0, "hsla(" + Lm.hue + ",80%,70%,0.25)");
+        g.addColorStop(1, "hsla(" + Lm.hue + ",80%,70%,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(mx, my, Lm.r, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "hsla(" + Lm.hue + ",90%,80%,0.95)";
+        ctx.beginPath(); ctx.arc(mx, my, 2.5, 0, Math.PI * 2); ctx.fill();
+      }
+
+      rafId = window.requestAnimationFrame(draw);
+    }
+    var rafId = window.requestAnimationFrame(draw);
+  } catch (e) { /* 히어로 실패해도 페이지는 계속 */ }
+})();
+
+/* ── 직관 데모: 타일 그리드 × 광원 겹침 히트맵 (0=투명, 많을수록 빨강) ── */
+(function () {
+  try {
+    var cv = document.getElementById("fpDemoCanvas");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+    var tileEl = document.getElementById("fpTile");
+    var lightsEl = document.getElementById("fpLights");
+    var hud = document.querySelector("#fpDemo .hud");
+    if (!tileEl || !lightsEl) return;
+
+    var W = 0, H = 0, dpr = 1;
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function rand(a, b) { return a + Math.random() * (b - a); }
+    var lights = [];
+    function rebuildLights(n) {
+      lights = [];
+      for (var i = 0; i < n; i++) {
+        lights.push({
+          x: rand(0.05, 0.95), y: rand(0.05, 0.95),
+          r: rand(0.08, 0.20),
+          px: rand(0, Math.PI * 2), py: rand(0, Math.PI * 2),
+          sx: rand(0.2, 0.6), sy: rand(0.2, 0.6),
+          amp: rand(0.02, 0.06)
+        });
+      }
+    }
+
+    function syncLabels() {
+      var tv = tileEl.parentElement.querySelector(".gval");
+      var lv = lightsEl.parentElement.querySelector(".gval");
+      if (tv) tv.textContent = tileEl.value + " px";
+      if (lv) lv.textContent = lightsEl.value + " 개";
+    }
+    tileEl.addEventListener("input", syncLabels);
+    lightsEl.addEventListener("input", function () {
+      rebuildLights(parseInt(lightsEl.value, 10));
+      syncLabels();
+    });
+    rebuildLights(parseInt(lightsEl.value, 10));
+    syncLabels();
+
+    function heat(c) {
+      // 0=투명(계산 안 함), 많을수록 초록→노랑→빨강으로 뜨거워짐
+      if (c <= 0) return null;
+      var f = Math.min(1, c / 6);
+      var rC = Math.round(60 + f * 195);
+      var gC = Math.round(200 - f * 150);
+      var bC = Math.round(90 - f * 60);
+      var a = 0.20 + f * 0.55;
+      return "rgba(" + rC + "," + gC + "," + bC + "," + a.toFixed(3) + ")";
+    }
+
+    var t0 = null;
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "#0a0f0d";
+      ctx.fillRect(0, 0, W, H);
+
+      var TILE = parseInt(tileEl.value, 10);
+      var cols = Math.ceil(W / TILE);
+      var rows = Math.ceil(H / TILE);
+
+      // 광원 현재 위치(살짝 떠다님) + 화면 픽셀 반경
+      var lp = [];
+      for (var i = 0; i < lights.length; i++) {
+        var L = lights[i];
+        lp.push({
+          x: (L.x + Math.sin(t * L.sx + L.px) * L.amp) * W,
+          y: (L.y + Math.cos(t * L.sy + L.py) * L.amp) * H,
+          r: L.r * Math.min(W, H)
+        });
+      }
+
+      // 타일별 겹치는 광원 수 → 히트맵
+      var sum = 0, maxc = 0, ntiles = 0;
+      for (var cy = 0; cy < rows; cy++) {
+        for (var cx = 0; cx < cols; cx++) {
+          var px = cx * TILE, py = cy * TILE;
+          var ccx = px + TILE / 2, ccy = py + TILE / 2;
+          var count = 0;
+          for (var k = 0; k < lp.length; k++) {
+            var dx = lp[k].x - ccx, dy = lp[k].y - ccy;
+            var rr = lp[k].r + TILE * 0.5;   // 타일 반경까지 더해 절두체-구 근사
+            if (dx * dx + dy * dy < rr * rr) count++;
+          }
+          sum += count; ntiles++;
+          if (count > maxc) maxc = count;
+          var col = heat(count);
+          if (col) { ctx.fillStyle = col; ctx.fillRect(px, py, TILE, TILE); }
+        }
+      }
+
+      // 타일 그리드
+      ctx.strokeStyle = "rgba(200,220,210,0.10)";
+      ctx.lineWidth = 1;
+      for (var gx = 0; gx <= cols; gx++) {
+        ctx.beginPath(); ctx.moveTo(gx * TILE + 0.5, 0); ctx.lineTo(gx * TILE + 0.5, H); ctx.stroke();
+      }
+      for (var gy = 0; gy <= rows; gy++) {
+        ctx.beginPath(); ctx.moveTo(0, gy * TILE + 0.5); ctx.lineTo(W, gy * TILE + 0.5); ctx.stroke();
+      }
+
+      // 광원(영향 반경 + 중심)
+      for (var m = 0; m < lp.length; m++) {
+        ctx.strokeStyle = "rgba(255,233,170,0.35)";
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(lp[m].x, lp[m].y, lp[m].r, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = "rgba(255,220,120,0.95)";
+        ctx.beginPath(); ctx.arc(lp[m].x, lp[m].y, 3, 0, Math.PI * 2); ctx.fill();
+      }
+
+      if (hud) {
+        var avg = ntiles ? (sum / ntiles) : 0;
+        hud.innerHTML =
+          "타일 " + cols + "×" + rows + " · 광원 " + lights.length + "개<br>" +
+          "평균 타일 광원수 k = " + avg.toFixed(2) + "<br>" +
+          "최악 타일 = " + maxc + "개<br>" +
+          "픽셀은 자기 타일 k개만 계산 (N=" + lights.length + " 전부 ×)";
+      }
+
+      rafId = window.requestAnimationFrame(draw);
+    }
+    var rafId = window.requestAnimationFrame(draw);
+  } catch (e) { /* 데모 실패해도 페이지는 계속 */ }
+})();
+</script>
+</body>
+</html>

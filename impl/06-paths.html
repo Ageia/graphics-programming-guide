@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 렌더링 경로 (사례연구) — C++/DirectX 11</title>
+<meta name="description" content="같은 씬을 Forward·Forward+·Clustered·Deferred·Tiled Deferred·Visibility Buffer 여섯 경로로 그리는 비교. 광원 수 처리·MSAA·투명·대역폭을 기준으로 어느 경로를 언제 쓰는지 정리한 6장 렌더링 경로 사례연구 허브." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">렌더링 경로 (사례연구)</span>
+  </div>
+
+  <!-- 타이틀 히어로 배너: 같은 씬을 여러 경로로 그리는 느낌 = 화면을 타일/클러스터로 분할 -->
+  <div class="grass-hero" id="pathsHero">
+    <canvas id="pathsHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-sun"></div>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Rendering <span class="accent">Paths</span></h2>
+      <p class="gh-sub">Forward · Forward+ · Clustered · Deferred · Visibility · Case Study</p>
+    </div>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6 · CASE STUDY</span>
+  <h1>렌더링 경로 — 같은 씬, 여섯 가지 그리는 길</h1>
+  <p class="lead">
+    똑같은 3D 장면이라도 <strong>"어디서·언제 조명을 계산하느냐"</strong>에 따라 완전히 다른 파이프라인이 됩니다.
+    이것이 <strong>렌더링 경로(rendering path)</strong>입니다. 물체마다 모든 광원을 도는
+    <strong>Forward</strong>, 화면을 타일로 나눠 광원을 컬링하는 <strong>Forward+</strong>, 거기에 깊이축을 더한
+    <strong>Clustered</strong>, 조명을 뒤로 미루는 <strong>Deferred</strong>와 <strong>Tiled Deferred</strong>,
+    그리고 재질조차 미루는 <strong>Visibility Buffer</strong>까지 — 이 장은 <strong>같은 문제를 여섯 방식으로 푸는</strong>
+    사례연구입니다. 각 경로를 <strong>광원 수 처리 · MSAA · 투명 · 대역폭</strong>이라는 네 잣대로 비교하고,
+    각각을 Direct3D 11/HLSL로 <strong>원리부터 코드까지</strong> 파고듭니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 시리즈는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행렬 <strong>행 우선</strong> 저장, <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>, 텍스처 V축 위→아래.
+    조명 계산은 특별한 언급이 없으면 <strong>뷰 공간(view space)</strong>에서 합니다 — 카메라가 원점이라 시선 벡터가 단순해집니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">가장 중요한 한 문장</span>
+    렌더링 경로 선택은 결국 <strong>"광원이 얼마나 많은가"</strong>와 <strong>"MSAA·투명이 얼마나 중요한가"</strong>의
+    흥정입니다. 광원이 적고 투명·MSAA가 중요하면 <strong>Forward</strong>, 광원이 폭발하면 조명을 뒤로 미루거나
+    (<strong>Deferred</strong>) 픽셀이 볼 광원만 추려서(<strong>Forward+/Clustered</strong>) 비용을
+    <em>픽셀 × (전체 광원이 아닌) 근처 광원</em>으로 낮춥니다. 정답은 씬이 정합니다.
+  </div>
+
+  <!-- =========================================================
+       경로 비교표
+       ========================================================= -->
+  <h2 style="margin-top:40px;">경로 한눈에 비교</h2>
+  <p>
+    각 경로가 <strong>광원 수를 어떻게 감당하는지</strong>, <strong>MSAA·투명이 얼마나 쉬운지</strong>,
+    <strong>대역폭을 얼마나 먹는지</strong>를 한 표로 정리했습니다. 산문 세 문단보다 이 한 줄이 빠릅니다.
+  </p>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead>
+      <tr>
+        <th>경로</th>
+        <th>광원 수 처리</th>
+        <th>MSAA 난이도</th>
+        <th>투명 처리</th>
+        <th>대역폭</th>
+        <th>적합 상황</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Forward</strong></td>
+        <td>약함 — 픽셀마다 <em>모든</em> 광원 <code>O(P×N)</code></td>
+        <td>쉬움 — 하드웨어 MSAA 그대로</td>
+        <td>자연스러움 — 블렌딩 그대로</td>
+        <td>낮음 — G-buffer 없음</td>
+        <td>광원 적음 · 투명 많음 · 모바일/VR</td>
+      </tr>
+      <tr>
+        <td><strong>Forward+ (Tiled Forward)</strong></td>
+        <td>좋음 — 타일별 컬링, 픽셀은 근처 광원만</td>
+        <td>쉬움 — forward라 MSAA 유지</td>
+        <td>자연스러움 — forward 계열</td>
+        <td>중간 — 깊이 프리패스 + 타일 광원 리스트</td>
+        <td>많은 광원 + MSAA/투명 동시 필요</td>
+      </tr>
+      <tr>
+        <td><strong>Clustered</strong></td>
+        <td>매우 좋음 — 타일 + 깊이(Z) 3D 컬링</td>
+        <td>쉬움 — forward 계열 시</td>
+        <td>자연스러움 — forward 계열 시</td>
+        <td>중간 — 클러스터 광원 리스트</td>
+        <td>많은 광원 + 깊이 편차 큰 오픈월드</td>
+      </tr>
+      <tr>
+        <td><strong>Deferred (G-buffer)</strong></td>
+        <td>좋음 — 조명은 화면 픽셀 × 광원으로 고정</td>
+        <td>까다로움 — G-buffer MSAA 비쌈, 보통 FXAA/TAA</td>
+        <td>안 됨 — 별도 forward 패스 필요</td>
+        <td>높음 — 두꺼운 G-buffer 쓰기+읽기</td>
+        <td>많은 광원 · 불투명 위주 · 복잡한 조명</td>
+      </tr>
+      <tr>
+        <td><strong>Tiled Deferred</strong></td>
+        <td>매우 좋음 — 타일별 광원 컬링 + G-buffer</td>
+        <td>까다로움 — deferred와 동일</td>
+        <td>안 됨 — forward 보정 패스</td>
+        <td>높음 — G-buffer + 타일 리스트</td>
+        <td>매우 많은 광원 · 불투명 위주</td>
+      </tr>
+      <tr>
+        <td><strong>Visibility Buffer</strong></td>
+        <td>좋음 — 셰이딩 패스에서 컬링과 결합 가능</td>
+        <td>유리 — 픽셀당 ID라 에지 재보간</td>
+        <td>안 됨 — forward 보정 패스</td>
+        <td>매우 낮음 — 픽셀당 4~8B ID만 저장</td>
+        <td>고해상도(4K) · 많은 재질 · GPU-driven</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    표의 "MSAA 쉬움/까다로움"은 <strong>경로가 forward 계열이냐 deferred 계열이냐</strong>에 달렸습니다. Forward+·Clustered는
+    <em>forward로도 deferred로도</em> 구성할 수 있어, forward로 구성하면 MSAA·투명이 쉽고 deferred로 구성하면
+    G-buffer 특성을 따릅니다. 위 표는 흔한 <strong>forward 구성</strong>을 기준으로 적었습니다.
+  </div>
+
+  <!-- =========================================================
+       세부 페이지 카드
+       ========================================================= -->
+  <h2 style="margin-top:40px;">세부 페이지</h2>
+  <div class="hub-grid">
+    <a class="hub-card" href="./06-forward.html">
+      <div class="num">1 / 5</div>
+      <h3>Forward 렌더링</h3>
+      <p>물체마다, 픽셀마다 모든 광원을 루프. 단순·투명·MSAA에 강하지만 광원이 많으면 <code>O(픽셀×광원)</code>로 터진다.</p>
+      <div class="topics">픽셀×광원 · Blinn-Phong · 오버드로우 · 투명/MSAA</div>
+    </a>
+    <a class="hub-card" href="./06-forwardplus.html">
+      <div class="num">2 / 5</div>
+      <h3>Forward+ / Tiled Forward</h3>
+      <p>화면을 타일로 나눠, 각 타일에 영향 주는 광원 리스트를 컴퓨트 셰이더로 컬링. 픽셀은 자기 타일 광원만 돈다.</p>
+      <div class="topics">타일 컬링 · 컴퓨트 셰이더 · per-tile light list · 절두체 교차</div>
+    </a>
+    <a class="hub-card" href="./06-clustered.html">
+      <div class="num">3 / 5</div>
+      <h3>Clustered Shading</h3>
+      <p>타일에 깊이(Z) 슬라이스를 더한 3D 클러스터. 근/원 표면이 광원을 안 나눠 가져 Forward+의 깊이 한계를 깬다.</p>
+      <div class="topics">3D 클러스터 · 로그 Z 슬라이스 · 클러스터 인덱싱 · 오픈월드</div>
+    </a>
+    <a class="hub-card" href="./06-deferred.html">
+      <div class="num">4 / 5</div>
+      <h3>Deferred 렌더링 (G-buffer)</h3>
+      <p>지오메트리 패스에서 위치·법선·색을 G-buffer에 기록, 라이팅 패스에서 <em>보이는 픽셀만</em> 조명. 많은 광원의 고전 해법.</p>
+      <div class="topics">MRT · G-buffer · 라이팅 패스 · Tiled Deferred 확장</div>
+    </a>
+    <a class="hub-card" href="./06-visibility.html">
+      <div class="num">5 / 5</div>
+      <h3>Visibility Buffer</h3>
+      <p>픽셀당 삼각형/인스턴스 ID만 저장하고 재질은 셰이딩 패스로 미룬다(Deferred Texturing). G-buffer 대비 대역폭 급감.</p>
+      <div class="topics">ID 버퍼 · barycentric 재보간 · 대역폭 · GPU-driven · Nanite</div>
+    </a>
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">Deferred는 기존 페이지 재사용</span>
+    디퍼드 렌더링은 이미 <a href="./06-deferred.html">디퍼드 렌더링 세부 페이지</a>에서 G-buffer 생성 C++부터 라이팅 패스
+    HLSL까지 한 줄 한 줄 해부해 두었습니다. 여기서는 <strong>경로 비교의 한 축</strong>으로 링크만 연결합니다.
+    <strong>Tiled Deferred</strong>는 그 디퍼드 위에 Forward+식 타일 컬링을 얹은 변형으로, 원리는
+    <a href="./06-forwardplus.html">Forward+</a>의 라이트 컬링과 <a href="./06-deferred.html">Deferred</a>의 G-buffer를 합친 것입니다.
+  </div>
+
+  <!-- =========================================================
+       참고 링크
+       ========================================================= -->
+  <h2 style="margin-top:40px;">참고 링크</h2>
+  <ul>
+    <li><a href="https://www.3dgep.com/forward-plus/" target="_blank" rel="noopener">Forward+ (Tiled Forward) 정리 — 3D Game Engine Programming</a></li>
+    <li><a href="http://www.aortiz.me/2018/12/21/CG.html" target="_blank" rel="noopener">A Primer On Efficient Rendering Algorithms &amp; Clustered Shading (Ángel Ortiz, 2018)</a></li>
+    <li><a href="https://jcgt.org/published/0002/02/04/" target="_blank" rel="noopener">The Visibility Buffer (Schied &amp; Dachsbacher, JCGT 2013)</a></li>
+    <li><a href="https://www.advances.realtimerendering.com/s2016/" target="_blank" rel="noopener">The Devil is in the Details: id Tech 6 (Sousa &amp; Geffroy, SIGGRAPH 2016)</a></li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./06-advanced.html">← 6장. 고급 렌더링 허브</a>
+    <a href="./06-forward.html">Forward 렌더링 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+<script>
+/* 렌더링 경로 히어로 배너: 같은 씬을 여러 경로로 그리는 느낌.
+   화면을 타일 → 클러스터 → G-buffer 처럼 주기적으로 분할하는 애니메이션.
+   빌드 없음 · 격리 실행 · 캔버스 크기 피드백 루프 방지(논리 크기는 표시 크기에서 얻고 height 속성 재대입 금지). */
+(function () {
+  try {
+    var cv = document.getElementById("pathsHeroCanvas");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    // 논리(CSS 픽셀) 크기는 실제 표시 크기에서 얻는다. height 속성은 재대입하지 않는다.
+    var W = 0, H = 0, dpr = 1;
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = Math.round(W * dpr);   // 픽셀 버퍼만 갱신
+      cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // 이후 좌표는 CSS 픽셀 기준
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // 광원들(색색의 점, 영향 반경). 배경에서 천천히 떠다닌다.
+    function rand(a, b) { return a + Math.random() * (b - a); }
+    var LIGHT_HUES = [140, 48, 190, 8, 280, 100];
+    var lights = [];
+    for (var i = 0; i < 10; i++) {
+      lights.push({
+        x: rand(0.05, 0.95), y: rand(0.15, 0.9),
+        vx: rand(-0.03, 0.03), vy: rand(-0.02, 0.02),
+        r: rand(60, 130),
+        hue: LIGHT_HUES[i % LIGHT_HUES.length]
+      });
+    }
+
+    // 분할 모드를 순환: 없음 → 타일(2D) → 클러스터(타일+깊이) → G-buffer(사분할)
+    var MODES = ["FORWARD", "FORWARD+", "CLUSTERED", "DEFERRED"];
+    var t0 = null;
+
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+
+      // 광원 이동(경계에서 반사)
+      for (var i = 0; i < lights.length; i++) {
+        var L = lights[i];
+        L.x += L.vx * 0.016; L.y += L.vy * 0.016;
+        if (L.x < 0.03 || L.x > 0.97) L.vx *= -1;
+        if (L.y < 0.1 || L.y > 0.95) L.vy *= -1;
+      }
+
+      // 배경 광원 글로우(부드러운 radial)
+      ctx.globalCompositeOperation = "lighter";
+      for (var i = 0; i < lights.length; i++) {
+        var L = lights[i];
+        var cx = L.x * W, cy = L.y * H;
+        var g = ctx.createRadialGradient(cx, cy, 0, cx, cy, L.r);
+        var pulse = 0.5 + 0.5 * Math.sin(t * 1.2 + i);
+        g.addColorStop(0, "hsla(" + L.hue + ",80%,60%," + (0.28 + pulse * 0.12).toFixed(3) + ")");
+        g.addColorStop(1, "hsla(" + L.hue + ",80%,60%,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(cx, cy, L.r, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalCompositeOperation = "source-over";
+
+      // 4초마다 분할 모드 전환, 전환 사이 0.6초 페이드
+      var period = 4.0;
+      var phase = (t % (period * MODES.length)) / period;
+      var modeIdx = Math.floor(phase) % MODES.length;
+      var frac = phase - Math.floor(phase);
+      var appear = Math.min(1, frac / 0.15);          // 등장
+      var vanish = Math.min(1, (1 - frac) / 0.15);    // 퇴장
+      var gridA = Math.min(appear, vanish);           // 그리드 불투명도
+
+      ctx.save();
+      ctx.strokeStyle = "rgba(126,231,135," + (0.10 + gridA * 0.32).toFixed(3) + ")";
+      ctx.lineWidth = 1;
+
+      var mode = MODES[modeIdx];
+      if (mode === "FORWARD") {
+        // 분할 없음: 은은한 외곽선만
+        ctx.strokeRect(6, 6, W - 12, H - 12);
+      } else if (mode === "FORWARD+") {
+        // 2D 타일 격자
+        var ts2 = 64;
+        for (var x = 0; x <= W; x += ts2) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+        for (var y = 0; y <= H; y += ts2) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+      } else if (mode === "CLUSTERED") {
+        // 타일 + 깊이(사선) 슬라이스로 3D 클러스터 느낌
+        var ts3 = 64;
+        for (var x = 0; x <= W; x += ts3) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+        for (var y = 0; y <= H; y += ts3) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+        // 로그 간격 깊이선(원근으로 좁아지는 세로선)
+        ctx.strokeStyle = "rgba(86,212,221," + (gridA * 0.30).toFixed(3) + ")";
+        var near = 0.06, far = 1.0, slices = 6;
+        for (var s = 1; s < slices; s++) {
+          var frz = Math.exp(Math.log(near) + (Math.log(far) - Math.log(near)) * s / slices);
+          var xx = frz * W;
+          ctx.beginPath(); ctx.moveTo(xx, H * 0.12); ctx.lineTo(xx, H * 0.88); ctx.stroke();
+        }
+      } else if (mode === "DEFERRED") {
+        // G-buffer 사분할(위치/법선/알베도/깊이 4장 느낌)
+        ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H);
+        ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
+        var labels = ["POSITION", "NORMAL", "ALBEDO", "DEPTH"];
+        ctx.font = "600 12px 'JetBrains Mono', Consolas, monospace";
+        ctx.fillStyle = "rgba(226,255,224," + (gridA * 0.6).toFixed(3) + ")";
+        var qx = [14, W / 2 + 14, 14, W / 2 + 14];
+        var qy = [22, 22, H / 2 + 22, H / 2 + 22];
+        for (var q = 0; q < 4; q++) ctx.fillText(labels[q], qx[q], qy[q]);
+      }
+      ctx.restore();
+
+      // 현재 경로 이름 배지(우상단, 캡션과 겹치지 않게)
+      ctx.font = "700 13px 'JetBrains Mono', Consolas, monospace";
+      var label = mode;
+      var tw = ctx.measureText(label).width;
+      ctx.fillStyle = "rgba(8,14,20,0.55)";
+      ctx.fillRect(W - tw - 34, 16, tw + 20, 26);
+      ctx.fillStyle = "rgba(126,231,135," + (0.55 + gridA * 0.4).toFixed(3) + ")";
+      ctx.fillText(label, W - tw - 24, 34);
+
+      rafId = window.requestAnimationFrame(draw);
+    }
+    var rafId = window.requestAnimationFrame(draw);
+  } catch (e) { /* 히어로 실패해도 페이지는 계속 */ }
+})();
+</script>
+</body>
+</html>

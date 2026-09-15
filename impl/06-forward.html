@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: Forward 렌더링 (Forward Rendering) — C++/DirectX 11</title>
+<meta name="description" content="물체마다 픽셀 셰이더에서 모든 광원을 루프로 도는 Forward 렌더링을 원리(O(픽셀×광원) 비용 폭증)부터 HLSL Blinn-Phong 픽셀 셰이더 구현·장단점·실무 사례까지 Direct3D 11/HLSL로 해부하는 6장 렌더링 경로 사례연구." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <a href="./06-paths.html">렌더링 경로</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">Forward 렌더링</span>
+  </div>
+
+  <!-- 타이틀 히어로 배너: 물체마다 여러 광원이 비추는 2D 씬 -->
+  <div class="grass-hero" id="fwdHero">
+    <canvas id="fwdHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-sun"></div>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Forward <span class="accent">Rendering</span></h2>
+      <p class="gh-sub">물체마다 모든 광원을 · Path Case Study</p>
+    </div>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6 · RENDERING PATH</span>
+  <h1>Forward 렌더링 — 물체마다 모든 광원을 돈다</h1>
+  <p class="lead">
+    Forward(포워드, "정방향") 렌더링은 우리가 가장 먼저 배우는 <strong>가장 자연스러운 방식</strong>입니다.
+    물체를 하나씩 그리면서, 그 물체가 덮는 <strong>픽셀마다 픽셀 셰이더 안에서 모든 광원을 반복문으로 돌며</strong> 색을 더합니다.
+    구현이 단순하고, 투명·MSAA·재질 자유도가 좋다는 강력한 장점이 있지만, 광원이 많아지면 비용이
+    <strong>O(그린 픽셀 × 광원 수)</strong>로 터집니다. 이 페이지에서는 왜 그렇게 터지는지 원리로 짚고,
+    직관 데모로 눈으로 확인한 뒤, 컴파일되는 HLSL Blinn-Phong 포워드 라이팅 픽셀 셰이더를 한 줄씩 구현합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행렬 <strong>행 우선 저장</strong>, <strong>왼손 좌표계</strong>, 클립 공간 <code>z ∈ [0,1]</code>, 텍스처 V축은
+    위→아래입니다. 이 페이지의 조명 계산은 <strong>뷰 공간(view space)</strong>에서 이뤄집니다 — 좌표계가 무엇이든
+    "카메라를 원점에 둔 공간"이라는 점만 일관되면 조명 공식은 동일합니다.
+  </div>
+
+  <!-- =========================================================
+       1. 원리 (Why)
+       ========================================================= -->
+  <h2 style="margin-top:40px;">1. 원리 — 왜 O(객체×광원)로 터지나</h2>
+  <p>
+    직관부터 한 문장으로: <strong>포워드는 "그린 픽셀 하나하나마다, 그 자리에 닿을 수 있는 모든 광원을 다 계산"하기 때문에,
+    광원이 늘면 그만큼 픽셀당 계산이 곱해져 폭증합니다.</strong>
+  </p>
+  <p>
+    좀 더 정확히 봅시다. 포워드에서 조명은 <strong>픽셀 셰이더 안에서</strong> 일어납니다. 어떤 물체를 그리면,
+    래스터라이저가 그 물체가 덮는 화면 픽셀들을 만들어 내고, 각 픽셀마다 픽셀 셰이더가 한 번씩 호출됩니다.
+    그 셰이더 안에는 <code>for (i = 0; i &lt; 광원수; ++i)</code> 형태의 <strong>광원 루프</strong>가 들어 있어서,
+    한 픽셀을 칠할 때 모든 광원의 확산·스페큘러·감쇠를 다 더합니다.
+  </p>
+  <p>
+    그래서 셰이딩 총비용은 대략 이렇게 셀 수 있습니다.
+  </p>
+  <ul>
+    <li>
+      <strong>셰이딩 비용 ≈ (그린 픽셀 수 P) × (광원 수 N)</strong> → <strong>O(P × N)</strong>.
+      광원 N=1이면 픽셀당 1번, N=64면 픽셀당 64번의 조명 계산이 들어갑니다.
+    </li>
+    <li>
+      여기서 "그린 픽셀 수 P"는 화면 픽셀 수가 아니라 <strong>래스터화된 프래그먼트 수</strong>입니다.
+      즉 앞뒤로 겹친 물체가 많으면 <strong>오버드로우(overdraw)</strong>가 P를 부풀립니다.
+      뒤에 있어 나중에 가려질 픽셀도 일단 조명을 다 계산한 뒤 앞 물체가 덮어써 버리므로,
+      계산해 놓고 버리는 낭비가 광원 수만큼 곱해집니다. 최악의 경우 <strong>O(오버드로우 픽셀 × N)</strong>이 됩니다.
+    </li>
+  </ul>
+  <p>
+    대조적으로 디퍼드(deferred)는 조명을 <em>화면에 최종으로 보이는 픽셀에 대해서만 한 번</em> 하므로 비용이
+    <code>화면 픽셀 수 × 광원 수</code>로 고정됩니다(오버드로우가 셰이딩 비용에 곱해지지 않음). 이 한 가지 차이가
+    "광원 많은 장면에서 포워드가 불리하다"의 정체입니다. 포워드의 반격은 다음 절의 장점표에서 봅니다.
+  </p>
+
+  <!-- =========================================================
+       2. 직관 데모 (What)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">2. 직관 데모 — 광원 수를 올리면 계산량이 어떻게 폭증하나</h2>
+  <p>
+    아래 씬에는 몇 개의 물체(원·사각형)와 떠다니는 광원 점들이 있습니다. 슬라이더로 <strong>광원 수 N</strong>을
+    조절해 보세요. 광원 하나를 추가할 때마다 <em>모든 물체의 모든 픽셀</em>이 그 광원을 한 번 더 계산해야 하므로,
+    상대 셰이딩 비용 막대가 <strong>선형으로</strong> 길어지고, 임계치를 넘으면 빨갛게 물들며 "폭증"을 알립니다.
+  </p>
+
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas id="fwdDemoCanvas" class="gcanvas" width="900" height="360"></canvas>
+      <div class="hud" id="fwdHud">비용 계산 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl">
+        <label>광원 수 N <span class="gval" id="fwdLightsVal">8</span></label>
+        <input type="range" id="fwdLights" min="1" max="64" value="8" />
+      </div>
+    </div>
+    <p class="ghint">
+      막대 = 상대 셰이딩 비용 ∝ (그린 픽셀 P) × (광원 N). 물체가 겹칠수록 P가 커져 같은 N이라도 더 비싸집니다.
+      디퍼드였다면 이 막대는 N에만 비례하고 오버드로우에는 둔감합니다.
+    </p>
+  </div>
+
+  <!-- =========================================================
+       3. 비교표 (Trade-offs)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">3. Forward의 장단점 한눈에</h2>
+  <p>
+    포워드는 "광원 많음"이라는 단 한 곳에서 약할 뿐, 나머지 거의 모든 실무 요구에서 강합니다. 그래서 아직도
+    수많은 엔진의 기본값입니다. 산문 세 문단보다 표 한 줄이 낫습니다.
+  </p>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead><tr><th>항목</th><th>Forward의 특성</th><th>이유</th></tr></thead>
+    <tbody>
+      <tr><td><strong>광원 많을 때</strong></td><td>약함</td><td>픽셀마다 모든 광원을 돌아 <code>픽셀 × 광원</code>이 폭증(오버드로우까지 곱해짐).</td></tr>
+      <tr><td><strong>투명 처리</strong></td><td>강함</td><td>알파 블렌딩이 자연스러움. 반투명 표면을 그리는 순서대로 뒤에서 앞으로 섞으면 됨(디퍼드는 픽셀당 표면 하나만 담아 반투명이 곤란).</td></tr>
+      <tr><td><strong>MSAA</strong></td><td>강함</td><td>하드웨어 MSAA를 그대로 켜면 됨. 조명이 서브샘플 단위로 정확히 동작(디퍼드는 G-buffer 단계 MSAA가 까다로워 보통 후처리 AA로 대체).</td></tr>
+      <tr><td><strong>구현 난이도</strong></td><td>강함</td><td>단순함. G-buffer·MRT·복원 로직 없이 "그리면서 조명"이 끝. 입문·프로토타입에 이상적.</td></tr>
+      <tr><td><strong>대역폭</strong></td><td>강함</td><td>넓은 G-buffer를 쓰고 읽지 않음. 프레임버퍼만 오가므로 메모리 대역폭 부담이 작음(타일드 모바일 GPU에 유리).</td></tr>
+      <tr><td><strong>재질 다양성</strong></td><td>강함</td><td>물체마다 셰이더를 자유롭게 바꿈. 재질 파라미터가 G-buffer 크기에 갇히지 않아 표현이 자유로움.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- =========================================================
+       4. 구현 (How)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">4. 구현 — HLSL 포워드 라이팅 픽셀 셰이더</h2>
+  <p>
+    물리 → 근사 → 코드로 착지합시다. ① <strong>이론</strong>: 한 점의 색은 그 점에 들어온 모든 빛을 재질 규칙(확산·반사)대로
+    섞은 것입니다. ② <strong>실시간 근사</strong>: 그 "모든 빛"을 유한한 점광원 N개의 합으로 근사하고, 각 광원은
+    Blinn-Phong(확산 + 하프 벡터 스페큘러 + 역이차 감쇠)로 계산합니다. ③ <strong>코드</strong>: 그래서 픽셀 셰이더가
+    앰비언트를 깔고 광원 루프를 돌며 기여를 누적하는 아래 형태가 됩니다. 디퍼드 라이팅 패스와 달리, 이 셰이더는
+    <em>물체를 그리는 그 드로우 안에서</em> 실행됩니다 — G-buffer를 거치지 않습니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>forward.hlsl (픽셀 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 재질 텍스처: 물체별로 자유롭게 바인딩 (포워드의 장점 — 재질 자유도)
+Texture2D    diffuseTex : register(t0);
+SamplerState samp       : register(s0);
+
+// 광원 하나 = 정확히 32바이트로 정렬:
+//   float3(12B) + float(4B) = 16B  가 두 번 반복.
+//   Linear/Quadratic 이 float3 사이에 끼어 패딩 역할까지 겸함.
+struct Light {
+    float3 Position;   // 뷰 공간 광원 위치
+    float  Linear;     // 감쇠 1차 계수
+    float3 Color;      // 광원 색
+    float  Quadratic;  // 감쇠 2차 계수
+};
+
+#define NR_LIGHTS 32   // 컴파일 타임 상수: 배열 크기 == 루프 상한
+
+cbuffer ForwardConstants : register(b0) {
+    Light lights[NR_LIGHTS];
+    float specularStrength;   // 표면 스페큘러 세기
+    float3 _pad;              // 16바이트 경계 정렬용 패딩
+};
+
+// 정점 셰이더가 뷰 공간으로 변환해 보간·전달해 준 값들
+struct PSIn {
+    float4 posH    : SV_Position; // 화면 픽셀 좌표(래스터라이저 채움)
+    float3 fragPos : VIEWPOS;     // 뷰 공간 표면 위치
+    float3 normal  : NORMAL;      // 뷰 공간 법선
+    float2 uv      : TEXCOORD0;   // 텍스처 좌표
+};
+
+float4 main(PSIn i) : SV_Target {
+    // 1) 재료 준비: 표면 색(알베도)과 정규화된 법선
+    float3 Albedo = diffuseTex.Sample(samp, i.uv).rgb;
+    float3 N      = normalize(i.normal); // 보간으로 길이가 틀어져 재정규화
+
+    // 뷰 공간에서 카메라는 원점이므로 시선 벡터 V = normalize(-fragPos)
+    float3 V = normalize(-i.fragPos);
+
+    // 2) 앰비언트: 어떤 광원에도 안 닿는 면도 새까맣지 않게 바닥값
+    float3 lighting = Albedo * 0.1;
+
+    // 3) 광원 루프 — 포워드의 심장. 픽셀마다 N개를 전부 돈다.
+    [loop] for (int k = 0; k &lt; NR_LIGHTS; ++k) {
+        // 표면점에서 광원으로 향하는 단위 벡터
+        float3 L = normalize(lights[k].Position - i.fragPos);
+
+        // 확산(램버트): 법선과 광원 방향의 내적 = cosθ, 뒷면은 0으로 clamp
+        float diff = max(dot(N, L), 0.0);
+
+        // 스페큘러(블린-퐁): 하프 벡터 H로 하이라이트, 지수 32는 광택
+        float3 H   = normalize(L + V);
+        float  spec = pow(max(dot(N, H), 0.0), 32.0) * specularStrength;
+
+        // 거리 역이차 감쇠: 1 / (1 + a·d + b·d²)
+        float d     = length(lights[k].Position - i.fragPos);
+        float atten = 1.0 / (1.0 + lights[k].Linear * d
+                                 + lights[k].Quadratic * d * d);
+
+        // 확산은 표면 색을 입고, 스페큘러는 광원 색 그대로. 감쇠·광원색 곱해 누적
+        lighting += (diff * Albedo + spec) * lights[k].Color * atten;
+    }
+
+    return float4(lighting, 1.0);
+}</code></pre>
+  </div>
+
+  <p>
+    디퍼드 라이팅 패스의 코드와 조명 공식 자체는 <strong>글자 그대로 동일</strong>합니다(같은 Blinn-Phong,
+    같은 <code>Light</code> 정렬 규약). 다른 것은 <em>어디서 도느냐</em>뿐입니다. 디퍼드는 풀스크린 삼각형 하나에서
+    화면 픽셀당 한 번, 포워드는 <strong>물체를 그리는 매 드로우의 각 프래그먼트에서</strong> 돕니다. 그래서 오버드로우가
+    곧바로 비용이 됩니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <code>#define NR_LIGHTS 32</code>처럼 <strong>광원 수를 고정</strong>하면 루프가 정적으로 펼쳐져(unroll) 빠르지만,
+    장면마다 광원 수가 달라지면 여러 벌의 셰이더 <strong>순열(permutation)</strong>을 컴파일해야 합니다. 반대로 광원 수를
+    상수 버퍼 변수로 받아 <strong>동적 분기</strong>로 돌면 순열은 하나로 끝나지만, GPU가 최대 광원 수 기준으로 레지스터를
+    잡거나 워프 내 발산(divergence)으로 오버헤드가 생길 수 있습니다. 위 코드는 명시적으로 <code>[loop]</code> 특성을 달아
+    언롤 대신 실제 루프를 강제했습니다 — 상황에 맞게 <code>[unroll]</code>과 저울질하세요.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    광원이 많아지면(수십~수백 개) 순수 포워드는 <code>픽셀 × 광원</code>에서 무너집니다. 해법은 광원 계산 전에
+    <strong>라이트 컬링(light culling)</strong>을 넣는 것: 화면을 타일(또는 클러스터)로 쪼개 각 타일이 <em>실제로 닿는
+    광원 목록만</em> 만든 뒤, 픽셀은 그 짧은 목록만 돕니다. 이렇게 발전한 경로가 <strong>Forward+ (Tiled Forward)</strong>로,
+    포워드의 장점(투명·MSAA·재질 자유)을 지키면서 광원 확장성 문제만 해결합니다. 자세한 구현은
+    <a href="./06-forwardplus.html">Forward+ (Tiled Forward)</a> 페이지에서 이어집니다.
+  </div>
+
+  <!-- =========================================================
+       5. 실무 노트
+       ========================================================= -->
+  <h2 style="margin-top:44px;">5. 언제 쓰나 — 실무 노트</h2>
+  <p>
+    "광원이 적을 때 / 투명이 많을 때 / MSAA가 필요할 때"는 거의 자동으로 포워드입니다. 특히 모바일에서는 선택의 여지가
+    크지 않습니다.
+  </p>
+  <ul>
+    <li>
+      <strong>모바일 타일드 GPU(Adreno·Mali·Apple)</strong>: 이들 GPU는 화면을 작은 타일로 나눠 온칩 메모리에서 처리해
+      대역폭을 아끼는 구조입니다. 넓은 G-buffer를 시스템 메모리로 쓰고 다시 읽는 디퍼드는 이 온칩 이점을 깨뜨려
+      대역폭·전력에서 손해입니다. 그래서 모바일·VR에서는 <strong>포워드가 기본</strong>입니다.
+    </li>
+    <li>
+      <strong>Unreal Engine — Forward Shading Renderer</strong>: 언리얼은 VR과 모바일, 그리고 투명·MSAA가 중요한
+      프로젝트를 위해 포워드 셰이딩 경로를 별도로 제공합니다. VR에서 하드웨어 MSAA로 깔끔한 에지를 얻는 것이 핵심 동기입니다.
+    </li>
+    <li>
+      <strong>Unity URP(Universal Render Pipeline) — Forward</strong>: URP의 기본 경로도 포워드입니다(모바일·중급 하드웨어
+      타깃). 최근에는 Forward+(클러스터드 라이트 컬링) 옵션도 제공해 광원 확장성을 보강합니다.
+    </li>
+    <li>
+      <strong>투명·파티클</strong>: 유리·연기·파티클처럼 여러 겹을 섞어야 하는 표면은 알파 블렌딩이 필수라 사실상 포워드로만
+      처리됩니다. 디퍼드 기반 엔진도 반투명은 별도 포워드 패스로 덧그립니다.
+    </li>
+  </ul>
+  <div class="callout">
+    <span class="tag warn">실무</span>
+    "디퍼드가 최신이고 포워드는 구식"이라는 오해가 흔하지만, 현대 AAA도 포워드 계열이 많습니다. 예컨대
+    <strong>Doom (2016)</strong>은 순수 포워드가 아니라 <strong>Forward+ (클러스터드 포워드)</strong> 계열로,
+    타일/클러스터 라이트 컬링으로 광원 확장성을 확보하면서 포워드의 MSAA·투명 이점을 지킵니다. 순수 디퍼드/포워드의
+    이분법보다, 오늘날 실무는 <strong>Forward+·클러스터드·타일드 디퍼드</strong> 같은 하이브리드로 수렴하고 있습니다.
+    프로젝트가 광원 소수·투명 다수·MSAA 필요·모바일이라면 포워드(또는 Forward+)가 정답에 가깝습니다.
+  </div>
+
+  <!-- =========================================================
+       6. 더 읽기
+       ========================================================= -->
+  <h2 style="margin-top:44px;">6. 더 읽기</h2>
+  <ul>
+    <li>
+      Takahiro Harada, Jay McKee, Jason C. Yang, <a href="https://takahiroharada.wordpress.com/wp-content/uploads/2015/04/forward_plus.pdf" target="_blank" rel="noopener">"Forward+: Bringing Deferred Lighting to the Next Level"</a> (Eurographics 2012) — 타일드 라이트 컬링으로 포워드를 확장한 기법의 원전.
+    </li>
+    <li>
+      Epic Games, <a href="https://dev.epicgames.com/documentation/en-us/unreal-engine/forward-shading-renderer-in-unreal-engine" target="_blank" rel="noopener">"Forward Shading Renderer" (Unreal Engine 공식 문서)</a> — VR·MSAA 위주로 포워드를 쓰는 실무 근거와 설정.
+    </li>
+    <li>
+      Joey de Vries, <a href="https://learnopengl.com/Advanced-Lighting/Deferred-Shading" target="_blank" rel="noopener">"Deferred Shading" (LearnOpenGL)</a> — 포워드와 디퍼드의 비용을 나란히 비교하며 <code>픽셀 × 광원</code> 폭증을 설명(이 페이지 셰이더의 원형).
+    </li>
+    <li>
+      Ola Olsson, Markus Billeter, Ulf Assarsson, <a href="https://efficientshading.com/wp-content/uploads/clustered_shading_preprint.pdf" target="_blank" rel="noopener">"Clustered Deferred and Forward Shading"</a> (HPG 2012) — 포워드/디퍼드 경로를 클러스터드로 통합·비교한 후속 연구.
+    </li>
+  </ul>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-paths.html">← 렌더링 경로 사례연구</a>
+    <a href="./06-forwardplus.html">Forward+ (Tiled Forward) →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+<script>
+/* 히어로 배너: 물체들 위로 여러 광원이 떠다니는 2D 씬.
+   빌드 없음 · 격리 실행 · 캔버스 크기 피드백 루프 방지(논리 크기는 표시 크기에서만 읽음). */
+(function () {
+  try {
+    var cv = document.getElementById("fwdHeroCanvas");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    var W = 0, H = 0, dpr = 1;
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = Math.round(W * dpr);   // 실제 픽셀 버퍼만 갱신
+      cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function rand(a, b) { return a + Math.random() * (b - a); }
+    // 물체(피셰이딩 대상)
+    var objs = [
+      { x: 0.22, y: 0.68, r: 46 },
+      { x: 0.5,  y: 0.74, r: 60 },
+      { x: 0.78, y: 0.66, r: 40 }
+    ];
+    // 떠다니는 광원들
+    var lights = [];
+    for (var i = 0; i < 7; i++) {
+      lights.push({
+        x: rand(0.08, 0.92), y: rand(0.15, 0.55),
+        phase: rand(0, Math.PI * 2), speed: rand(0.3, 0.7),
+        amp: rand(0.04, 0.1), baseY: rand(0.15, 0.55),
+        hue: rand(20, 210)
+      });
+    }
+
+    var t0 = null;
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+
+      // 광원 위치 갱신 + 빛 halo
+      for (var i = 0; i < lights.length; i++) {
+        var L = lights[i];
+        L.y = L.baseY + Math.sin(t * L.speed + L.phase) * L.amp;
+        var lx = L.x * W, ly = L.y * H;
+        var g = ctx.createRadialGradient(lx, ly, 0, lx, ly, 120);
+        g.addColorStop(0, "hsla(" + L.hue + ",90%,65%,0.30)");
+        g.addColorStop(1, "hsla(" + L.hue + ",90%,65%,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+      }
+
+      // 물체: 여러 광원이 합쳐 비추는 느낌으로 밝기 누적
+      for (var o = 0; o < objs.length; o++) {
+        var ob = objs[o];
+        var ox = ob.x * W, oy = ob.y * H;
+        var lum = 0.12;
+        for (var j = 0; j < lights.length; j++) {
+          var Lj = lights[j];
+          var dx = Lj.x * W - ox, dy = Lj.y * H - oy;
+          var dist = Math.sqrt(dx * dx + dy * dy) + 1;
+          lum += 60 / dist; // 거리 감쇠 근사(광원마다 더함 = 포워드 루프의 은유)
+        }
+        lum = Math.min(1, lum);
+        var base = ctx.createRadialGradient(ox - ob.r * 0.3, oy - ob.r * 0.4, ob.r * 0.2, ox, oy, ob.r);
+        base.addColorStop(0, "rgba(" + Math.round(120 * lum + 80) + "," + Math.round(210 * lum + 40) + "," + Math.round(150 * lum + 60) + ",0.95)");
+        base.addColorStop(1, "rgba(30,50,45,0.9)");
+        ctx.fillStyle = base;
+        ctx.beginPath();
+        ctx.arc(ox, oy, ob.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // 광원 코어 점
+      for (var k = 0; k < lights.length; k++) {
+        var Lk = lights[k];
+        ctx.fillStyle = "hsla(" + Lk.hue + ",95%,72%,0.95)";
+        ctx.beginPath();
+        ctx.arc(Lk.x * W, Lk.y * H, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      window.requestAnimationFrame(draw);
+    }
+    window.requestAnimationFrame(draw);
+  } catch (e) { /* 히어로 실패해도 페이지는 계속 */ }
+})();
+
+/* 직관 데모: 광원 수 N을 올리면 상대 셰이딩 비용(∝ 그린 픽셀 × N)이 선형 폭증. */
+(function () {
+  try {
+    var cv = document.getElementById("fwdDemoCanvas");
+    var slider = document.getElementById("fwdLights");
+    var val = document.getElementById("fwdLightsVal");
+    var hud = document.getElementById("fwdHud");
+    if (!cv || !slider || !val || !hud) return; // 대상 없으면 조용히 중단
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    var W = 0, H = 0, dpr = 1;
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // 겹치는 물체들(오버드로우 → 그린 픽셀 P 부풀림을 은유)
+    var objs = [
+      { x: 0.28, y: 0.42, r: 0.16 },
+      { x: 0.5,  y: 0.5,  r: 0.20 },
+      { x: 0.7,  y: 0.44, r: 0.15 },
+      { x: 0.42, y: 0.62, r: 0.13 }
+    ];
+    // 상대 P: 물체 면적 합(겹침 포함) — 화면 대비 비율로 고정한 상수 은유
+    var P = 2.6; // 오버드로우 포함 상대 그린 픽셀 지수
+
+    var lights = [];
+    function rebuildLights(n) {
+      lights = [];
+      for (var i = 0; i < n; i++) {
+        lights.push({
+          x: (i * 0.113 + 0.07) % 1,
+          baseY: 0.12 + ((i * 0.191) % 1) * 0.2,
+          phase: i * 1.7, speed: 0.4 + (i % 5) * 0.12,
+          hue: (i * 47) % 360
+        });
+      }
+    }
+
+    var N = parseInt(slider.value, 10);
+    rebuildLights(N);
+    function onInput() {
+      N = parseInt(slider.value, 10);
+      val.textContent = N;
+      rebuildLights(N);
+    }
+    slider.addEventListener("input", onInput);
+    onInput();
+
+    var t0 = null;
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+
+      // 배경
+      ctx.fillStyle = "rgba(18,22,30,0.6)";
+      ctx.fillRect(0, 0, W, H);
+
+      // 물체 그리기
+      for (var o = 0; o < objs.length; o++) {
+        var ob = objs[o];
+        var ox = ob.x * W, oy = ob.y * H, or = ob.r * Math.min(W, H);
+        ctx.fillStyle = "rgba(70,120,110,0.55)";
+        ctx.beginPath();
+        ctx.arc(ox, oy, or, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // 광원 점(장식용으로 살짝 움직임)
+      for (var i = 0; i < lights.length; i++) {
+        var L = lights[i];
+        var ly = (L.baseY + Math.sin(t * L.speed + L.phase) * 0.03) * H * 0.9;
+        var lx = L.x * W;
+        ctx.fillStyle = "hsla(" + L.hue + ",90%,68%,0.95)";
+        ctx.beginPath();
+        ctx.arc(lx, ly, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // ---- 비용 막대: 상대 비용 = P × N (선형) ----
+      var cost = P * N;             // 상대 셰이딩 비용
+      var maxCost = P * 64;         // 슬라이더 최대에서의 비용
+      var frac = cost / maxCost;    // 0~1
+      var barX = 24, barW = W - 48, barY = H - 40, barH = 20;
+
+      // 트랙
+      ctx.fillStyle = "rgba(255,255,255,0.08)";
+      ctx.fillRect(barX, barY, barW, barH);
+
+      // 채움: N이 커질수록 초록→노랑→빨강
+      var hue = 130 - frac * 130; // 130(초록) → 0(빨강)
+      var warn = frac > 0.55;
+      ctx.fillStyle = "hsl(" + hue + ",85%," + (warn ? 55 : 48) + "%)";
+      ctx.fillRect(barX, barY, barW * frac, barH);
+
+      // 라벨
+      ctx.fillStyle = "#e6e8ee";
+      ctx.font = "13px 'JetBrains Mono', monospace";
+      ctx.fillText("상대 셰이딩 비용 ∝ P × N", barX, barY - 8);
+
+      hud.innerHTML =
+        "픽셀당 조명 연산 = <b>" + N + "</b> (광원 수 N)<br>" +
+        "총 셰이딩 비용 ∝ P × N = <b>" + cost.toFixed(1) + "</b>" +
+        (warn ? " <span style='color:#ff7b72'>· 폭증!</span>" : "");
+
+      window.requestAnimationFrame(draw);
+    }
+    window.requestAnimationFrame(draw);
+  } catch (e) { /* 데모 실패해도 페이지는 계속 */ }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: Visibility Buffer (Deferred Texturing) — C++/DirectX 11</title>
+<meta name="description" content="지오메트리 패스에서 삼각형 ID(instanceID+primitiveID)만 픽셀당 4~8바이트로 기록하고, 재질 셰이딩은 뒤로 미뤄 정점을 되찾아 barycentric으로 재보간하는 Visibility Buffer(Deferred Texturing)를 C++/Direct3D 11/HLSL로 해부합니다. G-buffer 대비 대역폭 급감." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <a href="./06-paths.html">렌더링 경로</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">Visibility Buffer (Deferred Texturing)</span>
+  </div>
+
+  <!-- 타이틀 히어로 배너: ID 버퍼 → 재질 리졸브 2단계 시각화 -->
+  <div class="grass-hero" id="visHero">
+    <canvas id="visHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-sun"></div>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Visibility <span class="accent">Buffer</span></h2>
+      <p class="gh-sub">삼각형 ID만 저장하고 재질은 나중에 · Path Case Study</p>
+    </div>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6 · RENDERING PATH</span>
+  <h1>Visibility Buffer — 삼각형 ID를 그리고 재질은 미룬다</h1>
+  <p class="lead">
+    <a href="./06-deferred.html">디퍼드 렌더링</a>은 조명을 미뤘습니다. Visibility Buffer는 한 걸음 더 나아가
+    <strong>재질(텍스처·셰이딩)까지 미룹니다.</strong> 지오메트리 패스는 픽셀마다 두꺼운 재질 데이터를 쓰는 대신
+    <strong>"이 픽셀에 어느 삼각형이 보이나"</strong>라는 아주 작은 정보 — <code>(instanceID, triangleID)</code> —
+    한 조각만 <strong>정수 텍스처 한 장</strong>에 기록합니다. 그리고 나중에 풀스크린 셰이딩 패스에서 그 ID로
+    <strong>삼각형의 정점을 셰이더에서 직접 되찾아</strong> barycentric으로 속성을 재보간하고, 그때서야 재질을 샘플·셰이딩합니다.
+    "무엇이 보이나(visibility)"와 "어떻게 셰이딩하나(material)"를 완전히 갈라, 지오메트리 패스의 <strong>대역폭을
+    픽셀당 20바이트에서 4~8바이트로 급감</strong>시키는 것이 이 경로의 핵심입니다. 특히 4K처럼 픽셀이 많고 재질이 다양할수록
+    이깁니다. 이 페이지에서는 ID 기록 셰이더와 재질 리졸브 셰이더를 <strong>흐름 한 줄, 함정 하나까지</strong> 해부합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 시리즈는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행렬 <strong>행 우선</strong> 저장, <strong>왼손 좌표계</strong>, 클립 공간 <code>z ∈ [0, 1]</code>, 텍스처 V축은 위→아래입니다.
+    Visibility Buffer는 정점 데이터를 셰이더에서 직접 인덱싱하므로, CPU가 올리는 정점·인덱스 버퍼의 레이아웃과
+    셰이더의 페치 코드가 <strong>바이트 단위로 일치</strong>해야 합니다.
+  </div>
+
+  <!-- =========================================================
+       1. 원리 (Why)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">1. 원리 — G-buffer의 대역폭을 어떻게 줄이나</h2>
+  <p>
+    직관부터. <strong>디퍼드의 G-buffer는 "재료를 미리 다 인화해 둔 사진 여러 장"</strong>입니다. 픽셀마다 위치·법선·알베도·
+    스페큘러 같은 <em>두꺼운 재질 데이터</em>를 씁니다. <a href="./06-deferred.html">디퍼드 페이지</a>에서 손으로 세어 봤듯,
+    위치 8B + 법선 8B + 알베도스펙 4B = <strong>픽셀당 약 20바이트</strong>. 지오메트리 패스에서 이걸 쓰고, 라이팅 패스에서
+    또 읽습니다. 화면이 클수록(4K = 830만 픽셀) 이 <strong>메모리 대역폭</strong>이 프레임의 발목을 잡습니다.
+  </p>
+  <p>
+    Visibility Buffer의 발상은 이렇습니다: <strong>지오메트리 패스가 굳이 재질을 미리 풀어 쓸 이유가 없다.</strong>
+    그 픽셀에 <em>무엇이 보이는지</em>만 알면, 재질은 나중에 그 자리에서 다시 계산해 낼 수 있습니다. 그래서 지오메트리 패스는
+    픽셀당 <strong>아주 작은 것</strong>만 저장합니다 — <code>(instanceID, triangleID)</code>, 혹은 <code>drawID + primitiveID</code>를
+    <strong>단일 <code>R32_UINT</code>(정수 텍스처) 한 장</strong>에 패킹해서. 픽셀당 <strong>4~8바이트</strong>면 끝입니다.
+  </p>
+
+  <ol class="steps">
+    <li>
+      <strong>지오메트리(가시성) 패스</strong>: 씬을 한 번 그리되, 픽셀 셰이더는 색을 계산하지 않고 <strong>이 삼각형의 ID</strong>
+      (<code>instanceID</code>와 래스터라이저가 주는 <code>SV_PrimitiveID</code>)를 <code>uint</code> 하나로 패킹해
+      <code>R32_UINT</code> 타깃에 기록합니다. 깊이 테스트로 <em>가장 앞의 삼각형 ID만</em> 남습니다.
+    </li>
+    <li>
+      <strong>재질(리졸브) 패스</strong>: 풀스크린으로, 각 화면 픽셀의 <code>uint</code> ID를 읽어
+      <code>instanceID</code>/<code>triID</code>로 <strong>언패킹</strong>합니다.
+    </li>
+    <li>
+      <strong>정점 되찾기</strong>: 그 삼각형의 세 정점 인덱스를 인덱스 버퍼(<code>StructuredBuffer</code>)에서 읽고,
+      정점 버퍼에서 위치·uv·법선을 <strong>셰이더가 직접 인덱싱</strong>해 가져옵니다.
+    </li>
+    <li>
+      <strong>barycentric 재보간</strong>: 화면 픽셀 위치가 그 삼각형 안 어디쯤인지를 무게 <code>(w0, w1, w2)</code>로 구해,
+      정점 속성(uv·법선)을 <strong>가중합</strong>으로 재구성합니다.
+    </li>
+    <li>
+      <strong>재질·라이팅</strong>: 재구성한 uv로 재질 텍스처를 샘플하고, 그제서야 조명을 계산해 화면에 출력합니다.
+    </li>
+  </ol>
+
+  <div class="callout">
+    <span class="tag warn">직관</span>
+    G-buffer가 "픽셀마다 재료를 <em>미리 다 풀어 놓은</em> 창고"라면, Visibility Buffer는 픽셀마다 <strong>영수증 번호 하나</strong>만
+    적어 둡니다. 재료가 필요해지는 순간(셰이딩 패스)에 그 번호로 <em>원본 장부(정점·인덱스 버퍼)를 되짚어</em> 필요한 만큼만 꺼냅니다.
+    창고를 통째로 채우고 비우는 대역폭이 사라지는 대신, 나중에 장부를 뒤지는 수고(정점 페치)가 생깁니다.
+  </div>
+
+  <h3 style="margin-top:30px;">1-1. barycentric으로 속성을 되살리는 원리</h3>
+  <p>
+    직관부터. 삼각형 하나 안의 어떤 점이든 <strong>세 꼭짓점의 "섞음 비율"</strong>로 표현됩니다. 점이 꼭짓점 0에 붙어 있으면
+    0의 비율이 1이고 나머지는 0, 정중앙이면 셋이 각 1/3씩. 이 세 비율이 <strong>barycentric 좌표</strong>
+    <code>(w0, w1, w2)</code>이고, 항상 <code>w0 + w1 + w2 = 1</code>입니다.
+  </p>
+  <p>
+    그래서 삼각형 위 한 점의 속성(예: uv)은 세 꼭짓점 속성의 <strong>가중합</strong>으로 되살립니다:
+  </p>
+<pre style="margin:0;"><code class="language-hlsl">uv = w0 * uv0 + w1 * uv1 + w2 * uv2;   // 속성 = 세 정점 속성의 무게 섞음</code></pre>
+  <p>
+    보통은 래스터라이저가 이 보간을 대신 해 줍니다. Visibility Buffer는 래스터라이저를 건너뛰고
+    <strong>셰이딩 패스에서 손으로 barycentric을 계산</strong>합니다. 다만 함정이 하나 있습니다.
+    <strong>화면(스크린) 공간에서 선형으로 섞으면 원근이 어긋납니다.</strong> 원근 투영을 거치면 멀리 있는 정점일수록
+    화면에서 눌리기 때문에, 화면상 선형 무게를 그대로 쓰면 텍스처가 늘어나 보입니다. 그래서
+    각 무게를 정점의 <code>1/w</code>(클립 공간 w, 즉 원근 깊이)로 나눠 다시 정규화하는 <strong>perspective-correct 보정</strong>이
+    필요합니다. 래스터라이저가 자동으로 해 주던 그 보정을 여기선 직접 해야 합니다.
+  </p>
+
+  <!-- =========================================================
+       2. 직관 데모 (What)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">2. 직관 데모 — ID 버퍼 → 재질 2단계</h2>
+  <p>
+    같은 삼각형 메시를 <strong>2단계로 나눠</strong> 봅니다. <strong>1단계(ID 버퍼)</strong>는 각 삼각형을 자기 ID를 나타내는
+    <em>단색 인덱스 색</em>으로만 채웁니다 — 재질 텍스처는 아직 없고, 픽셀당 저장되는 건 <strong>ID 하나</strong>뿐이라는 느낌입니다.
+    <strong>2단계(재질)</strong>는 같은 형상을 ID로 되찾아 <em>실제 재질(음영·무늬)</em>로 다시 칠합니다. 버튼으로 두 단계를 오가며
+    "같은 형상이 ID → 재질로 바뀌는" 흐름을 보세요. 왼쪽 위 HUD의 막대는 <strong>지오메트리 패스 저장량</strong>을
+    G-buffer(20B/픽셀)와 비교합니다.
+  </p>
+
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="visDemoCanvas" width="900" height="360"></canvas>
+      <div class="hud" id="visHud">저장: —</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl">
+        <label>단계 (Pass)</label>
+        <div class="gbtns" id="visStageBtns">
+          <button data-stage="0" class="on">1단계: ID 버퍼</button>
+          <button data-stage="1">2단계: 재질</button>
+        </div>
+      </div>
+      <div class="gctl">
+        <label>삼각형 수 <span class="gval" id="visTrisVal">14</span></label>
+        <input type="range" id="visTris" min="4" max="40" step="1" value="14" />
+      </div>
+    </div>
+    <div class="ghint">
+      1단계에서 각 삼각형은 <strong>ID 색</strong>(정수 ID를 색으로 매핑)으로만 칠해집니다 — 픽셀당 ID 4B.
+      2단계에서 같은 ID로 삼각형을 되찾아 <strong>재질(그라디언트 음영)</strong>을 입힙니다.
+    </div>
+  </div>
+
+  <!-- =========================================================
+       3. 비교표
+       ========================================================= -->
+  <h2 style="margin-top:44px;">3. Deferred(G-buffer) vs Visibility Buffer</h2>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead>
+      <tr><th>항목</th><th>Deferred G-buffer</th><th>Visibility Buffer</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>지오메트리 패스 저장량</strong></td>
+        <td>두꺼움 — 위치·법선·알베도·스페큘러 등 <strong>~20B/픽셀</strong></td>
+        <td>얇음 — (instanceID, triID) 패킹 <strong>4~8B/픽셀</strong></td>
+      </tr>
+      <tr>
+        <td><strong>메모리 대역폭</strong></td>
+        <td>큼 (넓은 MRT를 쓰고 다시 읽음)</td>
+        <td>작음 (정수 한 장 쓰고 읽음)</td>
+      </tr>
+      <tr>
+        <td><strong>재질 평가 시점</strong></td>
+        <td>지오메트리 패스에서 미리 (텍스처 샘플·패킹)</td>
+        <td>셰이딩 패스에서 나중에 (정점 되찾아 재보간 후)</td>
+      </tr>
+      <tr>
+        <td><strong>MSAA</strong></td>
+        <td>까다로움 (넓은 G-buffer를 샘플당 저장·해석해야 함)</td>
+        <td>상대적으로 유리 — 픽셀당 ID라 저장이 싸고, 에지에서 샘플별 ID로 재보간</td>
+      </tr>
+      <tr>
+        <td><strong>구현 복잡도</strong></td>
+        <td>중간 (MRT·패킹·역투영)</td>
+        <td>높음 (정점 수동 페치 + barycentric 재보간 + 원근 보정)</td>
+      </tr>
+      <tr>
+        <td><strong>적합</strong></td>
+        <td>중간 해상도, 재질 종류가 제한적일 때</td>
+        <td>고해상도(4K)·재질이 많고 GPU-driven 파이프라인</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- =========================================================
+       4. 구현 (How)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">4. 구현 — ID 기록과 재질 리졸브</h2>
+  <p>
+    두 셰이더가 전부입니다. (1) 지오메트리 패스가 삼각형 ID를 <code>uint</code>로 패킹해 기록하고,
+    (2) 풀스크린 리졸브 패스가 그 ID로 정점을 되찾아 재질을 칠합니다.
+  </p>
+
+  <h3 style="margin-top:30px;">4-1. 가시성 기록 — ID를 uint 하나로 패킹</h3>
+  <p>
+    지오메트리 패스의 픽셀 셰이더는 <strong>딱 한 줄</strong>이 핵심입니다. 인스턴스 ID(정점 셰이더가 넘겨준
+    <code>SV_InstanceID</code>)를 위쪽 비트로, 래스터라이저가 채워 주는 삼각형 번호(<code>SV_PrimitiveID</code>)를
+    아래쪽 비트로 <strong>비트 시프트·OR</strong> 해서 <code>uint</code> 하나에 담고, 그걸 <code>R32_UINT</code> 타깃에 씁니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>vbuffer_write.hlsl (픽셀 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 삼각형 번호(primitiveID)에 몇 비트를 줄지. 예: 24비트면 삼각형 ~1600만 개까지.
+#define TRI_BITS 24u
+
+struct PSIn {
+    float4 posH       : SV_Position;   // 깊이 테스트용 (가장 앞 삼각형만 남음)
+    uint   instanceID : INSTANCEID;    // 정점 셰이더가 SV_InstanceID를 실어 보냄
+};
+
+// 출력은 색이 아니라 "가시성 ID" 정수 하나. 타깃 포맷은 R32_UINT.
+uint main(PSIn i, uint primID : SV_PrimitiveID) : SV_Target
+{
+    // (instanceID << TRI_BITS) | primitiveID  →  단일 uint에 둘을 패킹
+    uint id = (i.instanceID &lt;&lt; TRI_BITS) | (primID &amp; ((1u &lt;&lt; TRI_BITS) - 1u));
+    return id;   // 깊이 테스트가 알아서 최전면 삼각형의 ID만 남긴다
+}</code></pre>
+  </div>
+  <ul>
+    <li>
+      <code>SV_PrimitiveID</code> — 래스터라이저가 <strong>공짜로</strong> 주는 삼각형 번호입니다. 드로우 안에서 몇 번째 삼각형인지.
+    </li>
+    <li>
+      <code>instanceID</code> — 어느 인스턴스(어느 메시)인지. GPU-driven이면 <code>drawID</code>로 대체할 수 있습니다.
+    </li>
+    <li>
+      <code>(instanceID &lt;&lt; TRI_BITS) | primID</code> — 위 비트에 인스턴스, 아래 비트에 삼각형을 넣어 <strong>uint 하나로 합칩니다.</strong>
+      리졸브 패스에서 반대로 시프트·마스크해 언패킹합니다.
+    </li>
+  </ul>
+
+  <h3 style="margin-top:30px;">4-2. 재질 리졸브 — 정점 되찾아 barycentric 재보간</h3>
+  <p>
+    풀스크린 셰이딩 패스입니다. 화면 픽셀의 <code>uint</code> ID를 읽어 언패킹하고, 그 삼각형의 세 정점을
+    <strong>버퍼에서 직접 인덱싱</strong>해 가져온 뒤, 화면 위치로 barycentric 무게를 구해 속성을 <strong>원근 보정</strong>해
+    재구성합니다. 그다음에야 재질 텍스처를 샘플하고 라이팅합니다.
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>vbuffer_resolve.hlsl (풀스크린 픽셀 셰이더)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">#define TRI_BITS 24u
+
+// 가시성 버퍼(정수 ID 한 장)
+Texture2D&lt;uint&gt; visBuffer : register(t0);
+
+// 씬의 원본 지오메트리를 셰이더에서 직접 인덱싱한다 (GPU-driven 스타일)
+struct Vertex { float3 pos; float3 nrm; float2 uv; };
+StructuredBuffer&lt;uint&gt;    indexBuffer  : register(t1);  // 삼각형 3개마다 정점 인덱스
+StructuredBuffer&lt;Vertex&gt;  vertexBuffer : register(t2);  // 정점 속성
+StructuredBuffer&lt;float4x4&gt; instanceMVP : register(t3);  // 인스턴스별 MVP 행렬
+
+Texture2D    albedoTex : register(t4);
+SamplerState samp      : register(s0);
+
+float4 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target
+{
+    // 1) 이 화면 픽셀의 가시성 ID를 읽는다 (정수 텍스처는 Load로 읽음)
+    uint id = visBuffer.Load(int3((int2)posH.xy, 0));
+    if (id == 0xFFFFFFFFu) discard;             // 빈 하늘 등: 그린 삼각형 없음
+
+    // 2) 언패킹: 위 비트=인스턴스, 아래 비트=삼각형 번호
+    uint instanceID = id &gt;&gt; TRI_BITS;
+    uint triID      = id &amp; ((1u &lt;&lt; TRI_BITS) - 1u);
+
+    // 3) 그 삼각형의 세 정점 인덱스를 인덱스 버퍼에서 읽는다
+    uint i0 = indexBuffer[triID * 3u + 0u];
+    uint i1 = indexBuffer[triID * 3u + 1u];
+    uint i2 = indexBuffer[triID * 3u + 2u];
+
+    // 4) 정점 버퍼에서 세 정점의 속성을 직접 페치
+    Vertex v0 = vertexBuffer[i0];
+    Vertex v1 = vertexBuffer[i1];
+    Vertex v2 = vertexBuffer[i2];
+
+    // 5) 세 정점을 클립 공간으로 다시 투영 (이 인스턴스의 MVP로)
+    float4x4 mvp = instanceMVP[instanceID];
+    float4 c0 = mul(float4(v0.pos, 1.0), mvp);   // 행벡터 규약: mul(v, M)
+    float4 c1 = mul(float4(v1.pos, 1.0), mvp);
+    float4 c2 = mul(float4(v2.pos, 1.0), mvp);
+
+    // 6) 이 픽셀의 화면 좌표(NDC)에서 barycentric 무게 (w0,w1,w2) 계산
+    //    posH.xy(픽셀) → NDC로 바꾼 뒤 삼각형 내부 무게를 구한다.
+    float2 ndc = float2(posH.x / screenW * 2.0 - 1.0,
+                        1.0 - posH.y / screenH * 2.0);   // V축 위→아래 보정
+    float3 bary = BarycentricNDC(ndc, c0, c1, c2);       // 아래 함정 참고
+
+    // 7) perspective-correct 보정: 각 무게를 클립 w로 나눠 다시 정규화
+    float3 pw = bary / float3(c0.w, c1.w, c2.w);
+    pw /= (pw.x + pw.y + pw.z);                           // 합이 1이 되도록
+
+    // 8) 속성 재보간: 세 정점 속성의 (보정된) 가중합
+    float2 fUV  = pw.x * v0.uv  + pw.y * v1.uv  + pw.z * v2.uv;
+    float3 fNrm = normalize(pw.x * v0.nrm + pw.y * v1.nrm + pw.z * v2.nrm);
+
+    // 9) 이제서야 재질 텍스처 샘플 + 라이팅
+    float3 albedo = albedoTex.Sample(samp, fUV).rgb;
+    float  ndotl  = saturate(dot(fNrm, normalize(float3(0.4, 0.8, 0.3))));
+    float3 color  = albedo * (0.15 + 0.85 * ndotl);      // 앰비언트 + 확산
+    return float4(color, 1.0);
+}</code></pre>
+  </div>
+  <p>
+    핵심 흐름을 다시 짚으면: <strong>ID 읽기(1) → 언패킹(2) → 정점 인덱스 페치(3~4) → 다시 투영(5) →
+    barycentric(6) → 원근 보정(7) → 속성 재보간(8) → 재질·라이팅(9)</strong>. 래스터라이저가 자동으로 해 주던
+    "정점 속성 보간"을 셰이딩 패스에서 <em>손으로</em> 다시 하는 것이 전부입니다. <code>screenW/screenH</code>와
+    <code>BarycentricNDC</code>는 상수 버퍼·헬퍼로 넣는 자리표시자이고, 골격의 데이터 흐름은 그대로 컴파일 가능한 형태입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    두 가지를 가장 많이 틀립니다. (1) <strong>perspective-correct 보정을 빠뜨리면</strong> — 7번 단계를 생략하고 화면 선형
+    무게를 그대로 쓰면 — 원근이 있는 표면에서 텍스처가 <strong>비스듬히 늘어나거나 휘어</strong> 보입니다. 래스터라이저는
+    이 보정을 항상 해 주기 때문에 포워드에선 겪을 일이 없지만, 수동 재보간에선 반드시 챙겨야 합니다. (2) <strong>ID 패킹의
+    비트 폭이 부족하면</strong> — 예컨대 <code>TRI_BITS</code>를 너무 작게 잡으면 — 삼각형이 많은 메시에서 번호가
+    <strong>오버플로</strong>해 엉뚱한 정점을 페치하고 픽셀이 튑니다. 인스턴스 수와 인스턴스당 최대 삼각형 수를 먼저 세고
+    비트 배분을 정하세요.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    리졸브 패스의 <strong>정점 수동 페치</strong>는 <code>StructuredBuffer</code>에 대한 <em>랜덤 액세스</em>라 캐시에 불리한
+    부담입니다. 그런데도 Visibility Buffer가 이기는 이유는, 지오메트리 패스에서 넓은 G-buffer를 쓰고 읽던
+    <strong>대역폭 절감이 그 페치 비용을 크게 압도</strong>하기 때문입니다 — 특히 <strong>4K</strong>처럼 픽셀이 많을수록.
+    또 씬 지오메트리를 큰 버퍼로 통합해 두는 <strong>GPU-driven 렌더링</strong>(간접 드로우·메시 클러스터)과 궁합이 좋아,
+    <code>drawID + primitiveID</code>만으로 어떤 정점이든 찾아갈 수 있습니다.
+  </div>
+
+  <!-- =========================================================
+       5. 실무 노트
+       ========================================================= -->
+  <h2 style="margin-top:44px;">5. 언제 쓰나 — 실무 노트</h2>
+  <div class="callout">
+    <span class="tag warn">실무</span>
+    이 경로의 원조는 <strong>Christoph Schied &amp; Carsten Dachsbacher, "The Visibility Buffer"(2013)</strong>로,
+    "캐시 친화적 디퍼드 셰이딩"을 목표로 삼각형 ID만 저장하는 아이디어를 정식화했습니다. 이후
+    <strong>Sebastian Aaltonen(당시 Ubisoft)</strong>이 <em>Deferred Texturing</em>이라는 이름으로 GPU-driven 파이프라인과
+    엮어 실전화했고(강연·트윗 다수), 재질 평가를 완전히 화면 공간으로 미루는 흐름을 대중화했습니다. 오늘날 가장 눈에 띄는
+    채택은 <strong>Nanite(UE5)</strong>로, 소프트웨어 래스터라이즈로 만든 <em>visibility buffer</em> 위에서 별도의
+    <em>material pass</em>가 재질을 리졸브합니다. The Filmic Games, Activision 계열 엔진에서도 비슷한 구조가 보고됩니다.
+    <strong>고해상도(4K)·수백만 인스턴스·GPU-driven</strong> 파이프라인이라면 강력한 후보입니다. 반대로 재질 종류가 적고
+    해상도가 중간이라면 평범한 <a href="./06-deferred.html">디퍼드</a>가 더 단순하고 충분합니다.
+  </div>
+
+  <!-- =========================================================
+       6. 더 읽기
+       ========================================================= -->
+  <h2 style="margin-top:44px;">6. 더 읽기</h2>
+  <ul>
+    <li>
+      <a href="https://jcgt.org/published/0002/02/04/" target="_blank" rel="noopener">Christoph Schied &amp; Carsten Dachsbacher — "The Visibility Buffer: A Cache-Friendly Approach to Deferred Shading" (JCGT, 2013)</a>
+    </li>
+    <li>
+      <a href="https://www.gdcvault.com/play/1023307/Deferred-Texturing-and-Software-Vertex" target="_blank" rel="noopener">Sebastian Aaltonen — "Deferred Texturing" / GPU-driven rendering (2015)</a>
+    </li>
+    <li>
+      <a href="https://advances.realtimerendering.com/s2021/index.html" target="_blank" rel="noopener">Brian Karis, Rune Stachowiak et al. — "Nanite: A Deep Dive" (SIGGRAPH 2021, Advances in Real-Time Rendering)</a>
+    </li>
+  </ul>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-clustered.html">← Clustered Shading</a>
+    <a href="./06-deferred.html">디퍼드 렌더링 →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+<script>
+/* 히어로 배너: 삼각형 ID 버퍼 → 재질 리졸브가 파도처럼 훑고 지나가는 애니메이션.
+   빌드 없음 · 격리 실행 · 캔버스 크기 피드백 루프 방지(논리 크기는 표시 크기에서만 얻음). */
+(function () {
+  try {
+    var cv = document.getElementById("visHeroCanvas");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    var W = 0, H = 0, dpr = 1;
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = Math.round(W * dpr);   // 실제 픽셀 버퍼만 조정
+      cv.height = Math.round(H * dpr);  // height 속성(HTML)은 재대입하지 않음
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      build();
+    }
+
+    // 화면을 채우는 무작위 삼각형 메시(각 삼각형 = 하나의 ID)
+    var tris = [];
+    function rand(a, b) { return a + Math.random() * (b - a); }
+    function build() {
+      tris = [];
+      var cols = 9, rows = 4;
+      var id = 0;
+      for (var gy = 0; gy < rows; gy++) {
+        for (var gx = 0; gx < cols; gx++) {
+          var x0 = (gx / cols) * (W + 60) - 30;
+          var y0 = (gy / rows) * (H + 40) - 20;
+          var cw = (W + 60) / cols, ch = (H + 40) / rows;
+          // 한 셀을 두 삼각형으로
+          var jx = rand(-cw * 0.12, cw * 0.12), jy = rand(-ch * 0.12, ch * 0.12);
+          tris.push({ p: [[x0 + jx, y0 + jy], [x0 + cw + jx, y0 + jy], [x0 + jx, y0 + ch + jy]], id: id++, ph: rand(0, Math.PI * 2) });
+          tris.push({ p: [[x0 + cw + jx, y0 + jy], [x0 + cw + jx, y0 + ch + jy], [x0 + jx, y0 + ch + jy]], id: id++, ph: rand(0, Math.PI * 2) });
+        }
+      }
+    }
+
+    // ID → 인덱스 색(HSL 회전). "픽셀당 ID만 저장" 느낌.
+    function idColor(id) { return "hsl(" + ((id * 47) % 360) + ", 72%, 55%)"; }
+
+    window.addEventListener("resize", resize);
+    resize();
+
+    var t0 = null;
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+
+      // 리졸브 파도: 왼→오른쪽으로 훑고 지나가는 경계 x
+      var sweep = ((t * 0.28) % 1.6) * W - W * 0.3;
+
+      for (var i = 0; i < tris.length; i++) {
+        var tr = tris[i];
+        var p = tr.p;
+        var cx = (p[0][0] + p[1][0] + p[2][0]) / 3;
+        var resolved = cx < sweep;   // 파도 왼쪽=재질, 오른쪽=ID 색
+
+        ctx.beginPath();
+        ctx.moveTo(p[0][0], p[0][1]);
+        ctx.lineTo(p[1][0], p[1][1]);
+        ctx.lineTo(p[2][0], p[2][1]);
+        ctx.closePath();
+
+        if (resolved) {
+          // 재질: 은은한 초록 음영 + 법선 흉내(밝기 요동)
+          var lit = 0.45 + 0.4 * (0.5 + 0.5 * Math.sin(t * 0.9 + tr.ph));
+          var g = Math.round(90 + 90 * lit), r = Math.round(30 + 40 * lit), b = Math.round(40 + 30 * lit);
+          ctx.fillStyle = "rgba(" + r + "," + g + "," + b + ",0.92)";
+        } else {
+          ctx.fillStyle = idColor(tr.id);
+        }
+        ctx.fill();
+        ctx.lineWidth = 0.6;
+        ctx.strokeStyle = "rgba(6,14,10,0.55)";
+        ctx.stroke();
+      }
+
+      // 파도 경계선(리졸브 프론트)
+      ctx.strokeStyle = "rgba(244,255,242,0.55)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(sweep, 0); ctx.lineTo(sweep, H);
+      ctx.stroke();
+
+      rafId = window.requestAnimationFrame(draw);
+    }
+    var rafId = window.requestAnimationFrame(draw);
+  } catch (e) { /* 히어로 실패해도 페이지는 계속 */ }
+})();
+
+/* 직관 데모: 같은 삼각형 메시를 1단계(ID 색) / 2단계(재질)로 토글. */
+(function () {
+  try {
+    var cv = document.getElementById("visDemoCanvas");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+    var hud = document.getElementById("visHud");
+    var trisSlider = document.getElementById("visTris");
+    var trisVal = document.getElementById("visTrisVal");
+    var btnWrap = document.getElementById("visStageBtns");
+    if (!trisSlider || !btnWrap) return;
+
+    var W = 0, H = 0, dpr = 1;
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    var stage = 0;        // 0 = ID 버퍼, 1 = 재질
+    var nTris = 14;
+    var tris = [];
+
+    function rand(a, b) { return a + Math.random() * (b - a); }
+    function build() {
+      tris = [];
+      for (var k = 0; k < nTris; k++) {
+        // 화면을 대략 채우도록 무작위 위치의 삼각형(중심 + 세 꼭짓점)
+        var cx = rand(0.1, 0.9), cy = rand(0.15, 0.85);
+        var s = rand(0.09, 0.2);
+        var a = rand(0, Math.PI * 2);
+        var pts = [];
+        for (var j = 0; j < 3; j++) {
+          var ang = a + j * (Math.PI * 2 / 3) + rand(-0.35, 0.35);
+          var rr = s * rand(0.7, 1.3);
+          pts.push([cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr * 1.2]);
+        }
+        tris.push({ p: pts, id: k, hue: rand(0.4, 0.9) });
+      }
+      // 뒤에서 앞으로(간단한 깊이 감각): id 순서 그대로 겹쳐 그림
+    }
+
+    function idColor(id) { return "hsl(" + ((id * 53 + 20) % 360) + ", 70%, 55%)"; }
+
+    function updateHud() {
+      // 저장량 비교 막대(문자 기반). VB=4B/픽셀, G-buffer=20B/픽셀.
+      var vb = 4, gb = 20;
+      function bar(n) { var c = Math.round(n / gb * 12); var s = ""; for (var i = 0; i < 12; i++) s += (i < c ? "█" : "░"); return s; }
+      hud.innerHTML =
+        "저장 / 픽셀<br>" +
+        "VB&nbsp;&nbsp;" + bar(vb) + " " + vb + "B<br>" +
+        "G-buf " + bar(gb) + " " + gb + "B";
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      // 배경
+      ctx.fillStyle = "#0a0f0d";
+      ctx.fillRect(0, 0, W, H);
+
+      for (var i = 0; i < tris.length; i++) {
+        var tr = tris[i];
+        var p = tr.p;
+        ctx.beginPath();
+        ctx.moveTo(p[0][0] * W, p[0][1] * H);
+        ctx.lineTo(p[1][0] * W, p[1][1] * H);
+        ctx.lineTo(p[2][0] * W, p[2][1] * H);
+        ctx.closePath();
+
+        if (stage === 0) {
+          // 1단계: 삼각형마다 단색 ID 색 (재질 없음)
+          ctx.fillStyle = idColor(tr.id);
+          ctx.fill();
+        } else {
+          // 2단계: 같은 형상을 재질(그라디언트 음영)로 다시 칠함
+          var c0 = [p[0][0] * W, p[0][1] * H], c2 = [p[2][0] * W, p[2][1] * H];
+          var grd = ctx.createLinearGradient(c0[0], c0[1], c2[0], c2[1]);
+          var hue = Math.round(tr.hue * 90 + 90);   // 초록~노랑 계열 재질
+          grd.addColorStop(0, "hsl(" + hue + ", 55%, 30%)");
+          grd.addColorStop(1, "hsl(" + hue + ", 60%, 62%)");
+          ctx.fillStyle = grd;
+          ctx.fill();
+        }
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "rgba(6,14,10,0.6)";
+        ctx.stroke();
+      }
+
+      // 단계 라벨
+      ctx.font = "600 13px 'JetBrains Mono', monospace";
+      ctx.fillStyle = "rgba(226,255,224,0.85)";
+      var label = stage === 0 ? "1단계 — Visibility (ID 버퍼): 픽셀당 삼각형 ID만" : "2단계 — Material: ID로 정점 되찾아 재질 적용";
+      ctx.fillText(label, 12, H - 14);
+    }
+
+    function rerender() { draw(); updateHud(); }
+
+    // 버튼: 단계 토글
+    var btns = btnWrap.querySelectorAll("button");
+    btnWrap.addEventListener("click", function (e) {
+      var b = e.target.closest("button");
+      if (!b) return;
+      stage = parseInt(b.getAttribute("data-stage"), 10) || 0;
+      for (var i = 0; i < btns.length; i++) btns[i].classList.toggle("on", btns[i] === b);
+      rerender();
+    });
+
+    // 슬라이더: 삼각형 수
+    trisSlider.addEventListener("input", function () {
+      nTris = parseInt(trisSlider.value, 10) || 14;
+      if (trisVal) trisVal.textContent = nTris;
+      build();
+      rerender();
+    });
+
+    window.addEventListener("resize", rerender);
+
+    build();
+    rerender();
+  } catch (e) { /* 데모 실패해도 페이지는 계속 */ }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: Clustered Shading — C++/DirectX 11</title>
+<meta name="description" content="화면 2D 타일에 깊이(Z) 슬라이스를 더해 3D 클러스터로 광원을 컬링하는 Clustered Forward/Deferred 셰이딩을 Forward+와 비교하고, 로그 깊이 슬라이스·클러스터 인덱싱을 C++/HLSL로 해부하는 6장 렌더링 경로 사례연구." />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+</head>
+<body>
+<main class="content" style="max-width:940px;">
+  <div class="impl-topbar">
+    <a href="../index.html">← 개념 · 데모 가이드</a>
+    <span class="sep">|</span>
+    <a href="./index.html">구현 허브</a>
+    <span class="sep">|</span>
+    <a href="./06-advanced.html">6장. 고급 렌더링</a>
+    <span class="sep">|</span>
+    <a href="./06-paths.html">렌더링 경로</a>
+    <span class="sep">|</span>
+    <span style="color:var(--accent2)">Clustered Shading</span>
+  </div>
+
+  <!-- 타이틀 히어로 배너: 절두체를 3D 클러스터 격자로 쪼개는 애니메이션 -->
+  <div class="grass-hero" id="clHero">
+    <canvas id="clHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-sun"></div>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Clustered <span class="accent">Shading</span></h2>
+      <p class="gh-sub">타일에 깊이축을 더한 3D 클러스터 · Path Case Study</p>
+    </div>
+  </div>
+
+  <span class="impl-badge">IMPLEMENTATION · CHAPTER 6 · RENDERING PATH</span>
+  <h1>Clustered Shading — 화면 타일에 깊이(Z) 슬라이스를 더하다</h1>
+  <p class="lead">
+    광원이 수백 개인 장면을 효율적으로 그리는 길은 "이 픽셀에 실제로 닿는 광원만 계산하기"입니다.
+    <strong>Forward+(타일드 포워드)</strong>는 화면을 2D 타일로 나눠 타일마다 영향 광원 리스트를 만들지만,
+    <strong>깊이 방향</strong>은 나누지 않아 한 타일 안에 가까운 표면과 먼 표면이 섞이면 둘 다에 영향 주는 광원이 전부
+    리스트에 들어갑니다. <strong>Clustered Shading</strong>은 여기에 <strong>Z 슬라이스</strong>를 더해 화면을 3D 클러스터
+    (예: 16×9×24)로 쪼개, 근/원 표면이 서로의 광원을 나눠 갖지 않게 합니다. 이 페이지에서는 <strong>왜 깊이 축이
+    필요한지</strong>(원리), <strong>2D 타일 vs 3D 클러스터</strong>를 만지는 데모(개념), <strong>클러스터 인덱싱</strong> HLSL
+    (구현)을 차례로 해부합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 가이드는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행렬 <strong>행 우선</strong> 저장, <strong>왼손 좌표계</strong>, 클립 공간 <code>z ∈ [0, 1]</code>, 텍스처 V축은
+    위→아래입니다. 클러스터 인덱싱은 <strong>뷰 공간 깊이(view-space Z)</strong>를 기준으로 하며, 좌표계가 무엇이든
+    "카메라로부터의 거리"라는 물리적 의미만 일관되면 슬라이스 공식 자체는 동일합니다.
+  </div>
+
+  <!-- =========================================================
+       1. 원리 (Why)
+       ========================================================= -->
+  <h2 style="margin-top:40px;">1. 원리 — Forward+의 깊이 한계를 어떻게 깨나</h2>
+  <p>
+    직관부터 말하면 이렇습니다: <strong>화면에서 같은 자리에 겹쳐 보여도, 카메라 코앞의 벽과 저 멀리 산은 서로 완전히
+    다른 광원의 영향을 받습니다.</strong> 그런데 화면을 2D 타일로만 나누면 이 둘이 <em>같은 타일</em>에 들어가고, 그 타일의
+    광원 리스트에는 코앞 벽에 닿는 광원과 먼 산에 닿는 광원이 <strong>전부</strong> 섞여 들어갑니다.
+  </p>
+  <p>
+    <strong>Forward+(타일드 포워드)</strong>는 화면을 예컨대 16×16 픽셀 타일로 나누고, 각 타일이 덮는 화면 사각형을
+    <em>깊이 방향으로 무한히 뻗은 기둥(frustum sub-volume)</em>으로 보고 그 기둥과 겹치는 광원을 리스트에 담습니다.
+    문제는 이 기둥이 near부터 far까지 길쭉하다는 것입니다. 타일 안에 가까운 표면(near)과 먼 표면(far)이 함께 보이면,
+    near 근처에만 있는 광원도, far 근처에만 있는 광원도 모두 "이 기둥에 겹친다"고 판정되어 리스트에 들어갑니다. 정작
+    각 표면은 그중 일부에만 실제로 닿는데도요. 이것이 <strong>깊이 방향 false positive</strong>(가짜 양성)입니다 —
+    "닿지 않는데 닿는다고 세는" 낭비죠.
+  </p>
+  <p>
+    <strong>Clustered Shading</strong>은 이 길쭉한 기둥을 깊이 방향으로 <strong>Z 슬라이스</strong>로 토막 냅니다. 화면 2D
+    타일(가로 X · 세로 Y) 격자에 깊이 슬라이스(Z)를 곱해, 화면을 <strong>3D 클러스터</strong> 격자(예: 16×9×24 = 3456개의
+    작은 절두체 조각)로 나눕니다. 이제 각 클러스터는 near~far 전체가 아니라 <em>얇은 깊이 구간 하나</em>만 담당하므로,
+    그 구간에 실제로 영향 주는 광원만 리스트에 들어갑니다. 코앞 벽 클러스터와 먼 산 클러스터는 <strong>서로의 광원을
+    나눠 갖지 않습니다.</strong>
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">직관</span>
+    Forward+는 화면을 <strong>세로로 자른 유리창</strong>(2D 격자)이고, Clustered는 그 유리창을 <strong>깊이로도 잘라
+    만든 얼음 트레이</strong>(3D 격자)입니다. 광원이라는 물을 부으면, 유리창 칸은 앞뒤로 길어 한 칸에 여러 광원이 고이지만,
+    얼음 트레이 칸은 작아 각 칸에 최소한의 광원만 담깁니다.
+  </div>
+
+  <h3 style="margin-top:30px;">1-1. 왜 깊이 슬라이스를 "로그"로 나누나</h3>
+  <p>
+    <strong>직관</strong>: 원근 투영에서는 <em>가까울수록 화면상 크게, 멀수록 작게</em> 보입니다. 그래서 near 근처의 얕은
+    깊이 변화가 화면에서는 큰 차이를 만들고, far 근처의 같은 깊이 변화는 거의 차이를 안 만듭니다. 깊이를 <strong>균등
+    간격</strong>으로 자르면 near 쪽에는 클러스터가 듬성듬성, far 쪽에는 촘촘하게 배치되어 정작 디테일이 몰린 near 쪽이
+    성기게 나뉩니다. 반대로 <strong>가까울수록 촘촘하게</strong> 나눠야 시각적으로 균형이 맞습니다.
+  </p>
+  <p>
+    그래서 깊이를 <strong>로그(지수) 분포</strong>로 나눕니다. 뷰 공간 깊이 <code>z</code>(양수, near≤z≤far)가 몇 번째
+    슬라이스에 속하는지는 이렇게 구합니다.
+  </p>
+  <div class="callout">
+    <span class="tag">수식</span>
+    <div style="overflow-x:auto; font-family:'JetBrains Mono',Consolas,monospace; font-size:14px; margin-top:6px;">
+      slice(z) = floor( log(z / near) / log(far / near) × numSlices )
+    </div>
+    <ul style="margin:10px 0 0 0;">
+      <li><code>z / near</code> — near를 기준(1.0)으로 정규화한 깊이. <code>z = near</code>면 1, <code>z = far</code>면 <code>far/near</code>.</li>
+      <li><code>log(z/near) / log(far/near)</code> — 그 값을 <strong>0~1로</strong> 매핑하되, 로그라서 <em>가까운 쪽이 넓게 펴집니다</em>. 즉 near 근처의 얇은 깊이 구간이 0~1 스케일에서 큰 폭을 차지 → 슬라이스가 촘촘.</li>
+      <li><code>× numSlices</code> 후 <code>floor</code> — 0 ~ (numSlices−1) 정수 슬라이스 인덱스로 양자화.</li>
+    </ul>
+  </div>
+  <p>
+    이 공식은 실무에서 보통 <code>slice = floor( log(z) × A − B )</code> 꼴로 미리 상수 <code>A = numSlices /
+    log(far/near)</code>, <code>B = numSlices × log(near) / log(far/near)</code>를 CPU에서 계산해 두고 셰이더에서는 곱셈·뺄셈
+    한 번으로 끝냅니다. Doom 2016(id Tech 6)이 쓴 그 형태입니다.
+  </p>
+
+  <!-- =========================================================
+       2. 직관 데모 (What)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">2. 직관 데모 — 2D 타일 vs 3D 클러스터</h2>
+  <p>
+    아래는 절두체를 <strong>옆에서 본 단면(side view)</strong>입니다. 왼쪽에 카메라, 오른쪽으로 뻗는 사다리꼴이 시야
+    절두체이고, 세로선은 화면 타일 경계, 가로(깊이 방향) 곡선은 <strong>로그 간격 Z 슬라이스</strong> 경계입니다. 원은 광원의
+    영향 반경입니다. 각 클러스터 셀은 겹치는 광원 수만큼 붉게 물듭니다(히트맵).
+  </p>
+  <p class="demo-caption">
+    <strong>슬라이스 = 1</strong>로 두면 깊이를 안 나눈 <strong>Forward+와 동일</strong>합니다(한 타일 기둥에 광원이 몰림).
+    슬라이스 수를 늘리면 셀이 잘게 쪼개지며 <em>셀당 평균 광원 수</em>가 줄어드는 것을 HUD로 확인하세요.
+  </p>
+
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas class="gcanvas" id="clDemoCanvas"></canvas>
+      <div class="hud" id="clHud">클러스터 준비 중…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl">
+        <label>Z 슬라이스 수 <span class="gval" id="clSlicesVal">6</span></label>
+        <input type="range" id="clSlices" min="1" max="16" step="1" value="6" />
+      </div>
+      <div class="gctl">
+        <label>광원 수 <span class="gval" id="clLightsVal">18</span></label>
+        <input type="range" id="clLights" min="4" max="40" step="1" value="18" />
+      </div>
+    </div>
+    <div class="ghint">
+      세로선 = 화면 타일 경계 · 가로 곡선 = 로그 Z 슬라이스 경계 · 원 = 광원 영향 반경 · 셀 색 = 겹친 광원 수(히트맵).
+      슬라이스=1은 Forward+(깊이 미분할)와 같습니다.
+    </div>
+  </div>
+
+  <!-- =========================================================
+       3. 비교표 (Trade-offs)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">3. Forward+ vs Clustered</h2>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead>
+      <tr><th>항목</th><th>Forward+ (2D 타일)</th><th>Clustered (3D)</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>분할 차원</strong></td>
+        <td>화면 <strong>2D</strong> (X·Y 타일)</td>
+        <td>화면 + 깊이 <strong>3D</strong> (X·Y·Z 클러스터)</td>
+      </tr>
+      <tr>
+        <td><strong>깊이 false positive</strong></td>
+        <td><strong>큼</strong> — 타일 기둥이 near~far로 길쭉해 근/원 광원이 한 리스트에 섞임</td>
+        <td><strong>작음</strong> — 얇은 깊이 구간만 담당해 실제 닿는 광원만</td>
+      </tr>
+      <tr>
+        <td><strong>깊이 프리패스</strong></td>
+        <td>대개 <strong>필요</strong> — 타일별 min/max 깊이를 알아야 기둥을 조여 컬링</td>
+        <td><strong>불필요</strong>(선택) — 클러스터 격자가 깊이와 무관하게 미리 구성 가능</td>
+      </tr>
+      <tr>
+        <td><strong>광원 리스트 크기</strong></td>
+        <td>타일당 리스트 (X·Y개)</td>
+        <td>클러스터당 리스트 (X·Y·Z개, 더 잘게)</td>
+      </tr>
+      <tr>
+        <td><strong>적합</strong></td>
+        <td>중간 규모 광원, 깊이 편차가 작은 씬</td>
+        <td>많은 광원 · 깊이 편차 큰 오픈월드 씬</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    핵심 트레이드오프: Clustered는 셀 수가 늘어나(3D) 컬링 계산·메모리가 조금 더 들지만, <strong>깊이 프리패스 의존을
+    없애고</strong> false positive를 줄여 광원이 많고 깊이 편차가 큰 씬에서 더 안정적입니다. 그래서 오픈월드의 사실상
+    표준이 되었습니다.
+  </p>
+
+  <!-- =========================================================
+       4. 구현 (How)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">4. 구현 — 클러스터 인덱싱</h2>
+  <p>
+    구현의 심장은 두 가지입니다: (1) <strong>화면 좌표 + 깊이 → 클러스터 인덱스</strong>를 구하는 함수, (2) 그 인덱스로
+    <strong>per-cluster 광원 리스트</strong>를 읽어 <em>그 광원만</em> 순회하는 픽셀 셰이더. 아래는 골격이지만 인덱싱 수식은
+    실제 그대로입니다(광원 컬링을 채우는 컴퓨트 패스, 데이터 구조 세부는 생략).
+  </p>
+
+  <div class="code">
+    <div class="code-head"><span>cluster_index.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 클러스터 격자 파라미터 (CPU에서 상수 버퍼로 업로드)
+cbuffer ClusterParams : register(b0) {
+    uint3  gridDim;      // 클러스터 격자 (예: 16, 9, 24)
+    float  zNear;        // 절두체 근평면 거리 (양수)
+    float2 tileSizePx;   // 타일 한 칸 픽셀 크기 (screenW/gridX, screenH/gridY)
+    float  zFar;         // 절두체 원평면 거리
+    float  _pad;         // 16바이트 정렬 맞춤(float3+float 규칙)
+};
+
+// per-cluster 광원 인덱스 리스트 (컴퓨트 컬링 패스가 프레임당 1회 채움)
+struct LightGrid { uint offset; uint count; };      // 이 클러스터의 리스트 시작/개수
+StructuredBuffer&lt;LightGrid&gt; gLightGrid   : register(t0);  // 클러스터당 1개
+StructuredBuffer&lt;uint&gt;      gLightIndex  : register(t1);  // 평탄화된 광원 인덱스 배열
+
+// (1) 화면 픽셀 좌표 + 뷰 공간 깊이 → 3D 클러스터 인덱스
+uint ClusterIndex(float2 screenPx, float viewZ) {
+    // 화면 X·Y 타일 인덱스: 픽셀 좌표를 타일 크기로 나눠 내림
+    uint tileX = (uint)(screenPx.x / tileSizePx.x);
+    uint tileY = (uint)(screenPx.y / tileSizePx.y);
+
+    // 깊이 슬라이스: 로그(지수) 분포 — 가까울수록 촘촘
+    //   slice = floor( log(z/near) / log(far/near) * numSlices )
+    float zClamped = max(viewZ, zNear);              // near 아래로 내려가면 log 발산 → 클램프
+    float slice    = log(zClamped / zNear) / log(zFar / zNear) * (float)gridDim.z;
+    uint  sliceZ   = (uint)clamp(slice, 0.0, (float)(gridDim.z - 1));
+
+    // 3D (tileX, tileY, sliceZ) → 1D 인덱스로 평탄화 (행 우선)
+    //   idx = x + y*gridX + z*gridX*gridY
+    return tileX + tileY * gridDim.x + sliceZ * gridDim.x * gridDim.y;
+}
+
+// (2) 픽셀 셰이더: 내 클러스터의 광원만 순회
+float3 ShadePixel(float2 screenPx, float viewZ, float3 P, float3 N, float3 albedo) {
+    uint      ci   = ClusterIndex(screenPx, viewZ);
+    LightGrid cell = gLightGrid[ci];                 // 이 클러스터의 리스트 위치
+
+    float3 lit = albedo * 0.03;                      // 앰비언트
+    for (uint k = 0; k &lt; cell.count; ++k) {          // 전체 광원이 아니라 '내 셀'의 광원만
+        uint  li = gLightIndex[cell.offset + k];     // 평탄 배열에서 실제 광원 인덱스
+        // Light L = gLights[li];  ... 블린-퐁 등으로 조명 누적 ...
+        lit += ShadeOneLight(li, P, N, albedo);
+    }
+    return lit;
+}</code></pre>
+  </div>
+
+  <h3 style="margin-top:30px;">4-1. 타일 인덱스 — 픽셀을 타일 크기로 나누기</h3>
+  <p>
+    <code>tileX = screenPx.x / tileSizePx.x</code>는 화면 픽셀 X를 타일 한 칸 폭으로 나눠 내림한 값입니다. 화면 폭이
+    1920, 격자 X가 16이면 타일 폭은 120픽셀이고, X=250인 픽셀은 <code>250/120 = 2.08 → 2</code>번 타일에 속합니다.
+    Y도 동일합니다. 이 <code>(tileX, tileY)</code>가 Forward+와 <em>똑같은</em> 2D 타일 좌표입니다 — Clustered는 여기에 Z만
+    보탭니다.
+  </p>
+
+  <h3 style="margin-top:30px;">4-2. 깊이 슬라이스 — 로그 인덱싱</h3>
+  <p>
+    <code>slice = log(z/near) / log(far/near) * numSlices</code>가 1-1에서 유도한 그 공식입니다. <code>gridDim.z</code>가
+    슬라이스 수(numSlices)이고, 결과를 <code>floor</code>(정수 캐스팅)해 슬라이스 인덱스로 만든 뒤
+    <code>clamp(..., 0, gridDim.z-1)</code>로 far를 살짝 넘는 픽셀이 배열 밖으로 새지 않게 가둡니다. <strong>near 쪽이 촘촘,
+    far 쪽이 성긴</strong> 분포가 이 한 줄에서 나옵니다.
+  </p>
+
+  <h3 style="margin-top:30px;">4-3. 3D → 1D 평탄화 — <code>x + y·gridX + z·gridX·gridY</code></h3>
+  <p>
+    GPU 버퍼는 1차원 배열이므로 <code>(tileX, tileY, sliceZ)</code> 3D 좌표를 하나의 인덱스로 접어야 합니다.
+    <code>idx = x + y*gridX + z*gridX*gridY</code>는 <strong>행 우선(row-major) 평탄화</strong>입니다: X가 가장 빨리
+    변하고(연속), 한 행(gridX개)을 다 돌면 Y가 1 증가하고, 한 평면(gridX·gridY개)을 다 돌면 Z가 1 증가합니다. 컴퓨트
+    컬링 패스가 <code>gLightGrid</code>를 채울 때도 <strong>같은 공식</strong>으로 인덱스를 계산해야 픽셀 셰이더의 읽기와
+    짝이 맞습니다.
+  </p>
+
+  <h3 style="margin-top:30px;">4-4. 광원 리스트 순회 — 전체가 아니라 "내 셀"만</h3>
+  <p>
+    <code>gLightGrid[ci]</code>는 이 클러스터가 담당하는 광원들이 평탄 배열 <code>gLightIndex</code>의 어디부터
+    (<code>offset</code>) 몇 개(<code>count</code>) 있는지 알려 줍니다. 픽셀 셰이더는 <em>전체 광원 64/256/…개</em>가 아니라
+    <code>cell.count</code>개(대개 한 자릿수)만 돌면 됩니다. 디퍼드의 <code>for (i &lt; NR_LIGHTS)</code> 전수 순회를
+    "내 클러스터의 광원만"으로 좁힌 것이 Clustered의 성능 이점 그 자체입니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    <strong>near가 0이면 <code>log(z/near)</code>가 발산</strong>합니다(0으로 나누기 → −∞). 그래서 <code>zNear</code>는 반드시
+    양수여야 하고, 위 코드처럼 <code>viewZ</code>도 <code>max(viewZ, zNear)</code>로 클램프해야 near 앞쪽 픽셀이 음의
+    슬라이스로 튀지 않습니다. 또한 <strong>viewZ의 부호와 좌표계</strong>에 주의하세요 — 왼손 좌표계는 카메라 앞이 +Z라
+    깊이가 양수지만, 오른손(뷰 공간 −Z 앞)을 쓰던 코드를 이식하면 <code>viewZ = -posView.z</code>처럼 부호를 뒤집어
+    <em>양의 거리</em>로 만들어야 로그가 성립합니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    클러스터 <strong>컬링(광원↔클러스터 겹침 판정)은 프레임당 1회 컴퓨트 셰이더</strong>로 끝납니다. 광원이 아무리 많아도
+    픽셀 셰이더는 <em>자기 클러스터의 몇 개</em>만 돌므로 <strong>픽셀 조명 비용이 안정적</strong>입니다. 대신 격자를 잘게
+    쪼갤수록(예: 16×9×24 → 32×18×48) 클러스터 수가 세제곱으로 늘어 <strong>컬링 비용과 광원 리스트 메모리가 커집니다.</strong>
+    격자 해상도는 "false positive 감소"와 "컬링·메모리 비용" 사이의 흥정입니다. 실무는 24 슬라이스 안팎을 즐겨 씁니다.
+  </div>
+
+  <!-- =========================================================
+       5. 언제 쓰나 (실무 노트)
+       ========================================================= -->
+  <h2 style="margin-top:44px;">5. 언제 쓰나 — 실무 노트</h2>
+  <div class="callout">
+    <span class="tag warn">실무</span>
+    Clustered는 <strong>많은 동적 광원 + 깊이 편차가 큰 오픈월드</strong>의 사실상 표준입니다. 대표 사례:
+    <ul style="margin:8px 0 0 0;">
+      <li><strong>Emil Persson / Avalanche Studios</strong> — <em>Just Cause</em> 시리즈에서 "Clustered Shading"을 실전 도입해 널리 알린 작업.</li>
+      <li><strong>Doom 2016 (id Tech 6)</strong> — <em>clustered forward+</em>. 로그 깊이 슬라이스 + 프레임당 1회 컴퓨트 컬링의 교과서적 구현.</li>
+      <li><strong>Unreal Engine</strong> — <em>Clustered</em> 라이트 그리드로 다수 로컬 광원을 처리.</li>
+      <li><strong>Detroit: Become Human (Quantic Dream)</strong> — 대규모 실내/동적 조명에 클러스터드 셰이딩 활용.</li>
+    </ul>
+    광원이 소수이거나 깊이 편차가 작은 씬이라면 Forward+로 충분합니다. "광원이 많고, 화면 한 픽셀 뒤로 near~far가 크게
+    벌어진다"가 Clustered를 택하는 신호입니다.
+  </div>
+
+  <!-- =========================================================
+       6. 더 읽기
+       ========================================================= -->
+  <h2 style="margin-top:44px;">6. 더 읽기</h2>
+  <ul>
+    <li>
+      Ola Olsson, Markus Billeter, Ulf Assarsson,
+      <a href="http://www.cse.chalmers.se/~uffe/clustered_shading_preprint.pdf" target="_blank" rel="noopener">"Clustered Deferred and Forward Shading"</a>
+      (HPG, 2012) — 클러스터드 셰이딩의 원조 논문.
+    </li>
+    <li>
+      Emil Persson,
+      <a href="https://www.humus.name/Articles/PracticalClusteredShading.pdf" target="_blank" rel="noopener">"Practical Clustered Shading"</a>
+      (SIGGRAPH course, 2013) — 실전 구현·최적화 노트.
+    </li>
+    <li>
+      Tiago Sousa, Jean Geffroy,
+      <a href="https://advances.realtimerendering.com/s2016/Siggraph2016_idTech6.pdf" target="_blank" rel="noopener">"The Devil is in the Details: id Tech 6 Rendering"</a>
+      (SIGGRAPH 2016) — Doom 2016의 clustered forward+ 상세.
+    </li>
+  </ul>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-forwardplus.html">← Forward+ (Tiled Forward)</a>
+    <a href="./06-visibility.html">Visibility Buffer →</a>
+  </nav>
+
+  <div class="footer">🛠️ 구현 가이드 · 원본 예제 · C++17 / Direct3D 11 / HLSL SM5.0</div>
+</main>
+<script src="./highlight.js"></script>
+<script>
+/* 히어로 배너: 절두체(옆단면)를 3D 클러스터 격자로 쪼개며 광원이 셀에 물드는 애니메이션.
+   빌드 없음 · 격리 실행 · 캔버스 크기 피드백 루프 방지(논리 크기는 표시 크기에서, height 속성 재대입 안 함). */
+(function () {
+  try {
+    var cv = document.getElementById("clHeroCanvas");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    var W = 0, H = 0, dpr = 1;
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // 광원(정규화 좌표 0~1)
+    function rand(a, b) { return a + Math.random() * (b - a); }
+    var lights = [];
+    for (var i = 0; i < 10; i++) {
+      lights.push({ x: rand(0.18, 0.95), y: rand(0.2, 0.8), r: rand(0.08, 0.16),
+        px: rand(0, Math.PI * 2), py: rand(0, Math.PI * 2),
+        sp: rand(0.3, 0.7), hue: rand(150, 200) });
+    }
+
+    var t0 = null;
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+
+      // 절두체(옆단면): 카메라(왼쪽 꼭지점)에서 오른쪽으로 벌어지는 사다리꼴
+      var camX = W * 0.06, camY = H * 0.5;
+      var farX = W * 0.98;
+      var halfNear = H * 0.06, halfFar = H * 0.42;
+      function topAt(x) { var u = (x - camX) / (farX - camX); return camY - (halfNear + (halfFar - halfNear) * u); }
+      function botAt(x) { var u = (x - camX) / (farX - camX); return camY + (halfNear + (halfFar - halfNear) * u); }
+
+      // 클리핑 영역 = 절두체 내부
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(camX, topAt(camX));
+      ctx.lineTo(farX, topAt(farX));
+      ctx.lineTo(farX, botAt(farX));
+      ctx.lineTo(camX, botAt(camX));
+      ctx.closePath();
+      ctx.clip();
+
+      // 슬라이스 수는 시간에 따라 천천히 증가(1 -> 8 반복)했다가 리셋 = 개념 전달
+      var nSlice = 1 + Math.floor((Math.sin(t * 0.35) * 0.5 + 0.5) * 7.0);
+      var near = 0.06, far = 1.0;
+      // 클러스터 셀 히트맵: (slice x tile) 격자
+      var nTile = 5;
+      for (var s = 0; s < nSlice; s++) {
+        // 로그 슬라이스 경계 x 좌표
+        var z0 = near * Math.pow(far / near, s / nSlice);
+        var z1 = near * Math.pow(far / near, (s + 1) / nSlice);
+        var x0 = camX + (farX - camX) * z0;
+        var x1 = camX + (farX - camX) * z1;
+        for (var ti = 0; ti < nTile; ti++) {
+          var yTop0 = topAt(x0), yBot0 = botAt(x0);
+          var cy0 = yTop0 + (yBot0 - yTop0) * (ti / nTile);
+          var cy1 = yTop0 + (yBot0 - yTop0) * ((ti + 1) / nTile);
+          var cx = (x0 + x1) * 0.5, cy = (cy0 + cy1) * 0.5;
+          // 셀 중심이 몇 개 광원 반경 안에 드는가
+          var hit = 0;
+          for (var li = 0; li < lights.length; li++) {
+            var L = lights[li];
+            var lx = camX + (farX - camX) * (0.12 + L.x * 0.85) + Math.sin(t * L.sp + L.px) * 10;
+            var ly = camY + (L.y - 0.5) * (botAt(lx) - topAt(lx)) + Math.cos(t * L.sp + L.py) * 8;
+            var dx = (cx - lx), dy = (cy - ly);
+            if (dx * dx + dy * dy < (L.r * W) * (L.r * W)) hit++;
+          }
+          if (hit > 0) {
+            var a = Math.min(0.55, 0.12 + hit * 0.12);
+            ctx.fillStyle = "rgba(255," + Math.max(60, 200 - hit * 40) + ",90," + a.toFixed(3) + ")";
+            ctx.fillRect(x0, cy0, x1 - x0, cy1 - cy0);
+          }
+        }
+      }
+
+      // 슬라이스 경계(세로 곡선 대신 세로선)
+      ctx.strokeStyle = "rgba(126,231,135,0.28)";
+      ctx.lineWidth = 1;
+      for (var s2 = 1; s2 < nSlice; s2++) {
+        var z = near * Math.pow(far / near, s2 / nSlice);
+        var xx = camX + (farX - camX) * z;
+        ctx.beginPath(); ctx.moveTo(xx, topAt(xx)); ctx.lineTo(xx, botAt(xx)); ctx.stroke();
+      }
+      // 타일 경계(위/아래 절두체 모서리 사이 가로선)
+      ctx.strokeStyle = "rgba(126,231,135,0.14)";
+      for (var ti2 = 1; ti2 < nTile; ti2++) {
+        ctx.beginPath();
+        ctx.moveTo(camX, camY + (topAt(camX) - camY) * (1 - 2 * ti2 / nTile));
+        for (var xx2 = camX; xx2 <= farX; xx2 += 24) {
+          var yT = topAt(xx2), yB = botAt(xx2);
+          ctx.lineTo(xx2, yT + (yB - yT) * (ti2 / nTile));
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 절두체 외곽선
+      ctx.strokeStyle = "rgba(180,240,200,0.5)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(camX, topAt(camX));
+      ctx.lineTo(farX, topAt(farX));
+      ctx.lineTo(farX, botAt(farX));
+      ctx.lineTo(camX, botAt(camX));
+      ctx.closePath();
+      ctx.stroke();
+
+      // 광원 점
+      for (var lk = 0; lk < lights.length; lk++) {
+        var L2 = lights[lk];
+        var lx2 = camX + (farX - camX) * (0.12 + L2.x * 0.85) + Math.sin(t * L2.sp + L2.px) * 10;
+        var ly2 = camY + (L2.y - 0.5) * (botAt(lx2) - topAt(lx2)) + Math.cos(t * L2.sp + L2.py) * 8;
+        var g = ctx.createRadialGradient(lx2, ly2, 0, lx2, ly2, L2.r * W);
+        g.addColorStop(0, "hsla(" + L2.hue + ",90%,70%,0.35)");
+        g.addColorStop(1, "hsla(" + L2.hue + ",90%,70%,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(lx2, ly2, L2.r * W, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "hsla(" + L2.hue + ",95%,80%,0.95)";
+        ctx.beginPath(); ctx.arc(lx2, ly2, 2.5, 0, Math.PI * 2); ctx.fill();
+      }
+
+      rafId = window.requestAnimationFrame(draw);
+    }
+    var rafId = window.requestAnimationFrame(draw);
+  } catch (e) { /* 히어로 실패해도 페이지는 계속 */ }
+})();
+
+/* 직관 데모: 절두체 옆단면에서 2D 타일 vs 3D 클러스터.
+   슬라이더로 Z 슬라이스 수/광원 수 조절. 셀당 평균 광원 수 + 슬라이스=1 대비 감소율 HUD. */
+(function () {
+  try {
+    var cv = document.getElementById("clDemoCanvas");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+    var hud = document.getElementById("clHud");
+    var slSlices = document.getElementById("clSlices");
+    var slLights = document.getElementById("clLights");
+    var vSlices = document.getElementById("clSlicesVal");
+    var vLights = document.getElementById("clLightsVal");
+
+    var W = 0, H = 0, dpr = 1;
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function rand(a, b) { return a + Math.random() * (b - a); }
+    var TILES = 6;          // 세로 화면 타일 수(고정)
+    var maxLights = 40;
+    var lights = [];
+    function rebuildLights(n) {
+      lights.length = 0;
+      for (var i = 0; i < n; i++) {
+        lights.push({ zx: rand(0.05, 0.95), ty: rand(0.05, 0.95), rad: rand(0.05, 0.12),
+          px: rand(0, Math.PI * 2), py: rand(0, Math.PI * 2), sp: rand(0.25, 0.6) });
+      }
+    }
+    rebuildLights(parseInt(slLights.value, 10));
+
+    slSlices.addEventListener("input", function () { vSlices.textContent = slSlices.value; });
+    slLights.addEventListener("input", function () {
+      vLights.textContent = slLights.value;
+      rebuildLights(parseInt(slLights.value, 10));
+    });
+
+    var t0 = null;
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+
+      var nSlice = parseInt(slSlices.value, 10);
+      var near = 0.05, far = 1.0;
+
+      var camX = W * 0.05, camY = H * 0.5;
+      var farX = W * 0.97;
+      var halfNear = H * 0.05, halfFar = H * 0.44;
+      function topAt(x) { var u = (x - camX) / (farX - camX); return camY - (halfNear + (halfFar - halfNear) * u); }
+      function botAt(x) { var u = (x - camX) / (farX - camX); return camY + (halfNear + (halfFar - halfNear) * u); }
+
+      // 광원 현재 위치(절두체 좌표계)
+      var lpos = [];
+      for (var li = 0; li < lights.length; li++) {
+        var L = lights[li];
+        var lx = camX + (farX - camX) * L.zx + Math.sin(t * L.sp + L.px) * 12;
+        var yT = topAt(lx), yB = botAt(lx);
+        var ly = yT + (yB - yT) * L.ty + Math.cos(t * L.sp + L.py) * 10;
+        lpos.push({ x: lx, y: ly, r: L.rad * W });
+      }
+
+      // 클러스터 셀 그리기 + 겹친 광원 수 집계
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(camX, topAt(camX)); ctx.lineTo(farX, topAt(farX));
+      ctx.lineTo(farX, botAt(farX)); ctx.lineTo(camX, botAt(camX));
+      ctx.closePath(); ctx.clip();
+
+      var totalCells = 0, totalHits = 0, maxHit = 0;
+      for (var s = 0; s < nSlice; s++) {
+        var z0 = near * Math.pow(far / near, s / nSlice);
+        var z1 = near * Math.pow(far / near, (s + 1) / nSlice);
+        var x0 = camX + (farX - camX) * z0;
+        var x1 = camX + (farX - camX) * z1;
+        for (var ti = 0; ti < TILES; ti++) {
+          var yTop0 = topAt(x0), yBot0 = botAt(x0);
+          var yTop1 = topAt(x1), yBot1 = botAt(x1);
+          var a0 = yTop0 + (yBot0 - yTop0) * (ti / TILES);
+          var a1 = yTop0 + (yBot0 - yTop0) * ((ti + 1) / TILES);
+          var b0 = yTop1 + (yBot1 - yTop1) * (ti / TILES);
+          var b1 = yTop1 + (yBot1 - yTop1) * ((ti + 1) / TILES);
+          var cx = (x0 + x1) * 0.5, cy = (a0 + a1 + b0 + b1) * 0.25;
+          // 셀이 몇 개 광원 반경과 겹치나(중심 근사 + 반폭 여유)
+          var cellR = Math.max(x1 - x0, a1 - a0) * 0.5;
+          var hit = 0;
+          for (var lj = 0; lj < lpos.length; lj++) {
+            var dx = cx - lpos[lj].x, dy = cy - lpos[lj].y;
+            var rr = lpos[lj].r + cellR;
+            if (dx * dx + dy * dy < rr * rr) hit++;
+          }
+          totalCells++;
+          if (hit > 0) { totalHits += hit; if (hit > maxHit) maxHit = hit; }
+          // 히트맵 색
+          if (hit > 0) {
+            var norm = Math.min(1, hit / 6);
+            var g = Math.round(200 - norm * 170);
+            var a = 0.14 + norm * 0.42;
+            ctx.fillStyle = "rgba(255," + g + ",70," + a.toFixed(3) + ")";
+            // 사다리꼴 셀
+            ctx.beginPath();
+            ctx.moveTo(x0, a0); ctx.lineTo(x1, b0); ctx.lineTo(x1, b1); ctx.lineTo(x0, a1);
+            ctx.closePath(); ctx.fill();
+          }
+        }
+      }
+
+      // 슬라이스 경계선(세로)
+      ctx.strokeStyle = "rgba(126,231,135,0.32)";
+      ctx.lineWidth = 1;
+      for (var s2 = 1; s2 < nSlice; s2++) {
+        var z = near * Math.pow(far / near, s2 / nSlice);
+        var xx = camX + (farX - camX) * z;
+        ctx.beginPath(); ctx.moveTo(xx, topAt(xx)); ctx.lineTo(xx, botAt(xx)); ctx.stroke();
+      }
+      // 타일 경계선(가로)
+      ctx.strokeStyle = "rgba(126,231,135,0.16)";
+      for (var ti2 = 1; ti2 < TILES; ti2++) {
+        ctx.beginPath();
+        var first = true;
+        for (var xx2 = camX; xx2 <= farX; xx2 += 20) {
+          var yT2 = topAt(xx2), yB2 = botAt(xx2);
+          var yy = yT2 + (yB2 - yT2) * (ti2 / TILES);
+          if (first) { ctx.moveTo(xx2, yy); first = false; } else ctx.lineTo(xx2, yy);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 절두체 외곽선 + 카메라
+      ctx.strokeStyle = "rgba(180,240,200,0.55)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(camX, topAt(camX)); ctx.lineTo(farX, topAt(farX));
+      ctx.lineTo(farX, botAt(farX)); ctx.lineTo(camX, botAt(camX));
+      ctx.closePath(); ctx.stroke();
+      ctx.fillStyle = "rgba(126,231,135,0.9)";
+      ctx.beginPath(); ctx.arc(camX, camY, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "rgba(200,255,210,0.7)";
+      ctx.font = "11px 'JetBrains Mono', monospace";
+      ctx.fillText("cam", camX - 6, camY - 10);
+      ctx.fillText("near", camX + 4, botAt(camX) + 14);
+      ctx.fillText("far", farX - 24, botAt(farX) - 6);
+
+      // 광원
+      for (var lk = 0; lk < lpos.length; lk++) {
+        var P = lpos[lk];
+        var grad = ctx.createRadialGradient(P.x, P.y, 0, P.x, P.y, P.r);
+        grad.addColorStop(0, "rgba(255,230,140,0.30)");
+        grad.addColorStop(1, "rgba(255,230,140,0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(P.x, P.y, P.r, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "rgba(255,225,120,0.35)";
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(P.x, P.y, P.r, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = "rgba(255,240,170,0.95)";
+        ctx.beginPath(); ctx.arc(P.x, P.y, 2.2, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // HUD: 현 슬라이스 평균 셀 광원수 + 슬라이스=1 대비 감소율
+      var avgNow = totalCells ? (totalHits / totalCells) : 0;
+      // 슬라이스=1(Forward+) 기준 셀당 평균 재계산
+      var cells1 = 0, hits1 = 0;
+      var zz0 = near, zz1 = far;
+      var xx0 = camX + (farX - camX) * zz0, xx1 = camX + (farX - camX) * zz1;
+      for (var ti3 = 0; ti3 < TILES; ti3++) {
+        var t0y = topAt(xx0), b0y = botAt(xx0);
+        var aa0 = t0y + (b0y - t0y) * (ti3 / TILES);
+        var aa1 = t0y + (b0y - t0y) * ((ti3 + 1) / TILES);
+        var ccx = (xx0 + xx1) * 0.5, ccy = (aa0 + aa1) * 0.5;
+        var cR = Math.max(xx1 - xx0, aa1 - aa0) * 0.5;
+        var h1 = 0;
+        for (var lm = 0; lm < lpos.length; lm++) {
+          var ddx = ccx - lpos[lm].x, ddy = ccy - lpos[lm].y, rr1 = lpos[lm].r + cR;
+          if (ddx * ddx + ddy * ddy < rr1 * rr1) h1++;
+        }
+        cells1++; hits1 += h1;
+      }
+      var avg1 = cells1 ? (hits1 / cells1) : 0;
+      var reduce = avg1 > 0 ? Math.max(0, (1 - avgNow / avg1) * 100) : 0;
+      var mode = nSlice === 1 ? "Forward+ (깊이 미분할)" : "Clustered " + TILES + "×" + nSlice;
+      if (hud) {
+        hud.innerHTML =
+          mode +
+          "<br>셀당 평균 광원: " + avgNow.toFixed(2) +
+          "<br>최대 셀 광원: " + maxHit +
+          "<br>슬라이스=1 대비 감소: " + reduce.toFixed(0) + "%";
+      }
+
+      rafId = window.requestAnimationFrame(draw);
+    }
+    var rafId = window.requestAnimationFrame(draw);
+  } catch (e) { /* 데모 실패해도 페이지는 계속 */ }
+})();
+</script>
+</body>
+</html>

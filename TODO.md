@@ -23,3 +23,18 @@
       06-ibl→개념 섹션 역링크. CLAUDE.md에 "구현 트랙 후 개념 트랙 반영" 규칙 추가.
 
 > 후속(선택): 리플렉션 프로브 전용 개념 데모·GI 프로브 그리드 개념 데모는 미착수(현재 #ibl 데모가 IBL split-sum을 커버, #gi가 GI를 커버). 필요 시 추가.
+
+---
+
+## 06-gi 기법별 세부 페이지 개편 (진행 중)
+
+`06-gi.html`(단일 롱페이지) → **GI 허브 + 기법별 세부 페이지 5개**로 분해. 각 세부 페이지는 히어로 + 비주얼 데모 + "직접 구현" 콘텐츠.
+
+- [x] `06-gi.html`을 허브로 재작성(히어로·큰그림·비교표·5카드·마무리표).
+- [x] `06-gi-lightmap.html` — 라이트맵 베이킹 + 2D 베이킹 데모(방+텍셀+1D 라이트맵 스트립).
+- [x] `06-gi-probe.html` — Irradiance 프로브(SH)·그리드·DDGI + 2D 프로브 그리드/누수 데모.
+- [x] `06-gi-ssgi.html` — SSGI + WebGL 코넬박스 color bleeding(OFF|ON) 데모.
+- [x] `06-gi-vxgi.html` — Voxel Cone Tracing + WebGL 콘 번짐 데모.
+- [x] `06-gi-rtgi.html` — DXR RTGI + WebGL 노이즈→디노이즈 데모.
+- [x] 06-ibl `#probe` 링크 → `06-gi-probe.html` 갱신, 허브 카드·CURRICULUM 6-D 갱신.
+- [x] 5페이지 헤드리스 렌더 검증(히어로·데모·본문·JS문법·nav) 후 일괄 커밋·푸시.

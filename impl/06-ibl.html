@@ -225,7 +225,7 @@ float4 main(float3 worldDir : DIRECTION) : SV_Target
       이 이중 루프는 텍셀당 약 <code>(2π/0.025)×(π/2·1/0.025) ≈ 250×63 ≈ 1.6만</code> 샘플입니다. 하지만 irradiance 큐브맵은
       <strong>32²×6</strong>처럼 작아도 충분하고(저주파), 씬당 <em>한 번만</em> 굽습니다(정적 환경). 동적 하늘이면 매 프레임 다시 굽는 대신
       <em>구면 조화(SH)로 압축</em>해 9계수만 갱신하는 편이 훨씬 쌉니다 —
-      그 SH 경로는 <a class="btn-link" href="./06-gi.html#probe">전역 조명: Irradiance Probe</a>에서 다룹니다.
+      그 SH 경로는 <a class="btn-link" href="./06-gi-probe.html">전역 조명: Irradiance Probe</a>에서 다룹니다.
     </div>
   </section>
 
@@ -538,7 +538,7 @@ float3 SampleBlendedProbes(float3 P, float3 R, float roughness)
         <tr><td>정적 실외·하늘 하나</td><td>전역 IBL(irradiance + 프리필터 + BRDF LUT) 한 세트</td></tr>
         <tr><td>실내·구역별 다른 환경</td><td>리플렉션 프로브 여러 개 + parallax correction + 블렌딩</td></tr>
         <tr><td>동적 접촉 반사가 중요</td><td>SSR 우선 → 프로브 폴백 → 전역 IBL 폴백</td></tr>
-        <tr><td>동적 하늘·시간대 변화</td><td>디퓨즈는 <a class="btn-link" href="./06-gi.html#probe">SH 프로브</a>로 매 프레임 갱신, 스페큘러만 프리필터 재굽기</td></tr>
+        <tr><td>동적 하늘·시간대 변화</td><td>디퓨즈는 <a class="btn-link" href="./06-gi-probe.html">SH 프로브</a>로 매 프레임 갱신, 스페큘러만 프리필터 재굽기</td></tr>
       </tbody>
     </table>
     <p style="color:var(--text-dim); font-size:14px;">

@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: SSGI (스크린 스페이스 GI) — C++/DirectX 11</title>
+<meta name="description" content="G-buffer(깊이·법선·직접광)만으로 화면 안 픽셀끼리 1바운스 간접광을 근사하는 SSGI를, 위치 복원·재투영·코사인 가중까지 HLSL로 한 줄씩 해부하고 WebGL color-bleeding 데모로 감을 잡는 가이드." />
+<link rel="stylesheet" href="../css/theme.css" />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+<script src="./embed.js"></script>
+</head>
+<body>
+<main class="content" style="max-width:1200px;">
+  <a class="back-link" href="./index.html" onclick="if(history.length>1){history.back();return false}">← 뒤로가기</a>
+
+  <!-- 타이틀 히어로 배너: 화면 공간에서 색이 이웃으로 번지는(color bleeding) SSGI의 본질을 WebGL 셰이더로. -->
+  <div class="grass-hero" id="ssgiHero">
+    <canvas id="ssgiHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Screen-Space <span class="accent">GI</span></h2>
+      <p class="gh-sub">Depth · Reproject · Color Bleeding</p>
+    </div>
+  </div>
+
+  <h1 style="font-size:32px; margin:0 0 12px;">SSGI — 화면 공간 전역 조명 직접 구현</h1>
+  <p class="lead" style="font-size:16px;">
+    <strong>SSGI(Screen-Space Global Illumination)</strong>는 새 지오메트리 패스 없이 이미 있는
+    <strong>G-buffer</strong>(깊이·법선·직접광 결과)만으로 화면 안 픽셀끼리 서로 빛을 주고받는 <em>1바운스 간접광</em>을 근사합니다.
+    <a class="btn-link" href="./06-screenspace.html">SSAO</a>가 "주변이 얼마나 가려졌나"를 재는 것의 <em>색이 있는 버전</em>이라고 보면 됩니다 —
+    빨간 벽 옆 바닥이 붉게 물드는 <em>color bleeding</em>이 거의 공짜로 나옵니다. 아래 데모에서 먼저 감을 잡고, 셰이더를 한 줄씩 해부합니다.
+    (전체 기법 지도는 <a class="btn-link" href="./06-gi.html">전역 조명 허브</a>)
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    행벡터 <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행 우선, 왼손 좌표계, 클립 z ∈ [0,1], 텍스처 V축 위→아래.
+    코드는 <strong>원리 학습용</strong>으로 최소 형태만 남겼습니다.
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- 인터랙티브 데모 -->
+  <!-- ================================================================ -->
+  <h2 style="margin-top:36px;">직관 데모 — 강도를 올리면 벽 색이 바닥으로 번진다</h2>
+  <p>
+    코넬 박스식 씬입니다. 왼쪽 벽은 빨강, 오른쪽 벽은 초록, 천장 가운데는 밝은 광원(emitter)입니다.
+    화면 왼쪽 절반은 항상 <strong>직접광만</strong>(SSGI OFF) 두어 기준으로 삼고, 오른쪽 절반은 슬라이더의
+    <strong>SSGI 강도</strong>를 적용합니다 — 강도를 올리면 화면 이웃 픽셀의 색을 코사인 가중으로 모아
+    바닥·벽에 <em>빨강/초록이 번지는</em> 것이 보입니다. <strong>샘플 반경</strong>은 얼마나 멀리서 색을 끌어올지입니다.
+  </p>
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas id="ssgi-demo" class="gcanvas" width="900" height="360"></canvas>
+      <div class="hud" id="ssgi-hud">렌더링…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl">
+        <label>SSGI 강도 <span class="gval" id="ssgiStrengthVal">0.85</span></label>
+        <input type="range" id="ssgiStrength" min="0" max="1" step="0.01" value="0.85" />
+      </div>
+      <div class="gctl">
+        <label>샘플 반경 <span class="gval" id="ssgiRadiusVal">0.09</span></label>
+        <input type="range" id="ssgiRadius" min="0.02" max="0.18" step="0.005" value="0.09" />
+      </div>
+    </div>
+    <p class="ghint">
+      화면 왼쪽 <strong>OFF</strong> 띠(직접광만)와 오른쪽 <strong>ON</strong>(SSGI 적용)의 경계에서 바닥 색 차이를 보세요.
+      강도 0이면 그림자 속이 새까맣고, 올리면 벽 색이 이웃으로 번집니다. 값은 개념 이해용 근사입니다.
+    </p>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- 본문: SSGI 구현 -->
+  <!-- ================================================================ -->
+  <section id="ssgi">
+    <h2 style="margin-top:40px;">SSGI — 화면 공간에서 간접 반사광 근사</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> G-buffer(깊이·법선·직접광 결과)만 가지고, 화면 안의 픽셀끼리 서로 빛을 주고받는
+      1바운스 간접광을 근사합니다. SSAO가 "주변이 얼마나 가려졌나"를 재는 것의 <em>색이 있는 버전</em>이라고 보면 됩니다.
+      <strong>왜 필요한가:</strong> 새 지오메트리 패스 없이 이미 있는 버퍼만 재사용하므로 매우 저렴하고,
+      color bleeding 같은 GI 느낌을 실시간으로 줍니다.
+    </p>
+    <ol class="steps">
+      <li>현재 픽셀의 월드 위치·법선을 깊이/법선 버퍼에서 복원한다.</li>
+      <li>반구 방향으로 짧은 샘플들을 뿌리고, 각 샘플을 화면 좌표로 투영한다.</li>
+      <li>그 지점의 이전 프레임(또는 직접광) 색을 읽어, 코사인·거리 가중으로 모아 간접광으로 더한다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>ssgi.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D    gColor  : register(t0);  // 이전 프레임의 조명된 색 (radiance 소스)
+Texture2D    gDepth  : register(t1);  // 깊이 버퍼
+Texture2D    gNormal : register(t2);  // 월드 공간 법선
+SamplerState gSamp   : register(s0);
+
+cbuffer SSGICB : register(b0)
+{
+    float4x4 gViewProj;      // 월드 → 클립
+    float4x4 gInvViewProj;   // 클립 → 월드 (위치 복원용)
+    float2   gTexelSize;     // (1/width, 1/height)
+    float    gRadius;        // 샘플 반경(월드 단위)
+    int      gNumSamples;
+};
+
+float3 ReconstructWorldPos(float2 uv, float depth)
+{
+    // uv[0,1]·depth[0,1] → NDC(클립) → 월드
+    float2 ndc = uv * 2.0 - 1.0;      // x,y: [0,1] → [-1,1]
+    ndc.y = -ndc.y;                    // 텍스처 V(위→아래)와 NDC y(아래→위) 뒤집기
+    float4 clip = float4(ndc, depth, 1.0);  // z는 이미 [0,1]
+    float4 world = mul(clip, gInvViewProj); // 행벡터 규약: v * M
+    return world.xyz / world.w;        // 원근 나눗셈
+}
+
+float3 ComputeSSGI(float2 uv)
+{
+    float  depth = gDepth.Sample(gSamp, uv).r;
+    float3 P     = ReconstructWorldPos(uv, depth);
+    float3 N     = normalize(gNormal.Sample(gSamp, uv).xyz * 2.0 - 1.0);
+
+    float3 gi = 0;
+    for (int i = 0; i &lt; gNumSamples; ++i)
+    {
+        // 반구 안의 오프셋 방향(미리 만든 커널 or 해시 난수)
+        float3 dir = HemisphereSample(i, N);
+        float3 samplePos = P + dir * gRadius;
+
+        // 샘플 월드 위치를 화면으로 재투영
+        float4 clip = mul(float4(samplePos, 1.0), gViewProj);
+        float2 sUV  = (clip.xy / clip.w) * 0.5 + 0.5;
+        sUV.y = 1.0 - sUV.y;
+
+        // 화면 밖이면 기여 없음
+        if (any(sUV &lt; 0.0) || any(sUV &gt; 1.0)) continue;
+
+        float3 sColor = gColor.Sample(gSamp, sUV).rgb;   // 그 픽셀이 내뿜는 빛
+        float  cosTerm = max(dot(N, dir), 0.0);          // 코사인 가중
+
+        gi += sColor * cosTerm;
+    }
+    return gi * (1.0 / gNumSamples);   // 평균
+}
+</code></pre>
+    </div>
+
+    <h4>위치 복원 <code>ReconstructWorldPos</code> 해부</h4>
+    <p>
+      <strong>수학:</strong> 래스터화는 월드 점을 <code>clip = world * (View·Proj)</code>로 보낸 뒤 <code>xyz/w</code>로 NDC를 만들고,
+      NDC를 화면 UV·깊이로 저장합니다. 위치 복원은 이 과정을 <strong>역으로</strong> 밟습니다 —
+      UV·깊이 → NDC → (역행렬 곱) → 월드.
+    </p>
+    <p>
+      <strong>줄 매핑:</strong> <code>uv*2-1</code>은 [0,1] UV를 [-1,1] NDC로 펴고, <code>ndc.y = -ndc.y</code>는
+      텍스처 V축(위→아래)과 NDC y축(아래→위)의 방향이 반대라서 뒤집는 보정입니다(우리 규약에서 꼭 필요).
+      <code>clip.z = depth</code>는 이미 [0,1] 범위(우리 클립 z 규약)라 그대로 넣습니다.
+      <code>mul(clip, gInvViewProj)</code>는 <strong>행벡터 규약</strong>이라 벡터가 왼쪽입니다 — 이 순서를 바꾸면 결과가 완전히 틀립니다.
+      마지막 <code>world.xyz / world.w</code>는 동차좌표를 실제 3D 점으로 되돌리는 원근 나눗셈입니다.
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      법선을 <code>tex * 2 - 1</code>로 디코드하는 이유: 법선 <code>[-1,1]</code>을 <code>[0,1]</code> 텍스처에 저장할 때
+      <code>n*0.5+0.5</code>로 인코딩했기 때문입니다. 짝이 되는 디코드를 빠뜨리면 법선이 절반만 표현돼 조명이 어긋납니다.
+      또 <code>gViewProj</code>와 <code>gInvViewProj</code>는 정확히 서로 역이어야 하며, DirectXMath로 만들 때
+      <strong>cbuffer 업로드 전 transpose</strong>를 잊으면(행/열 규약 불일치) 화면이 깨집니다.
+    </div>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      SSGI는 샘플마다 <code>gColor</code> 텍스처를 랜덤 위치로 읽으므로 <strong>캐시 미스</strong>가 병목입니다. 반경을 크게 잡으면
+      메모리 접근이 흩어져 급격히 느려집니다. 보통 저해상도(half-res)로 계산하고, 블루노이즈로 샘플 수를 줄인 뒤
+      시공간 디노이저로 다듬어 성능을 확보합니다.
+    </div>
+
+    <div class="callout">
+      <span class="tag warn">주의</span>
+      화면 공간의 근본 한계: <code>any(sUV &lt; 0) || any(sUV &gt; 1)</code>로 걸러지는 <strong>화면 밖 픽셀</strong>과
+      다른 물체 뒤에 가려진 픽셀은 정보가 없어 기여하지 못합니다. 그래서 SSGI는 카메라를 돌리면 GI가 나타났다 사라지는
+      불안정성이 있고, 프로브·RTGI 같은 화면 밖 정보원과 <em>결합</em>해 쓰는 경우가 많습니다.
+    </div>
+
+    <h4>D3D API / DirectXMath 대응</h4>
+    <p>
+      <code>Texture2D … : register(t0)</code>는 C++에서 <code>ID3D11ShaderResourceView</code>를
+      <code>PSSetShaderResources(0, 1, &amp;srv)</code>로 바인딩한 슬롯에 대응합니다. <code>SamplerState … register(s0)</code>는
+      <code>PSSetSamplers</code>, <code>cbuffer … register(b0)</code>는 <code>PSSetConstantBuffers</code>에 대응합니다.
+      <code>gInvViewProj</code>는 <code>XMMatrixInverse(nullptr, XMMatrixMultiply(view, proj))</code>로 만들고,
+      cbuffer에 넣기 전 <code>XMMatrixTranspose</code>를 반드시 적용합니다(행벡터·행우선 규약 유지).
+    </p>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-gi-probe.html">← 2. Irradiance 프로브</a>
+    <a href="./06-gi-vxgi.html">4. Voxel Cone Tracing →</a>
+  </nav>
+
+</main>
+
+<!-- ================================================================ -->
+<!-- 히어로 배너: WebGL 프래그먼트 셰이더 — 화면 공간에서 색 있는 광원이 이웃으로 번지는(color bleeding) 느낌.
+     실패 시 조용히 캔버스2D 그라디언트로 폴백. 캔버스 크기 피드백 루프 없음. -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  var cv = document.getElementById("ssgiHeroCanvas");
+  if (!cv) return;
+  try {
+    var gl = cv.getContext("webgl") || cv.getContext("experimental-webgl");
+    if (!gl) { fallback2D(); return; }
+
+    var VS = "attribute vec2 p; void main(){ gl_Position = vec4(p,0.0,1.0); }";
+    var FS = [
+      "precision highp float;",
+      "uniform vec2 res; uniform float t;",
+      "vec3 emit(vec2 st, float k){",             // 색 있는 광원 3개가 이동하며 번짐
+      "  vec3 c = vec3(0.04,0.09,0.13);",         // 어두운 바탕
+      "  vec2 e0 = vec2(0.25+0.12*sin(t*0.7), 0.62+0.10*cos(t*0.6));",
+      "  vec2 e1 = vec2(0.72+0.10*cos(t*0.5), 0.40+0.12*sin(t*0.8));",
+      "  vec2 e2 = vec2(0.50+0.14*sin(t*0.4+1.5), 0.72+0.08*cos(t*0.9));",
+      "  vec3 col0 = vec3(1.0,0.30,0.22), col1 = vec3(0.30,0.9,0.45), col2 = vec3(0.35,0.6,1.0);",
+      "  c += col0/(1.0+dot(st-e0,st-e0)*k);",
+      "  c += col1/(1.0+dot(st-e1,st-e1)*k);",
+      "  c += col2/(1.0+dot(st-e2,st-e2)*k);",
+      "  return c;",
+      "}",
+      "void main(){",
+      "  vec2 st = gl_FragCoord.xy / res;",
+      "  vec3 col = emit(st, 90.0);",
+      "  float floorTint = smoothstep(0.0,0.28,st.y);",   // 바닥 쪽 은은한 반사
+      "  col += emit(vec2(st.x, 0.05), 60.0) * (1.0-floorTint) * 0.35;",
+      "  col = col/(col+vec3(1.0));",                       // Reinhard
+      "  col = pow(col, vec3(1.0/2.2));",
+      "  gl_FragColor = vec4(col, 1.0);",
+      "}"
+    ].join("\n");
+
+    function sh(type, src){ var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    var prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+
+    var b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+    var pLoc = gl.getAttribLocation(prog, "p");
+    gl.enableVertexAttribArray(pLoc);
+    gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
+    var uRes = gl.getUniformLocation(prog, "res"), uT = gl.getUniformLocation(prog, "t");
+
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    function resize(){
+      var r = cv.getBoundingClientRect();
+      var w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+      if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+      gl.viewport(0, 0, cv.width, cv.height);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    var t0 = null, raf = 0;
+    function frame(ts){
+      if (t0 === null) t0 = ts;
+      resize();
+      gl.uniform2f(uRes, cv.width, cv.height);
+      gl.uniform1f(uT, (ts - t0) / 1000);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      raf = requestAnimationFrame(frame);
+    }
+    function start(){ if (!raf) raf = requestAnimationFrame(frame); }
+    function stop(){ if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+    document.addEventListener("visibilitychange", function(){ document.hidden ? stop() : start(); });
+    start();
+
+    function fallback2D(){
+      var c = cv.getContext("2d"); if (!c) return;
+      var g = c.createLinearGradient(0, 0, 0, cv.height);
+      g.addColorStop(0, "#132033"); g.addColorStop(1, "#3a1420");
+      c.fillStyle = g; c.fillRect(0, 0, cv.width, cv.height);
+    }
+  } catch (e) {
+    try { var c = cv.getContext("2d"); if (c){ c.fillStyle = "#221030"; c.fillRect(0,0,cv.width,cv.height); } } catch (_) {}
+  }
+})();
+</script>
+
+<!-- ================================================================ -->
+<!-- 인터랙티브 데모: WebGL 프래그먼트 셰이더 — 코넬박스 씬에서 화면 공간 이웃을 gather해
+     color bleeding(SSGI)을 강도/반경으로 조절. 화면 왼쪽 띠는 OFF(직접광만) 기준. -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  var cv = document.getElementById("ssgi-demo");
+  if (!cv) return;
+  var strengthEl = document.getElementById("ssgiStrength");
+  var radiusEl = document.getElementById("ssgiRadius");
+  var sVal = document.getElementById("ssgiStrengthVal");
+  var rVal = document.getElementById("ssgiRadiusVal");
+  var hud = document.getElementById("ssgi-hud");
+  try {
+    var gl = cv.getContext("webgl") || cv.getContext("experimental-webgl");
+    if (!gl) { fallback2D(); return; }
+
+    var VS = "attribute vec2 p; void main(){ gl_Position = vec4(p,0.0,1.0); }";
+    var FS = [
+      "precision highp float;",
+      "uniform vec2 res; uniform float strength; uniform float radius; uniform float t;",
+      "const float PI = 3.14159265;",
+      // 코넬박스식 씬의 '직접광 결과' 색을 돌려준다(st: 0..1, y up).
+      "vec3 sceneDirect(vec2 st){",
+      "  vec3 base; float lit;",
+      "  vec2 emitC = vec2(0.5, 0.93);",
+      "  float dToLight = distance(st, emitC);",
+      "  lit = clamp(1.15 - dToLight*1.15, 0.06, 1.0);",     // 광원 거리 기반 직접광
+      "  if (st.y > 0.90 && st.x > 0.38 && st.x < 0.62) return vec3(2.6,2.5,2.3);", // 광원(emitter)
+      "  if (st.x < 0.10)      base = vec3(0.88,0.10,0.10);", // 좌벽 빨강
+      "  else if (st.x > 0.90) base = vec3(0.10,0.80,0.14);", // 우벽 초록
+      "  else if (st.y > 0.90) base = vec3(0.40,0.40,0.42);", // 천장(어둡게 → 번짐 대비)
+      "  else if (st.y < 0.10) base = vec3(0.42,0.42,0.44);", // 바닥
+      "  else                  base = vec3(0.36,0.36,0.40);", // 뒷벽
+      "  return base * lit;",
+      "}",
+      "float hash(vec2 p){ return fract(sin(dot(p, vec2(41.3,289.1))) * 43758.5453); }",
+      // 화면 공간 이웃을 gather → 1바운스 간접광(코사인 근사)
+      "vec3 gatherSSGI(vec2 st){",
+      "  vec3 acc = vec3(0.0);",
+      "  float jitter = hash(st + fract(t)) * 6.2831;",
+      "  for (int i = 0; i < 16; i++){",
+      "    float a = float(i)/16.0 * 6.2831 + jitter;",
+      "    float rr = radius * (0.4 + 0.6*hash(st*1.7 + float(i)));",
+      "    vec2 off = vec2(cos(a), sin(a)) * rr;",
+      "    off.x *= res.y/res.x;",                            // 화면 종횡비 보정
+      "    acc += sceneDirect(clamp(st+off, 0.0, 1.0));",
+      "  }",
+      "  return acc / 16.0;",
+      "}",
+      "void main(){",
+      "  vec2 st = gl_FragCoord.xy / res;",
+      "  vec3 direct = sceneDirect(st);",
+      "  float s = (st.x < 0.5) ? 0.0 : strength;",          // 왼쪽 절반은 항상 OFF(기준)
+      "  vec3 indirect = gatherSSGI(st) * s * 1.5;",
+      "  vec3 col = direct + indirect;",
+      "  float seam = smoothstep(0.0015,0.0,abs(st.x-0.5));", // OFF|ON 경계선
+      "  col = mix(col, vec3(1.0), seam*0.5);",
+      "  col = col/(col+vec3(1.0));",                         // Reinhard
+      "  col = pow(col, vec3(1.0/2.2));",
+      "  gl_FragColor = vec4(col, 1.0);",
+      "}"
+    ].join("\n");
+
+    function sh(type, src){ var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    var prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+
+    var b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+    var pLoc = gl.getAttribLocation(prog, "p");
+    gl.enableVertexAttribArray(pLoc);
+    gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
+    var uRes = gl.getUniformLocation(prog, "res");
+    var uStr = gl.getUniformLocation(prog, "strength");
+    var uRad = gl.getUniformLocation(prog, "radius");
+    var uT   = gl.getUniformLocation(prog, "t");
+
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    function resize(){
+      var r = cv.getBoundingClientRect();
+      var w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+      if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+      gl.viewport(0, 0, cv.width, cv.height);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function readCtl(){
+      var s = parseFloat(strengthEl.value), r = parseFloat(radiusEl.value);
+      sVal.textContent = s.toFixed(2); rVal.textContent = r.toFixed(3);
+      if (hud) hud.innerHTML = "SSGI 강도 <b>" + s.toFixed(2) + "</b> · 반경 <b>" + r.toFixed(3) +
+        "</b><br><span style='opacity:.75'>왼쪽 절반 = OFF(직접광) · 오른쪽 = ON</span>";
+      return { s: s, r: r };
+    }
+
+    var t0 = null, raf = 0;
+    function frame(ts){
+      if (t0 === null) t0 = ts;
+      resize();
+      var c = readCtl();
+      gl.uniform2f(uRes, cv.width, cv.height);
+      gl.uniform1f(uStr, c.s);
+      gl.uniform1f(uRad, c.r);
+      gl.uniform1f(uT, (ts - t0) / 1000);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      raf = requestAnimationFrame(frame);
+    }
+    function start(){ if (!raf) raf = requestAnimationFrame(frame); }
+    function stop(){ if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+    document.addEventListener("visibilitychange", function(){ document.hidden ? stop() : start(); });
+    start();
+
+    function fallback2D(){
+      var c = cv.getContext("2d"); if (!c) return;
+      c.fillStyle = "#333"; c.fillRect(0,0,cv.width,cv.height);
+      c.fillStyle = "#c02020"; c.fillRect(0,0,cv.width*0.1,cv.height);
+      c.fillStyle = "#20a030"; c.fillRect(cv.width*0.9,0,cv.width*0.1,cv.height);
+      if (hud) hud.textContent = "WebGL 미지원 — 폴백";
+    }
+  } catch (e) {
+    try {
+      var c2 = cv.getContext("2d");
+      if (c2){ c2.fillStyle = "#333"; c2.fillRect(0,0,cv.width,cv.height); }
+      if (hud) hud.textContent = "데모 초기화 실패";
+    } catch (_) {}
+  }
+})();
+</script>
+
+<script src="./highlight.js"></script>
+</body>
+</html>

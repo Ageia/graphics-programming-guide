@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: Voxel Cone Tracing (VXGI) — C++/DirectX 11</title>
+<meta name="description" content="씬을 복셀화해 밉맵으로 굽고, 표면에서 원뿔(cone)을 쏴 거리에 비례한 밉을 읽으며 간접광을 근사하는 Voxel Cone Tracing(VXGI)을 WebGL 데모와 HLSL 코드로 한 줄씩 직접 구현하며 해부한다." />
+<link rel="stylesheet" href="../css/theme.css" />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+<script src="./embed.js"></script>
+</head>
+<body>
+<main class="content" style="max-width:1200px;">
+  <a class="back-link" href="./index.html" onclick="if(history.length>1){history.back();return false}">← 뒤로가기</a>
+
+  <!-- 타이틀 히어로 배너: 복셀 볼륨을 원뿔로 훑어 간접광이 번지는 VXGI의 본질.
+       WebGL 프래그먼트 셰이더로 복셀(블록) 볼륨을 레이마칭. 실패 시 Canvas2D 폴백. -->
+  <div class="grass-hero" id="vxHero">
+    <canvas id="vxHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Voxel Cone <span class="accent">Tracing</span></h2>
+      <p class="gh-sub">Voxelize · Mip · Cone · Volume</p>
+    </div>
+  </div>
+
+  <h1 style="font-size:32px; margin:0 0 12px;">Voxel Cone Tracing (VXGI) — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead" style="font-size:16px;">
+    씬 전체를 <strong>3D 격자(복셀)</strong>에 색·불투명도로 구워 밉맵을 만든 뒤, 표면에서 반구로 몇 개의
+    <strong>원뿔(cone)</strong>을 쏴 거리에 비례해 점점 거친 밉을 읽으며 간접광을 모으는 기법입니다.
+    개별 광선 수백 개 대신 <em>원뿔 하나로 넓은 각도를 한 번에</em> 근사하므로, <strong>완전 동적 씬</strong>에서도
+    부드러운 GI를 실시간에 가깝게 얻습니다. 아래 데모로 "원뿔이 멀수록 넓게 뭉갠다"는 감을 먼저 잡고, HLSL 코드를 한 줄씩 해부합니다.
+    (전체 GI 지형은 <a class="btn-link" href="./06-gi.html">전역 조명 허브</a> 참고)
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    코드는 <strong>행벡터</strong>(<code>mul(v, M)</code>), 왼손 좌표계, 클립 z ∈ [0,1] 규약을 따르며 <strong>원리 학습용</strong> 최소 형태입니다.
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- 인터랙티브 데모 -->
+  <!-- ================================================================ -->
+  <section id="demo">
+    <h2>직관 데모 — 복셀 해상도와 원뿔 조리개를 만져보기</h2>
+    <p>
+      아래는 색 있는 발광 기둥들이 놓인 씬을 <strong>복셀 볼륨</strong>으로 본 뒤, 카메라 광선을 따라 <strong>원뿔로 누적</strong>해
+      그린 것입니다. <strong>복셀 해상도</strong>를 낮추면 블록이 커지고(계단·누수), <strong>원뿔 조리개(aperture)</strong>를 넓히면
+      멀리 갈수록 더 흐릿하게 뭉개져 <em>부드러운 간접광</em>이 됩니다 — 이게 밉 레벨을 거리에 따라 올려 읽는 콘 트레이싱의 핵심입니다.
+    </p>
+    <div class="gdemo">
+      <div class="gcanvas-wrap">
+        <canvas id="vx-demo" class="gcanvas" width="900" height="360"></canvas>
+        <div class="hud" id="vx-hud">렌더링…</div>
+      </div>
+      <div class="gctrls">
+        <div class="gctl">
+          <label>복셀 해상도 <span class="gval" id="vxResVal">32</span></label>
+          <input type="range" id="vxRes" min="6" max="64" step="1" value="32" />
+        </div>
+        <div class="gctl">
+          <label>원뿔 조리개 aperture <span class="gval" id="vxApVal">0.35</span></label>
+          <input type="range" id="vxAp" min="0.05" max="0.9" step="0.01" value="0.35" />
+        </div>
+      </div>
+      <p class="ghint">
+        해상도를 낮추면 복셀 블록이 커져 형태가 뭉툭해지고 얇은 곳으로 빛이 샙니다. 조리개를 넓히면 원뿔이 빨리 벌어져
+        간접광이 더 부드럽게 번집니다. 값은 개념 이해용 근사입니다.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 본문: Voxel Cone Tracing -->
+  <!-- ================================================================ -->
+  <section id="vxgi">
+    <h2>Voxel Cone Tracing — 복셀화한 씬을 원뿔로 훑어 GI 근사</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 씬 전체를 3D 격자(복셀)에 밀도·발광 정보로 구워 밉맵(mip)을 만든 뒤,
+      표면에서 반구 방향으로 몇 개의 <em>원뿔(cone)</em>을 쏴 밉 레벨을 점점 올려 읽으며 간접광을 모읍니다.
+      <strong>왜 필요한가:</strong> 개별 광선 대신 <em>원뿔 하나로 넓은 각도를 한 번에</em> 근사하므로,
+      완전 동적 씬에서도 부드러운 GI를 실시간에 가깝게 얻을 수 있습니다.
+    </p>
+    <ol class="steps">
+      <li>씬을 3D 텍스처에 복셀화(각 복셀에 색·불투명도 누적)하고 밉맵을 생성한다.</li>
+      <li>표면에서 반구를 덮는 여러 원뿔을 정한다(예: 5~6개).</li>
+      <li>각 원뿔을 따라 전진하며, 거리에 비례해 큰 밉 레벨을 샘플하고 알파 블렌딩으로 누적한다.</li>
+    </ol>
+
+    <div class="code">
+      <div class="code-head"><span>voxel_cone.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture3D    gVoxel : register(t0);  // 복셀화된 씬(RGBA: rgb=색, a=불투명도), 밉맵 있음
+SamplerState gSamp  : register(s0);  // 3선형(trilinear) 필터
+
+cbuffer VoxelCB : register(b0)
+{
+    float3 gVoxelGridMin;   // 복셀 격자의 월드 최소 좌표
+    float  gVoxelSize;      // 복셀 하나의 월드 크기
+    int    gVoxelRes;       // 한 축 해상도(예: 128)
+};
+
+// 월드 위치 → 복셀 텍스처 UV(0..1)
+float3 WorldToVoxelUV(float3 p)
+{
+    return (p - gVoxelGridMin) / (gVoxelSize * gVoxelRes);
+}
+
+// 원점 o에서 방향 d로 원뿔을 추적해 누적 색을 돌려준다. aperture=반각 tan값.
+float4 TraceCone(float3 o, float3 d, float aperture)
+{
+    float4 acc  = float4(0, 0, 0, 0);   // (rgb=누적색, a=누적 불투명도)
+    float  dist = gVoxelSize;           // 자기 자신을 안 읽도록 한 복셀 띄우고 시작
+
+    [loop]
+    while (dist &lt; gVoxelSize * gVoxelRes &amp;&amp; acc.a &lt; 1.0)
+    {
+        // 현재 거리에서 원뿔의 지름 → 그에 맞는 밉 레벨 선택
+        float diameter = max(gVoxelSize, 2.0 * aperture * dist);
+        float mip      = log2(diameter / gVoxelSize);
+
+        float3 pos = o + d * dist;
+        float4 s   = gVoxel.SampleLevel(gSamp, WorldToVoxelUV(pos), mip);
+
+        // front-to-back 알파 합성: 앞쪽이 가릴수록 뒤쪽 기여 감소
+        acc.rgb += (1.0 - acc.a) * s.a * s.rgb;
+        acc.a   += (1.0 - acc.a) * s.a;
+
+        dist += diameter * 0.5;         // 지름의 절반만큼 전진(겹침 = 부드러움)
+    }
+    return acc;
+}
+</code></pre>
+    </div>
+
+    <h4>원뿔 추적의 핵심 아이디어</h4>
+    <p>
+      <strong>수학·직관:</strong> 하나의 광선은 무한히 가는 선이라 넓은 반구를 덮으려면 수백 개가 필요합니다.
+      원뿔은 <em>점점 벌어지는 부피</em>라, 멀리 갈수록 넓은 영역을 대표합니다. "멀리 있는 것은 뭉개서 봐도 된다"는
+      직관을 <strong>밉맵</strong>으로 정확히 구현합니다 — 거리 <code>dist</code>가 멀수록 원뿔 지름 <code>2·aperture·dist</code>가 커지고,
+      그에 맞춰 <code>mip = log2(지름/복셀크기)</code>로 더 흐릿한(넓은 영역을 평균한) 밉을 읽습니다.
+    </p>
+    <p>
+      <strong>줄 매핑:</strong> <code>SampleLevel</code>은 <em>지정한 밉 레벨</em>을 직접 읽습니다(자동 밉 선택인 <code>Sample</code>과 달리).
+      원뿔 추적은 밉을 우리가 계산하므로 <code>SampleLevel</code>이 필수입니다.
+      <code>dist += diameter*0.5</code>는 원뿔의 원판들이 절반씩 겹치도록 전진해 계단 현상을 없앱니다.
+    </p>
+
+    <h4>front-to-back 알파 합성 해부</h4>
+    <p>
+      <strong>수학:</strong> <code>acc.rgb += (1 - acc.a) · s.a · s.rgb</code>와 <code>acc.a += (1 - acc.a) · s.a</code>는
+      볼륨 렌더링의 <em>앞→뒤 합성 공식</em>입니다. <code>(1 - acc.a)</code>는 "아직 안 가려진 투명도 여분"으로,
+      이미 앞쪽에서 많이 가려졌으면(<code>acc.a</code>가 1에 가까우면) 뒤쪽 기여를 자동으로 줄입니다.
+    </p>
+    <p>
+      <strong>구체 수치:</strong> 첫 샘플 <code>s.a=0.5</code>, <code>s.rgb=(1,0,0)</code>이면
+      <code>acc.rgb = (1-0)·0.5·(1,0,0) = (0.5,0,0)</code>, <code>acc.a = 0.5</code>가 됩니다.
+      다음 샘플이 같은 값이면 <code>acc.rgb += (1-0.5)·0.5·(1,0,0) = (0.25,0,0)</code> → 합 <code>(0.75,0,0)</code>,
+      <code>acc.a = 0.75</code>. 뒤로 갈수록 기여가 반씩 줄어드는 게 보입니다.
+    </p>
+    <p>
+      루프 종료 조건 <code>acc.a &lt; 1.0</code>은 <strong>완전히 불투명해지면 조기 종료</strong>(early-out)로,
+      그 뒤는 어차피 안 보이므로 계산을 아낍니다.
+    </p>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      복셀 텍스처는 <code>gVoxelRes³ × 4바이트</code>입니다 — 128³이면 8MB(밉 포함 약 9.3MB)지만 256³이면 64MB로 급증합니다.
+      해상도를 2배 올리면 메모리·복셀화 비용이 8배가 되므로, 실무는 카메라 주변만 덮는 <em>클립맵/캐스케이드</em> 구조로
+      한정된 해상도를 효율 배치합니다.
+    </div>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>dist</code>를 한 복셀 이상 띄우지 않으면 표면이 <strong>자기 복셀</strong>을 읽어 자기 색으로 자기를 밝히는
+      self-illumination 아티팩트가 생깁니다. 또 복셀 해상도가 낮으면 얇은 벽 사이로 빛이 새는 leak이 흔합니다.
+    </div>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-gi-ssgi.html">← 3. SSGI</a>
+    <a href="./06-gi-rtgi.html">5. 하드웨어 RT (DXR) →</a>
+  </nav>
+
+</main>
+
+<script>if (window.GFX && GFX.runPendingDemos) GFX.runPendingDemos();</script>
+
+<!-- ================================================================ -->
+<!-- 히어로 배너: WebGL 프래그먼트 셰이더로 복셀(블록) 볼륨을 레이마칭해 빛이 번지는 느낌. -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  var cv = document.getElementById("vxHeroCanvas");
+  if (!cv) return;
+  try {
+    var gl = cv.getContext("webgl") || cv.getContext("experimental-webgl");
+    if (!gl) { fb(); return; }
+    var VS = "attribute vec2 p; void main(){ gl_Position = vec4(p,0.0,1.0); }";
+    var FS = [
+      "precision highp float;",
+      "uniform vec2 res; uniform float t;",
+      // 복셀화된 발광 필드: 회전하는 색 기둥 3개
+      "vec3 emis(vec3 p){",
+      "  float a=t*0.35, c=cos(a), s=sin(a);",
+      "  vec3 q=vec3(p.x*c-p.z*s, p.y, p.x*s+p.z*c);",
+      "  vec3 e=vec3(0.0);",
+      "  for(int i=0;i<3;i++){",
+      "    float an=float(i)*2.0944;",
+      "    vec2 pc=vec2(cos(an),sin(an))*1.15;",
+      "    vec2 dd=q.xz-pc; float box=max(abs(dd.x),abs(dd.y));",
+      "    float col=smoothstep(0.34,0.24,box)*smoothstep(1.25,0.0,abs(q.y));",
+      "    vec3 cc = i==0?vec3(1.0,0.35,0.2): i==1?vec3(0.3,1.0,0.45):vec3(0.35,0.55,1.0);",
+      "    e+=cc*col;",
+      "  }",
+      "  return e;",
+      "}",
+      "vec4 voxel(vec3 p, float vr){",
+      "  vec3 vp=(floor(p*vr)+0.5)/vr;",           // 복셀 양자화
+      "  vec3 e=emis(vp);",
+      "  float dens=max(e.r,max(e.g,e.b));",
+      "  return vec4(e, clamp(dens*1.4,0.0,1.0));",
+      "}",
+      "void main(){",
+      "  vec2 uv=(gl_FragCoord.xy - 0.5*res)/res.y;",
+      "  vec3 ro=vec3(0.0,0.35,3.0);",
+      "  vec3 ta=vec3(0.0,0.15,0.0);",
+      "  vec3 fw=normalize(ta-ro), rt=normalize(cross(vec3(0,1,0),fw)), up=cross(fw,rt);",
+      "  vec3 rd=normalize(fw*1.7 + rt*uv.x + up*uv.y);",
+      "  vec3 col=mix(vec3(0.04,0.05,0.09), vec3(0.01,0.01,0.03), clamp(rd.y*0.6+0.4,0.0,1.0));",
+      "  vec4 acc=vec4(0.0);",
+      "  float d=0.4;",
+      "  for(int i=0;i<64;i++){",
+      "    if(acc.a>0.97) break;",
+      "    vec3 pos=ro+rd*d;",
+      "    float ap=0.28;",                          // 조리개(원뿔)
+      "    float vr=max(4.0, 26.0/(1.0+ap*d*3.0));", // 거리 멀수록 거친 밉(낮은 vr)
+      "    vec4 s=voxel(pos, vr);",
+      "    s.a*=0.28;",
+      "    acc.rgb+=(1.0-acc.a)*s.a*s.rgb*2.2;",
+      "    acc.a+=(1.0-acc.a)*s.a;",
+      "    d+=0.055+ap*d*0.05;",
+      "  }",
+      "  col=col*(1.0-acc.a)+acc.rgb;",
+      "  col=col/(col+vec3(1.0));",
+      "  col=pow(col, vec3(1.0/2.2));",
+      "  gl_FragColor=vec4(col,1.0);",
+      "}"
+    ].join("\n");
+    var prog = mkProg(gl, VS, FS);
+    gl.useProgram(prog);
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
+    var pl = gl.getAttribLocation(prog, "p");
+    gl.enableVertexAttribArray(pl); gl.vertexAttribPointer(pl, 2, gl.FLOAT, false, 0, 0);
+    var uR = gl.getUniformLocation(prog, "res"), uT = gl.getUniformLocation(prog, "t");
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    function rs(){ var r=cv.getBoundingClientRect(); var w=Math.max(1,(r.width*dpr)|0), h=Math.max(1,(r.height*dpr)|0);
+      if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;} gl.viewport(0,0,cv.width,cv.height); }
+    window.addEventListener("resize", rs); rs();
+    var t0=null, raf=0;
+    function fr(ts){ if(t0===null)t0=ts; rs(); gl.uniform2f(uR,cv.width,cv.height); gl.uniform1f(uT,(ts-t0)/1000);
+      gl.drawArrays(gl.TRIANGLES,0,6); raf=requestAnimationFrame(fr); }
+    function go(){ if(!raf) raf=requestAnimationFrame(fr); }
+    function no(){ if(raf){cancelAnimationFrame(raf); raf=0;} }
+    document.addEventListener("visibilitychange", function(){ document.hidden?no():go(); });
+    go();
+  } catch(e){ fb(); }
+  function mkProg(gl, vs, fs){
+    function sh(ty, src){ var s=gl.createShader(ty); gl.shaderSource(s,src); gl.compileShader(s);
+      if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    var p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,vs)); gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs));
+    gl.linkProgram(p); if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); return p;
+  }
+  function fb(){ try{ var c=cv.getContext("2d"); if(!c)return; var g=c.createLinearGradient(0,0,0,cv.height);
+    g.addColorStop(0,"#0b1020"); g.addColorStop(1,"#241a2e"); c.fillStyle=g; c.fillRect(0,0,cv.width,cv.height); }catch(_){} }
+})();
+</script>
+
+<!-- ================================================================ -->
+<!-- 인터랙티브 데모: WebGL 복셀 볼륨 콘 트레이싱. 슬라이더로 복셀 해상도·조리개 조절. -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  var cv = document.getElementById("vx-demo");
+  if (!cv) return;
+  var resSl = document.getElementById("vxRes"), apSl = document.getElementById("vxAp");
+  var resVal = document.getElementById("vxResVal"), apVal = document.getElementById("vxApVal");
+  var hud = document.getElementById("vx-hud");
+  if (!resSl || !apSl) return;
+  try {
+    var gl = cv.getContext("webgl") || cv.getContext("experimental-webgl");
+    if (!gl) { fb(); return; }
+    var VS = "attribute vec2 p; void main(){ gl_Position = vec4(p,0.0,1.0); }";
+    var FS = [
+      "precision highp float;",
+      "uniform vec2 res; uniform float t; uniform float voxelRes; uniform float aperture;",
+      "vec3 emis(vec3 p){",
+      "  float a=t*0.3, c=cos(a), s=sin(a);",
+      "  vec3 q=vec3(p.x*c-p.z*s, p.y, p.x*s+p.z*c);",
+      "  vec3 e=vec3(0.0);",
+      "  for(int i=0;i<3;i++){",
+      "    float an=float(i)*2.0944;",
+      "    vec2 pc=vec2(cos(an),sin(an))*1.15;",
+      "    vec2 dd=q.xz-pc; float box=max(abs(dd.x),abs(dd.y));",
+      "    float col=smoothstep(0.36,0.24,box)*smoothstep(1.3,0.0,abs(q.y));",
+      "    vec3 cc = i==0?vec3(1.0,0.35,0.2): i==1?vec3(0.3,1.0,0.45):vec3(0.35,0.55,1.0);",
+      "    e+=cc*col;",
+      "  }",
+      "  return e;",
+      "}",
+      "vec4 voxel(vec3 p, float vr){",
+      "  vec3 vp=(floor(p*vr)+0.5)/vr;",
+      "  vec3 e=emis(vp);",
+      "  float dens=max(e.r,max(e.g,e.b));",
+      "  return vec4(e, clamp(dens*1.5,0.0,1.0));",
+      "}",
+      "void main(){",
+      "  vec2 uv=(gl_FragCoord.xy - 0.5*res)/res.y;",
+      "  vec3 ro=vec3(0.0,0.45,3.1);",
+      "  vec3 ta=vec3(0.0,0.1,0.0);",
+      "  vec3 fw=normalize(ta-ro), rt=normalize(cross(vec3(0,1,0),fw)), up=cross(fw,rt);",
+      "  vec3 rd=normalize(fw*1.7 + rt*uv.x + up*uv.y);",
+      "  vec3 col=mix(vec3(0.05,0.06,0.10), vec3(0.01,0.01,0.03), clamp(rd.y*0.6+0.4,0.0,1.0));",
+      // 바닥면 (간접광을 받는 표면)
+      "  float tf=(-0.55-ro.y)/rd.y;",
+      "  vec4 acc=vec4(0.0);",
+      "  float d=0.35;",
+      "  for(int i=0;i<80;i++){",
+      "    if(acc.a>0.98) break;",
+      "    vec3 pos=ro+rd*d;",
+      // 거리 멀수록 vr 낮아짐 = 거친 밉(원뿔이 벌어져 넓게 평균)
+      "    float vr=max(3.0, voxelRes/(1.0+aperture*d*3.5));",
+      "    vec4 s=voxel(pos, vr);",
+      "    s.a*=0.3;",
+      "    acc.rgb+=(1.0-acc.a)*s.a*s.rgb*2.3;",
+      "    acc.a+=(1.0-acc.a)*s.a;",
+      "    d+=0.05+aperture*d*0.06;",
+      "  }",
+      // 바닥에 간접광 bleed
+      "  if(tf>0.0 && tf<12.0){",
+      "    vec3 fp=ro+rd*tf;",
+      "    float floorMask=1.0-acc.a;",
+      "    vec3 bleed=vec3(0.0);",
+      "    for(int k=0;k<3;k++){",
+      "      float an=float(k)*2.0944 + t*0.3;",
+      "      vec3 lp=vec3(cos(an),0.0,sin(an))*1.15;",
+      "      float dl=length(fp-lp);",
+      "      vec3 cc = k==0?vec3(1.0,0.35,0.2): k==1?vec3(0.3,1.0,0.45):vec3(0.35,0.55,1.0);",
+      "      bleed += cc*exp(-dl*1.1)*0.5;",
+      "    }",
+      "    float fade=exp(-tf*0.06);",
+      "    col = col*(1.0-floorMask*0.0) + bleed*floorMask*fade;",
+      "  }",
+      "  col=col*(1.0-acc.a)+acc.rgb;",
+      "  col=col/(col+vec3(1.0));",
+      "  col=pow(col, vec3(1.0/2.2));",
+      "  gl_FragColor=vec4(col,1.0);",
+      "}"
+    ].join("\n");
+    var prog = mkProg(gl, VS, FS);
+    gl.useProgram(prog);
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
+    var pl = gl.getAttribLocation(prog, "p");
+    gl.enableVertexAttribArray(pl); gl.vertexAttribPointer(pl, 2, gl.FLOAT, false, 0, 0);
+    var uR = gl.getUniformLocation(prog, "res"), uT = gl.getUniformLocation(prog, "t");
+    var uV = gl.getUniformLocation(prog, "voxelRes"), uA = gl.getUniformLocation(prog, "aperture");
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    function rs(){ var r=cv.getBoundingClientRect(); var w=Math.max(1,(r.width*dpr)|0), h=Math.max(1,(r.height*dpr)|0);
+      if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;} gl.viewport(0,0,cv.width,cv.height); }
+    window.addEventListener("resize", rs); rs();
+    function readCtl(){
+      var vr=parseFloat(resSl.value), ap=parseFloat(apSl.value);
+      resVal.textContent = vr.toFixed(0); apVal.textContent = ap.toFixed(2);
+      if(hud) hud.innerHTML = "복셀 해상도 <b>"+vr.toFixed(0)+"³</b><br>원뿔 조리개 <b>"+ap.toFixed(2)+"</b><br><span style='opacity:.75'>멀수록 거친 밉 = 넓게 평균</span>";
+      return [vr, ap];
+    }
+    var t0=null, raf=0;
+    function fr(ts){ if(t0===null)t0=ts; rs(); var c=readCtl();
+      gl.uniform2f(uR,cv.width,cv.height); gl.uniform1f(uT,(ts-t0)/1000);
+      gl.uniform1f(uV,c[0]); gl.uniform1f(uA,c[1]);
+      gl.drawArrays(gl.TRIANGLES,0,6); raf=requestAnimationFrame(fr); }
+    function go(){ if(!raf) raf=requestAnimationFrame(fr); }
+    function no(){ if(raf){cancelAnimationFrame(raf); raf=0;} }
+    document.addEventListener("visibilitychange", function(){ document.hidden?no():go(); });
+    go();
+  } catch(e){ fb(); }
+  function mkProg(gl, vs, fs){
+    function sh(ty, src){ var s=gl.createShader(ty); gl.shaderSource(s,src); gl.compileShader(s);
+      if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    var p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,vs)); gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs));
+    gl.linkProgram(p); if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); return p;
+  }
+  function fb(){ try{ var c=cv.getContext("2d"); if(!c)return; c.fillStyle="#141018"; c.fillRect(0,0,cv.width,cv.height);
+    c.fillStyle="#8899aa"; c.font="14px sans-serif"; c.fillText("WebGL 미지원 — 데모를 표시할 수 없습니다", 20, 30); }catch(_){} }
+})();
+</script>
+
+<script src="./highlight.js"></script>
+</body>
+</html>

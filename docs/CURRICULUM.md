@@ -119,11 +119,14 @@
 |---|---|---|---|---|
 | Ray tracing (CPU) | 🟡 | ✅ | ✅ | 06-raytracing |
 | Path tracing (몬테카를로) | 🟡 | ✅ | ✅ | 06-pathtracing |
-| GI 개관(라이트맵·프로브·SH·라디오시티) | 🟡 | ✅ | 🟡 | 06-gi |
-| 라이트 프로브(디퓨즈 SH 프로브·그리드 배치·삼선형 보간·DDGI 연결) | ✅ | 🟡 | ✅ | 06-gi §2-3/2-4, 디퓨즈 간접광 |
-| VXGI·SDFGI·DDGI·SSGI | ⬜ | ⬜ | ⬜ | 신규 |
+| GI 개관 + 기법별 허브(비교표·카드) | 🟡 | ✅ | ✅ | 06-gi 허브 |
+| 라이트맵 베이킹(반구 몬테카를로) | ✅ | 🟡 | ✅ | 06-gi-lightmap (+베이킹 데모) |
+| Irradiance 프로브(SH·그리드·삼선형·DDGI) | ✅ | 🟡 | ✅ | 06-gi-probe (+프로브 그리드 데모) |
+| SSGI(스크린 스페이스 GI) | ✅ | 🟡 | ✅ | 06-gi-ssgi (+color bleeding 데모) |
+| VXGI(복셀 콘 트레이싱) | ✅ | 🟡 | ✅ | 06-gi-vxgi (+콘 트레이싱 데모) |
+| 하드웨어 RT(DXR RTGI)·디노이징 | ✅ | 🟡 | ✅ | 06-gi-rtgi (+노이즈/디노이즈 데모) |
+| SDFGI | ⬜ | ⬜ | ⬜ | 신규(Godot SDFGI) |
 | Photon mapping·양방향/MLT | ⬜ | ⬜ | ⬜ | 심화 |
-| 하드웨어 RT(DXR·RTX·BVH) | ⬜ | ⬜ | ⬜ | 신규 |
 
 ### 6-E. 스크린 스페이스
 | 주제 | 원 | 개 | 구 | 파일 |

@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>구현: 전역 조명 (Global Illumination) — C++/DirectX 11</title>
-<meta name="description" content="라이트맵·Irradiance Probe(SH)·SSGI·복셀 콘 트레이싱·DXR RTGI까지, 실시간 전역 조명을 근사하는 핵심 기법을 HLSL/C++로 한 줄 한 줄 직접 구현하며 원리부터 해부하는 입문자용 가이드." />
+<title>구현: 전역 조명 (Global Illumination) — 기법별 허브 · C++/DirectX 11</title>
+<meta name="description" content="실시간 전역 조명(간접 디퓨즈)을 근사하는 다섯 기법 — 라이트맵 베이킹·Irradiance 프로브(SH)/프로브 그리드/DDGI·SSGI·복셀 콘 트레이싱·DXR RTGI — 을 각각 비주얼 데모 + HLSL/C++ 직접 구현으로 해부하는 챕터 허브." />
 <link rel="stylesheet" href="../css/theme.css" />
 <link rel="stylesheet" href="../css/style.css" />
 <link rel="stylesheet" href="./impl.css" />
@@ -14,33 +14,32 @@
 <main class="content" style="max-width:1200px;">
   <a class="back-link" href="./index.html" onclick="if(history.length>1){history.back();return false}">← 뒤로가기</a>
 
-  <!-- 타이틀 히어로 배너: 빛이 표면끼리 여러 번 튕겨(bounce) 공간을 채우는 GI의 본질.
-       캔버스2D로 광선이 벽에 튕기며 색을 옮기고, 프로브 격자가 그 빛을 샘플하는 애니메이션. -->
+  <!-- 타이틀 히어로 배너: 빛이 색 있는 벽에 튕겨(bounce) 공간을 물들이고, 프로브 격자가 그 빛을 샘플하는 GI의 본질. -->
   <div class="grass-hero" id="giHero">
     <canvas id="giHeroCanvas" width="940" height="300"></canvas>
     <div class="gh-shade"></div>
     <div class="gh-caption">
       <h2 class="gh-title">Global <span class="accent">Illumination</span></h2>
-      <p class="gh-sub">Lightmap · SH Probe · Probe Grid · Voxel · RTGI</p>
+      <p class="gh-sub">Lightmap · SH Probe · SSGI · Voxel · RTGI</p>
     </div>
   </div>
 
-  <h1 style="font-size:32px; margin:0 0 12px;">전역 조명 (Global Illumination) — 한 줄 한 줄 직접 구현</h1>
+  <h1 style="font-size:32px; margin:0 0 12px;">전역 조명 (Global Illumination) — 기법별 직접 구현</h1>
   <p class="lead" style="font-size:16px;">
     <strong>전역 조명(GI)</strong>은 빛이 표면끼리 <em>여러 번 튕기며</em> 만드는 간접광입니다.
     앞 절의 패스 트레이서는 이미 완전한 GI를 계산합니다 — 재귀 바운스가 곧 간접광이고,
     빨간 벽 옆 흰 구가 붉게 물드는 <em>color bleeding</em>이 그 증거입니다.
     즉 <strong>정답은 이미 있습니다</strong>. 문제는 <em>실시간</em>이라는 제약입니다.
-    이 페이지에서는 실시간에서 GI를 "충분히 그럴싸하게" 근사하는 대표 기법들을,
-    개념 → 수식 → 기하 직관 → HLSL/C++ 코드 한 줄까지 해부하며 직접 만들어 봅니다.
+    이 챕터는 실시간에서 GI를 "충분히 그럴싸하게" 근사하는 <strong>다섯 기법</strong>을 각각
+    <em>비주얼 데모</em>로 먼저 감을 잡고, <em>개념 → 수식 → 기하 직관 → HLSL/C++ 코드 한 줄</em>까지 해부하는
+    <strong>세부 페이지</strong>로 나눠 다룹니다. 아래 카드에서 원하는 기법으로 바로 들어가세요.
   </p>
 
   <div class="callout">
     <span class="tag warn">규약</span>
-    이 페이지의 모든 코드는 <strong>행벡터 규약</strong>(<code>v' = v * M</code>, HLSL <code>mul(v, M)</code>),
+    이 챕터의 모든 코드는 <strong>행벡터 규약</strong>(<code>v' = v * M</code>, HLSL <code>mul(v, M)</code>),
     행 우선 저장, <strong>왼손 좌표계</strong>, 클립 공간 z ∈ [0,1], 텍스처 V축 위→아래를 따릅니다.
-    실무에서는 DirectXMath와 검증된 라이브러리 사용을 권장하며, 여기 코드는 <strong>원리 학습용</strong> 톤으로
-    최소한의 형태만 남겼습니다.
+    실무에서는 DirectXMath와 검증된 라이브러리 사용을 권장하며, 코드는 <strong>원리 학습용</strong>으로 최소 형태만 남겼습니다.
   </div>
 
   <!-- ================================================================ -->
@@ -80,16 +79,16 @@
           <td>프로브 밀도·배치에 품질 의존, 누수(light leak)</td>
         </tr>
         <tr>
-          <td><strong>Voxel GI (VXGI)</strong></td>
-          <td>씬을 복셀화해 원뿔 추적(cone tracing)으로 간접광 근사</td>
-          <td>완전 동적 GI 가능</td>
-          <td>메모리·성능 부담, 복셀 해상도 한계</td>
-        </tr>
-        <tr>
           <td><strong>SSGI</strong></td>
           <td>SSAO처럼 화면 공간에서 간접 반사광을 근사</td>
           <td>저렴, 기존 G-buffer 재사용</td>
           <td>화면 밖 정보는 못 씀(SSR과 같은 한계)</td>
+        </tr>
+        <tr>
+          <td><strong>Voxel GI (VXGI)</strong></td>
+          <td>씬을 복셀화해 원뿔 추적(cone tracing)으로 간접광 근사</td>
+          <td>완전 동적 GI 가능</td>
+          <td>메모리·성능 부담, 복셀 해상도 한계</td>
         </tr>
         <tr>
           <td><strong>하드웨어 RT / RTGI</strong></td>
@@ -106,777 +105,66 @@
       하드웨어 RT로 소량 추적한 뒤 시공간(spatio-temporal) 디노이저로 다듬습니다. UE5의 Lumen이 대표적으로
       SDF/화면공간 추적과 하드웨어 RT를 상황에 따라 섞습니다.
     </div>
-    <p style="color:var(--text-dim); font-size:14px;">
-      요약하면 — <strong>오프라인은 패스 트레이싱으로 정답</strong>을, <strong>실시간은 근사와 하드웨어 RT의 조합</strong>으로
-      "충분히 그럴싸한 정답"을 추구하는 방향으로 수렴하고 있습니다. 아래에서는 이 표의 각 줄을 실제 코드로 만들어 봅니다.
-    </p>
 
     <div class="callout">
-      <span class="tag warn">범위 정리 — 이 페이지는 간접 <em>디퓨즈</em></span>
+      <span class="tag warn">범위 정리 — 이 챕터는 간접 <em>디퓨즈</em></span>
       GI를 실무에서는 흔히 <strong>간접 디퓨즈</strong>(부드럽게 번지는 색·color bleeding)와 <strong>간접 스페큘러</strong>(환경 반사·거울상)로 나눠 다룹니다.
-      이 페이지는 라이트맵·프로브·SSGI·VXGI·RTGI로 <strong>간접 디퓨즈</strong>를 근사하는 데 초점을 둡니다. 간접 스페큘러의 정석 —
+      이 챕터는 라이트맵·프로브·SSGI·VXGI·RTGI로 <strong>간접 디퓨즈</strong>를 근사하는 데 초점을 둡니다. 간접 스페큘러의 정석 —
       환경맵을 <em>irradiance·프리필터·split-sum BRDF LUT</em>로 굽고 <em>리플렉션 프로브</em>로 배치하는 파이프라인 — 은
-      <a class="btn-link" href="./06-ibl.html">이미지 기반 조명(IBL) · 리플렉션 프로브</a>에서 한 줄씩 구현합니다. 아래 2절의 SH 프로브는 그 IBL 페이지의 디퓨즈 대응편입니다.
+      <a class="btn-link" href="./06-ibl.html">이미지 기반 조명(IBL) · 리플렉션 프로브</a>에서 한 줄씩 구현합니다. 아래 프로브 페이지의 SH 프로브는 그 IBL 페이지의 디퓨즈 대응편입니다.
     </div>
   </section>
 
   <!-- ================================================================ -->
-  <!-- 1. 라이트맵 베이킹 -->
+  <!-- 기법별 세부 페이지 카드 -->
   <!-- ================================================================ -->
-  <section id="lightmap">
-    <h2>1. 라이트맵 베이킹 — 정답을 미리 구워 텍스처에 저장</h2>
-    <p>
-      <strong>무엇을 만드나:</strong> 정적인 씬의 각 표면 점이 받는 간접광(irradiance)을 오프라인에서 계산해
-      2D 텍스처(라이트맵)에 저장하고, 런타임에는 UV로 한 번 샘플만 하는 파이프라인입니다.
-      <strong>왜 필요한가:</strong> 매 프레임 적분을 다시 풀 필요 없이, 벽·바닥처럼 움직이지 않는 물체의 GI를
-      <em>텍스처 읽기 한 번</em>으로 끝낼 수 있습니다 — 런타임 비용이 사실상 0입니다.
-    </p>
-    <ol class="steps">
-      <li>메시의 모든 삼각형을 겹치지 않게 2D 아틀라스에 펼치는 <strong>라이트맵 UV</strong>(제2 UV 채널)를 만든다.</li>
-      <li>각 라이트맵 텍셀 ↔ 월드 공간 위치·법선을 대응시킨다(텍셀 하나가 표면의 작은 패치 하나).</li>
-      <li>각 텍셀에서 반구 방향으로 광선을 쏴 도착한 빛을 적분한다 → 그 텍셀의 irradiance.</li>
-      <li>결과를 텍스처로 저장한다. 런타임 셰이더는 라이트맵 UV로 이 값을 읽어 albedo에 곱한다.</li>
-    </ol>
-
-    <h3>1-1. 텍셀 하나의 irradiance를 굽는 커널 (C++)</h3>
-    <p>
-      먼저 오프라인 베이커의 심장부입니다. 라이트맵 텍셀 하나에 대응하는 표면 점 <code>p</code>와 법선 <code>n</code>이
-      주어졌을 때, 그 점이 반구 전체에서 받는 빛(irradiance)을 몬테카를로 적분으로 구합니다.
-      이 함수가 라이트맵의 모든 텍셀마다 한 번씩 호출됩니다.
-    </p>
-
-    <div class="code">
-      <div class="code-head"><span>lightmap_baker.cpp</span><span class="lang">cpp</span></div>
-<pre><code class="language-cpp">// 한 텍셀(표면 점 p, 법선 n)이 반구에서 받는 간접광(irradiance)을 적분한다.
-// scene.trace()는 광선을 쏴 가장 가까운 교차의 방출/반사광(radiance)을 돌려준다고 가정.
-Vec3 BakeTexelIrradiance(const Scene&amp; scene, const Vec3&amp; p, const Vec3&amp; n, int numSamples)
-{
-    Vec3 irradiance = { 0.0f, 0.0f, 0.0f };   // 누적기: RGB 각 채널의 빛 합
-
-    // 법선 n을 축으로 하는 정규직교 기저(접선 공간)를 만든다.
-    Vec3 tangent, bitangent;
-    BuildOrthonormalBasis(n, tangent, bitangent);
-
-    for (int i = 0; i &lt; numSamples; ++i)
-    {
-        // [0,1)^2 난수 두 개 → 코사인 가중 반구 방향(local)으로 매핑
-        float u1 = RandomFloat();
-        float u2 = RandomFloat();
-        float r     = sqrtf(u1);          // 반경  = sqrt(u1)
-        float phi   = 6.2831853f * u2;    // 방위각 = 2π·u2
-        Vec3 localDir = {
-            r * cosf(phi),                // x
-            r * sinf(phi),                // y
-            sqrtf(1.0f - u1)              // z = cosθ (법선 방향 성분)
-        };
-
-        // local(접선 공간) → world(월드 공간)로 변환: 기저 3벡터의 선형결합
-        Vec3 worldDir =
-            tangent   * localDir.x +
-            bitangent * localDir.y +
-            n         * localDir.z;
-
-        // p에서 아주 살짝 띄운 곳부터 광선을 쏴 도착한 radiance를 받는다.
-        Ray ray = { p + n * 1e-4f, worldDir };
-        Vec3 incoming = scene.Trace(ray, /*depth=*/0);
-
-        // 코사인 가중 PDF로 샘플했으므로 cosθ와 PDF가 상쇄된다(아래 해부 참조).
-        irradiance = irradiance + incoming;
-    }
-
-    // 몬테카를로 추정치: 합을 표본 수로 나눠 평균을 낸다.
-    return irradiance * (1.0f / (float)numSamples);
-}
-</code></pre>
-    </div>
-
-    <h4>시그니처 해부 — 각 인자와 타입이 왜 이 모양인가</h4>
-    <p>
-      <code>const Scene&amp; scene</code>: 씬은 삼각형·BVH·재질 등 무거운 데이터 덩어리라 <strong>값 복사가 매우 비쌉니다.</strong>
-      그래서 <code>&amp;</code>(참조)로 받아 복사를 피하고, 이 함수는 씬을 읽기만 하므로 <code>const</code>를 붙여
-      "여기서는 씬을 수정하지 않겠다"를 컴파일러와 독자에게 약속합니다.
-    </p>
-    <p>
-      <code>const Vec3&amp; p</code>, <code>const Vec3&amp; n</code>: <code>Vec3</code>는 12바이트로 작지만 관례상 참조로 받아
-      복사를 줄이고, 역시 수정하지 않으니 <code>const</code>입니다. <code>p</code>는 텍셀에 대응하는 월드 위치,
-      <code>n</code>은 그 점의 단위 법선입니다(반드시 정규화되어 있어야 반구 기저가 정확합니다).
-    </p>
-    <p>
-      <code>int numSamples</code>: 표본 개수입니다. 몬테카를로의 오차는 <code>1/√N</code>로 줄어들기 때문에
-      노이즈를 절반으로 줄이려면 표본을 <strong>4배</strong>로 늘려야 합니다(뒤 성능 callout 참조).
-      반환 타입 <code>Vec3</code>는 RGB 세 채널의 irradiance입니다.
-    </p>
-
-    <h4>수학 → 기하 직관 → 코드 매핑: 코사인 가중 반구 샘플링</h4>
-    <p>
-      <strong>수학:</strong> irradiance는 <code>E = ∫<sub>Ω</sub> L<sub>i</sub>(ω) · cosθ dω</code> 입니다.
-      이를 몬테카를로로 추정하면 <code>E ≈ (1/N) Σ L<sub>i</sub>(ω<sub>k</sub>)·cosθ<sub>k</sub> / p(ω<sub>k</sub>)</code>가 됩니다.
-      여기서 우리가 방향을 <strong>코사인 비례 확률</strong>로 뽑으면 PDF가 <code>p(ω) = cosθ / π</code>가 되어,
-      식의 <code>cosθ / p(ω) = cosθ / (cosθ/π) = π</code>… 가 아니라, 실제로는 반사 BRDF까지 포함하면
-      깔끔하게 <code>cosθ</code>와 PDF가 상쇄됩니다. 그래서 코드에서는 <code>incoming</code>을 그냥 더하기만 합니다.
-    </p>
-    <p>
-      <strong>기하 직관:</strong> 법선 <code>n</code>이 하늘을 가리키는 반구를 상상하세요. 표면은 정면(법선 방향)에서
-      오는 빛을 가장 많이 "받고", 옆(수평)에서 스치는 빛은 거의 못 받습니다 — 이게 <code>cosθ</code> 항의 의미입니다.
-      코사인 가중 샘플링은 <em>어차피 기여가 큰 정면 쪽으로 표본을 더 촘촘히 뿌리는</em> 영리한 전략이라,
-      같은 표본 수로도 노이즈가 훨씬 적습니다.
-    </p>
-    <p>
-      <strong>코드 매핑:</strong> <code>r = sqrt(u1)</code>, <code>phi = 2π·u2</code>로 원판 위의 점을 뽑은 뒤
-      <code>z = sqrt(1 - u1) = cosθ</code>로 반구에 투영합니다(이게 바로 코사인 가중을 만드는 Malley 방법입니다).
-      <code>localDir.x, y</code>는 원판 좌표, <code>localDir.z</code>는 법선 방향 높이입니다.
-    </p>
-
-    <h4>local → world 변환: 3벡터의 선형결합</h4>
-    <p>
-      <code>worldDir = tangent*x + bitangent*y + n*z</code>는 접선 공간 좌표 <code>(x,y,z)</code>를
-      월드 공간의 세 축 벡터로 <strong>재조립</strong>하는 것입니다. 정규직교 기저 <code>{tangent, bitangent, n}</code>에서
-      각 성분에 해당 축 벡터를 곱해 더하면, 그 좌표가 가리키던 방향이 월드에서 어디를 향하는지 나옵니다.
-      이는 행벡터 규약으로 보면 <code>localDir</code>에 기저 행렬을 곱하는 것과 같습니다:
-      <code>worldDir = localDir * [tangent; bitangent; n]</code>.
-    </p>
-
-    <div class="callout gotcha">
-      <span class="tag">함정</span>
-      <code>p + n * 1e-4f</code>로 광선 시작점을 법선 방향으로 살짝 띄우는 이유는 <strong>self-intersection(그림자 여드름)</strong>
-      때문입니다. 부동소수점 오차로 광선이 자기 표면과 즉시 교차해 검은 점이 생기는 것을 막습니다. 엡실론이 너무 작으면
-      여전히 여드름이 생기고, 너무 크면 얇은 물체를 통과해 빛이 새니 씬 스케일에 맞춰 조정해야 합니다.
-    </div>
-
-    <div class="callout perf">
-      <span class="tag">성능</span>
-      베이킹은 <em>텍셀 수 × 표본 수 × 광선당 BVH 순회 비용</em>입니다. 1024² 라이트맵에 텍셀당 256표본이면
-      약 2.7억 개의 1차 광선이고, 바운스까지 재귀하면 수십 배가 됩니다. 그래서 실무 베이커는 텍셀 단위로
-      완전 병렬화(스레드/GPU)하고, 표본은 코사인 가중 + 저불일치 수열(Halton/Sobol)로 효율을 끌어올립니다.
-    </div>
-
-    <h4>DirectXMath 대응</h4>
-    <p>학습용 <code>Vec3</code> 연산을 실무 SIMD로 바꾸면 다음과 같이 1:1 대응합니다.</p>
-    <div class="code">
-      <div class="code-head"><span>lightmap_baker_dxmath.cpp</span><span class="lang">cpp</span></div>
-<pre><code class="language-cpp">using namespace DirectX;
-
-XMVECTOR nV = XMLoadFloat3(&amp;n);              // Vec3 n  → SIMD 레지스터
-XMVECTOR t  = XMVector3Normalize(/* 접선 */); // BuildOrthonormalBasis의 tangent
-XMVECTOR b  = XMVector3Cross(nV, t);          // bitangent = n × tangent
-
-// local(x,y,z) → world : t*x + b*y + n*z  (성분 곱 후 누적)
-XMVECTOR world = XMVectorAdd(
-    XMVectorAdd(XMVectorScale(t, lx), XMVectorScale(b, ly)),
-    XMVectorScale(nV, lz));
-world = XMVector3Normalize(world);            // 방향은 단위벡터로
-
-XMFLOAT3 worldDir; XMStoreFloat3(&amp;worldDir, world); // 결과를 다시 float3로
-</code></pre>
-    </div>
-    <p>
-      <code>XMLoadFloat3</code>는 원본의 <code>Vec3</code>를 SIMD 레지스터로 올리는 로드, <code>XMStoreFloat3</code>는 그 반대,
-      <code>XMVectorScale(v, s)</code>는 <code>v * s</code>(스칼라 곱), <code>XMVectorAdd</code>는 <code>+</code>,
-      <code>XMVector3Cross</code>는 외적으로 <code>bitangent = n × tangent</code>에 대응합니다.
-    </p>
-  </section>
-
-  <!-- ================================================================ -->
-  <!-- 2. Irradiance Probe (SH) -->
-  <!-- ================================================================ -->
-  <section id="probe">
-    <h2>2. Irradiance Probe — 구면 조화(SH)로 방향별 간접광 압축</h2>
-    <p>
-      <strong>무엇을 만드나:</strong> 공간 곳곳에 "프로브"를 놓고, 각 프로브가 자기 위치에서 <em>모든 방향</em>으로 들어오는
-      간접광을 아주 적은 계수(보통 9개)로 압축 저장합니다. 런타임에는 동적 물체가 가까운 프로브들을 보간해
-      자기 법선 방향의 간접광을 즉시 얻습니다.
-      <strong>왜 필요한가:</strong> 라이트맵은 정적 표면에만 붙지만, 프로브는 <em>공간 자체</em>를 샘플하므로
-      걸어다니는 캐릭터 같은 동적 물체도 GI를 받을 수 있습니다.
-    </p>
-    <p>
-      핵심 도구는 <strong>구면 조화 함수(Spherical Harmonics, SH)</strong>입니다. SH는 구면 위의 함수(방향→값)를
-      푸리에 급수처럼 <em>기저 함수들의 가중합</em>으로 전개합니다. 부드러운 irradiance는 저차(low-frequency)라서
-      <strong>2차(9개 계수)만으로</strong> 놀랍도록 정확하게 표현됩니다.
-    </p>
-
-    <h3>2-1. 방향 하나로 SH 기저 9개 평가 (HLSL)</h3>
-    <div class="code">
-      <div class="code-head"><span>sh_basis.hlsl</span><span class="lang">hlsl</span></div>
-<pre><code class="language-hlsl">// 단위 방향 dir로 실수형 SH 기저(l=0..2, 총 9개)를 평가한다.
-void EvalSH9(float3 dir, out float sh[9])
-{
-    float x = dir.x, y = dir.y, z = dir.z;
-
-    // l = 0 (상수항, 방향과 무관)
-    sh[0] = 0.282095;                       // 1/(2√π)
-
-    // l = 1 (선형항: 방향 성분에 비례)
-    sh[1] = 0.488603 * y;                   // -√(3/4π)·y 계열
-    sh[2] = 0.488603 * z;
-    sh[3] = 0.488603 * x;
-
-    // l = 2 (2차항: 성분들의 곱)
-    sh[4] = 1.092548 * x * y;
-    sh[5] = 1.092548 * y * z;
-    sh[6] = 0.315392 * (3.0 * z * z - 1.0);
-    sh[7] = 1.092548 * x * z;
-    sh[8] = 0.546274 * (x * x - y * y);
-}
-</code></pre>
-    </div>
-
-    <h4>시그니처·문법 해부</h4>
-    <p>
-      <code>void EvalSH9(float3 dir, out float sh[9])</code>: HLSL에는 참조가 없으니 결과를 돌려줄 때
-      <code>out</code> 한정자를 씁니다 — 함수가 <code>sh</code> 배열을 채워서 호출자에게 되돌려준다는 뜻입니다.
-      <code>float sh[9]</code>는 9개짜리 고정 크기 배열입니다(2차 SH의 계수 개수 = (l+1)² = 3² = 9).
-      <code>dir</code>은 <strong>반드시 단위벡터</strong>여야 합니다 — 아래 다항식들이 단위 구면 위에서 정의되기 때문입니다.
-    </p>
-
-    <h4>수학 → 기하 직관 → 코드 매핑</h4>
-    <p>
-      <strong>수학:</strong> SH 기저는 라플라스 방정식의 구면 해로, 차수 <code>l</code>마다 <code>2l+1</code>개가 있습니다
-      (l=0 → 1개, l=1 → 3개, l=2 → 5개, 합 9개). 각 상수(<code>0.282095</code> 등)는 기저가 구면 위에서
-      직교·정규가 되도록 맞추는 정규화 상수입니다. 예를 들어 <code>0.282095 = 1/(2√π)</code>입니다.
-    </p>
-    <p>
-      <strong>기하 직관:</strong> l=0 항은 방향과 무관한 <em>평균 밝기</em>(전체를 균일하게 채우는 빛)입니다.
-      l=1 세 항(<code>x, y, z</code>에 비례)은 <em>한쪽이 밝고 반대쪽이 어두운</em> 기울기 — 즉 지배적인 빛의 방향입니다.
-      l=2 다섯 항은 더 미세한 "언덕과 골짜기" 패턴을 담습니다. 저차만 쓰면 뭉툭하지만 부드러운 GI에는 충분합니다.
-    </p>
-    <p>
-      <strong>코드 매핑:</strong> <code>sh[0]</code>은 상수, <code>sh[1..3]</code>은 방향 성분에 정확히 비례,
-      <code>sh[4..8]</code>은 성분들의 이차 곱(<code>xy</code>, <code>yz</code>, <code>3z²−1</code>, <code>xz</code>, <code>x²−y²</code>)입니다.
-      이 형태는 SH 실수 기저의 표준 공식을 그대로 옮긴 것입니다.
-    </p>
-
-    <h3>2-2. 프로브가 저장한 SH로 법선 방향 irradiance 복원 (HLSL)</h3>
-    <p>
-      베이킹 때 각 프로브는 위 기저로 <em>3채널(RGB) × 9계수 = 27개 float</em>을 저장해 둡니다.
-      런타임에는 표면 법선 <code>n</code>에 대해 다시 SH를 평가하고, 저장된 계수와 내적하면 그 방향의 간접광이 나옵니다.
-    </p>
-    <div class="code">
-      <div class="code-head"><span>probe_sample.hlsl</span><span class="lang">hlsl</span></div>
-<pre><code class="language-hlsl">cbuffer ProbeCB : register(b3)
-{
-    float4 gSH_R[9];   // R채널 9계수 (.x만 사용, 정렬용 float4)
-    float4 gSH_G[9];
-    float4 gSH_B[9];
-};
-
-// 표면 법선 n으로 프로브의 간접광(RGB)을 복원한다.
-float3 SampleProbeIrradiance(float3 n)
-{
-    float basis[9];
-    EvalSH9(n, basis);                 // 법선 방향의 기저값 9개
-
-    float3 result = 0;
-    [unroll]
-    for (int i = 0; i &lt; 9; ++i)
-    {
-        // 각 계수 · 해당 기저값을 채널별로 누적 = SH 내적(재구성)
-        result.r += gSH_R[i].x * basis[i];
-        result.g += gSH_G[i].x * basis[i];
-        result.b += gSH_B[i].x * basis[i];
-    }
-    return max(result, 0.0);           // 음수 조명은 물리적으로 없으니 클램프
-}
-</code></pre>
-    </div>
-
-    <h4>줄 단위 해부</h4>
-    <p>
-      <code>cbuffer ProbeCB : register(b3)</code>는 프로브 계수를 상수 버퍼 슬롯 <code>b3</code>에 바인딩합니다.
-      HLSL cbuffer는 16바이트(<code>float4</code>) 정렬을 강제하므로, 스칼라 9개를 그냥 <code>float gSH_R[9]</code>로 두면
-      각 원소가 16바이트로 패딩돼 레이아웃이 어긋납니다. 그래서 <code>float4</code> 배열로 잡고 <code>.x</code>만 씁니다
-      (실무에서는 4계수씩 묶어 낭비를 줄이기도 합니다).
-    </p>
-    <p>
-      <code>[unroll]</code>은 컴파일러에게 이 9회 루프를 <strong>완전히 펼치라</strong>는 힌트입니다 — 반복 횟수가 상수라
-      분기 없이 곱셈-덧셈 27쌍으로 전개되어 GPU에서 훨씬 빠릅니다.
-    </p>
-    <p>
-      <strong>수학:</strong> <code>result = Σ c<sub>i</sub> · Y<sub>i</sub>(n)</code>은 SH 재구성(reconstruction) 그 자체입니다.
-      저장된 계수 <code>c<sub>i</sub></code>와 법선에서 평가한 기저 <code>Y<sub>i</sub>(n)</code>의 내적이 곧
-      "이 법선 방향으로 들어오는 평균 간접광"입니다. 푸리에 급수에서 계수와 기저를 곱해 신호를 복원하는 것과 똑같습니다.
-    </p>
-
-    <div class="callout gotcha">
-      <span class="tag">함정</span>
-      SH 재구성 결과는 <strong>음수가 될 수 있습니다</strong>(ringing/Gibbs 현상). 그대로 쓰면 검은 얼룩이 생기므로
-      <code>max(result, 0)</code>로 클램프합니다. 강한 그림자 경계처럼 고주파 성분이 큰 경우 저차 SH로는 표현 한계가 있어
-      "빛 누수"나 "과도한 부드러움"이 나타납니다.
-    </div>
-
-    <h4>DirectXMath / C++ 대응 (프로브 베이킹 시 계수 적립)</h4>
-    <div class="code">
-      <div class="code-head"><span>probe_bake.cpp</span><span class="lang">cpp</span></div>
-<pre><code class="language-cpp">// 프로브 위치에서 방향 dir로 받은 radiance를 SH 계수에 적립한다.
-// 몬테카를로 적분: c_i += L(dir) * Y_i(dir) / pdf,  균일 구면이면 pdf = 1/(4π)
-void AccumulateSH(float sh[9], const Vec3&amp; radiance, const Vec3&amp; dir, float weight)
-{
-    float Y[9];
-    EvalSH9(dir, Y);                       // 셰이더와 동일한 기저 공식
-    for (int i = 0; i &lt; 9; ++i)
-        sh[i] += Y[i] * weight;            // (채널은 바깥에서 radiance별로 분리 처리)
-}
-</code></pre>
-    </div>
-    <p>
-      베이킹의 <code>Y_i(dir)</code>와 셰이딩의 <code>basis[i]</code>는 <strong>같은 공식</strong>이어야 합니다 —
-      한쪽 부호나 상수가 다르면 조명이 뒤집히거나 어긋납니다. <code>XMVector3Dot</code>은 계수와 기저를 한 번에 내적할 때
-      쓸 수 있고, <code>XMVectorSaturate</code>는 <code>max(·,0)</code>+<code>min(·,1)</code> 클램프에 대응합니다.
-    </p>
-
-    <!-- ---- 2-3. 프로브 그리드 배치 + 삼선형 보간 ---- -->
-    <h3>2-3. 프로브 <em>그리드</em> 배치와 삼선형 보간 — 공간을 촘촘히 덮는 법</h3>
-    <p>
-      <strong>무엇을 만드나:</strong> 프로브 하나로는 방 하나를 못 덮습니다. 그래서 프로브를 <em>3D 격자(grid)</em>로 규칙적으로 배치하고,
-      동적 물체는 자기를 감싼 <strong>8개의 최근접 프로브</strong>를 <strong>삼선형 보간(trilinear interpolation)</strong>으로 섞어
-      자기 위치의 간접광을 얻습니다. 이것이 언리얼의 <em>Volumetric Lightmap</em>, 유니티의 <em>Light Probe Volume</em>, DDGI의 공통 뼈대입니다.
-      <strong>왜 필요한가:</strong> 격자 + 보간은 <em>공간 어디서든</em> 부드럽게 변하는 간접광을 주면서도, 저장은 격자점(프로브)에만 하면 되어 효율적입니다.
-    </p>
-    <p>
-      <strong>기하 직관:</strong> 표면 점 <code>P</code>가 놓인 격자 셀(정육면체)의 여덟 꼭짓점이 여덟 프로브입니다. <code>P</code>가 어느 꼭짓점에
-      가까울수록 그 프로브의 몫이 커지도록, 셀 안에서의 상대 위치 <code>(fx,fy,fz)∈[0,1]³</code>로 가중치를 만들어 여덟 값을 섞습니다 —
-      1차원 선형 보간을 세 축으로 중첩한 것이 삼선형 보간입니다.
-    </p>
-    <div class="code">
-      <div class="code-head"><span>probe_grid_sample.hlsl</span><span class="lang">hlsl</span></div>
-<pre><code class="language-hlsl">// 프로브 격자: gGridMin에서 시작해 gSpacing 간격으로 gGridDim개씩 배치.
-// 각 프로브는 27 float(RGB×9 SH)를 구조적 버퍼에 저장.
-StructuredBuffer&lt;ProbeSH&gt; gProbes : register(t6);  // 길이 = dimX*dimY*dimZ
-cbuffer GridCB : register(b2)
-{
-    float3 gGridMin;    // 격자 원점(월드)
-    float3 gSpacing;    // 축별 프로브 간격
-    int3   gGridDim;    // 축별 프로브 개수
-};
-
-// 3D 격자 인덱스 → 1D 버퍼 인덱스
-int ProbeIndex(int3 c) { return (c.z*gGridDim.y + c.y)*gGridDim.x + c.x; }
-
-// 표면 위치 P·법선 N의 간접광을, 감싼 8개 프로브의 삼선형 보간으로 구한다.
-float3 SampleProbeGrid(float3 P, float3 N)
-{
-    float3 g   = (P - gGridMin) / gSpacing;   // 격자 좌표(실수)
-    int3   base = (int3)floor(g);             // 셀의 최소 꼭짓점
-    float3 f   = g - (float3)base;            // 셀 안 상대 위치 [0,1]³
-
-    float3 sum = 0;  float wSum = 0;
-    [unroll] for (int i = 0; i &lt; 8; ++i)
-    {
-        int3 off = int3(i&amp;1, (i&gt;&gt;1)&amp;1, (i&gt;&gt;2)&amp;1);   // 여덟 꼭짓점 (0/1)³
-        int3 c   = clamp(base + off, 0, gGridDim - 1); // 격자 밖은 가장자리로 클램프
-
-        // 삼선형 가중: 각 축에서 가까운 꼭짓점일수록 큰 몫
-        float3 tw = lerp(1.0 - f, f, (float3)off);
-        float  w  = tw.x * tw.y * tw.z;
-
-        // (선택) 누수 방지: 프로브→P 방향이 법선과 반대면(벽 뒤) 가중 감소
-        float3 dir = normalize(gGridMin + (float3)c*gSpacing - P);
-        w *= saturate(dot(N, -dir) + 0.2);
-
-        sum  += SampleProbeSH(gProbes[ProbeIndex(c)], N) * w;
-        wSum += w;
-    }
-    return wSum &gt; 1e-4 ? sum / wSum : 0;
-}
-</code></pre>
-    </div>
-    <h4>줄 단위 해부</h4>
-    <p>
-      <code>(P - gGridMin) / gSpacing</code>는 월드 위치를 <em>격자 칸 단위</em> 실수 좌표로 바꿉니다. <code>floor</code>가 셀의 최소 꼭짓점,
-      소수부 <code>f</code>가 셀 안 위치입니다. <code>off = int3(i&amp;1, (i&gt;&gt;1)&amp;1, (i&gt;&gt;2)&amp;1)</code>은 <code>i=0..7</code>을 정육면체의
-      여덟 꼭짓점 <code>(0/1, 0/1, 0/1)</code>로 펼치는 비트 트릭입니다.
-    </p>
-    <p>
-      <strong>삼선형 가중의 핵심:</strong> <code>lerp(1-f, f, off)</code>는 그 꼭짓점이 <code>off=0</code>인 축에선 <code>1-f</code>,
-      <code>off=1</code>인 축에선 <code>f</code>를 고릅니다. 세 축 가중을 곱한 <code>w = tw.x·tw.y·tw.z</code>가 그 프로브의 몫이고,
-      여덟 몫의 합은 항상 1이 됩니다(정규화 전에도). 각 프로브에서 <code>SampleProbeSH(·, N)</code>으로 <em>법선 방향</em>의 SH를 복원해 섞습니다.
-    </p>
-    <div class="callout gotcha">
-      <span class="tag">함정 — 빛 누수(light leak)</span>
-      순수 삼선형 보간의 최대 약점은 <strong>벽을 뚫는 누수</strong>입니다. 밝은 방과 어두운 방 사이 벽에 걸친 표면이,
-      벽 <em>반대편</em>(밝은 방)의 프로브까지 보간에 끌어들여 어두워야 할 면이 밝아집니다. 위 코드의 <code>dot(N, -dir)</code> 가중은
-      "표면 뒤쪽에 있는 프로브의 몫을 줄이는" 값싼 완화책이지만 완전하지 않습니다 — 근본 해법은 아래 DDGI의 <em>가시성 저장</em>입니다.
-    </div>
-
-    <!-- ---- 2-4. DDGI 연결 ---- -->
-    <h3>2-4. DDGI로의 연결 — 프로브가 <em>거리</em>까지 기억하면 누수가 사라진다</h3>
-    <p>
-      <strong>DDGI(Dynamic Diffuse Global Illumination, NVIDIA 2019)</strong>는 위 프로브 그리드를 두 방향으로 확장해 실시간 GI로 끌어올립니다.
-      첫째, 각 프로브가 매 프레임 <em>소수의 광선을 레이트레이싱</em>해 irradiance를 갱신합니다(정적 베이킹 → 동적).
-      둘째, irradiance뿐 아니라 <strong>방향별 거리·거리²(가시성)</strong>를 작은 옥타헤드럴 맵에 함께 저장합니다.
-    </p>
-    <div class="callout">
-      <span class="tag">직관</span>
-      보간할 때 각 프로브에게 <em>"너와 이 표면 사이에 벽이 있니?"</em>를 물을 수 있게 됩니다. 프로브가 저장한
-      "그 방향으로 본 평균 거리"보다 표면이 <em>더 멀리</em> 있으면(즉 프로브에서 안 보이면) 그 프로브의 가중을 0에 가깝게 낮춥니다
-      — 체비셰프 부등식으로 <em>가려질 확률</em>을 추정하는 <strong>variance shadow map</strong>과 같은 원리입니다. 그래서 벽 반대편 프로브가 자동으로 배제되어
-      <a href="#probe-grid-leak" onclick="return false;">누수</a>가 사라집니다.
-    </div>
-    <p>
-      즉 2-3의 삼선형 가중 <code>w</code>에 <strong>가시성 항</strong>이 하나 더 곱해지는 것이 DDGI 보간의 실체입니다:
-    </p>
-    <div class="code">
-      <div class="code-head"><span>ddgi_visibility_weight.hlsl</span><span class="lang">hlsl</span></div>
-<pre><code class="language-hlsl">// 프로브 i의 삼선형 가중 w에, 체비셰프 가시성 항을 곱한다.
-//   probeToP  : 프로브 → 표면 P 방향/거리
-//   meanDist, meanDist2 : 그 방향으로 프로브가 저장한 거리·거리²(옥타헤드럴 맵에서 조회)
-float VisibilityWeight(float3 probePos, float3 P, float meanDist, float meanDist2)
-{
-    float  dist = distance(probePos, P);
-    if (dist &lt;= meanDist) return 1.0;            // 프로브에서 보이면 완전 신뢰
-
-    float variance = abs(meanDist*meanDist - meanDist2);
-    float d = dist - meanDist;
-    return variance / (variance + d*d);          // 체비셰프: 가려질수록 0으로
-}
-// 사용: w *= VisibilityWeight(probePos, P, md, md2);  // 2-3의 w에 곱함
-</code></pre>
-    </div>
-    <p>
-      결과적으로 DDGI는 <em>정적 베이킹 없이</em>(레벨 로드·라이트 이동에 즉시 반응) 누수까지 억제한 디퓨즈 GI를 줍니다. 대신
-      프로브당 매 프레임 레이 + 갱신 비용이 들어 하드웨어 RT를 전제로 합니다. UE5의 초기 Lumen 이전 세대, 여러 콘솔 타이틀이 이 구조를 채택했습니다.
-      간접 <strong>스페큘러</strong>는 여전히 별도로 — <a class="btn-link" href="./06-ibl.html#reflection-probe">리플렉션 프로브</a>나 SSR/RT 반사로 — 처리합니다.
-    </p>
-  </section>
-
-  <!-- ================================================================ -->
-  <!-- 3. SSGI -->
-  <!-- ================================================================ -->
-  <section id="ssgi">
-    <h2>3. SSGI — 화면 공간에서 간접 반사광 근사</h2>
-    <p>
-      <strong>무엇을 만드나:</strong> G-buffer(깊이·법선·직접광 결과)만 가지고, 화면 안의 픽셀끼리 서로 빛을 주고받는
-      1바운스 간접광을 근사합니다. SSAO가 "주변이 얼마나 가려졌나"를 재는 것의 <em>색이 있는 버전</em>이라고 보면 됩니다.
-      <strong>왜 필요한가:</strong> 새 지오메트리 패스 없이 이미 있는 버퍼만 재사용하므로 매우 저렴하고,
-      color bleeding 같은 GI 느낌을 실시간으로 줍니다.
-    </p>
-    <ol class="steps">
-      <li>현재 픽셀의 월드 위치·법선을 깊이/법선 버퍼에서 복원한다.</li>
-      <li>반구 방향으로 짧은 샘플들을 뿌리고, 각 샘플을 화면 좌표로 투영한다.</li>
-      <li>그 지점의 이전 프레임(또는 직접광) 색을 읽어, 코사인·거리 가중으로 모아 간접광으로 더한다.</li>
-    </ol>
-
-    <div class="code">
-      <div class="code-head"><span>ssgi.hlsl</span><span class="lang">hlsl</span></div>
-<pre><code class="language-hlsl">Texture2D    gColor  : register(t0);  // 이전 프레임의 조명된 색 (radiance 소스)
-Texture2D    gDepth  : register(t1);  // 깊이 버퍼
-Texture2D    gNormal : register(t2);  // 월드 공간 법선
-SamplerState gSamp   : register(s0);
-
-cbuffer SSGICB : register(b0)
-{
-    float4x4 gViewProj;      // 월드 → 클립
-    float4x4 gInvViewProj;   // 클립 → 월드 (위치 복원용)
-    float2   gTexelSize;     // (1/width, 1/height)
-    float    gRadius;        // 샘플 반경(월드 단위)
-    int      gNumSamples;
-};
-
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    // uv[0,1]·depth[0,1] → NDC(클립) → 월드
-    float2 ndc = uv * 2.0 - 1.0;      // x,y: [0,1] → [-1,1]
-    ndc.y = -ndc.y;                    // 텍스처 V(위→아래)와 NDC y(아래→위) 뒤집기
-    float4 clip = float4(ndc, depth, 1.0);  // z는 이미 [0,1]
-    float4 world = mul(clip, gInvViewProj); // 행벡터 규약: v * M
-    return world.xyz / world.w;        // 원근 나눗셈
-}
-
-float3 ComputeSSGI(float2 uv)
-{
-    float  depth = gDepth.Sample(gSamp, uv).r;
-    float3 P     = ReconstructWorldPos(uv, depth);
-    float3 N     = normalize(gNormal.Sample(gSamp, uv).xyz * 2.0 - 1.0);
-
-    float3 gi = 0;
-    for (int i = 0; i &lt; gNumSamples; ++i)
-    {
-        // 반구 안의 오프셋 방향(미리 만든 커널 or 해시 난수)
-        float3 dir = HemisphereSample(i, N);
-        float3 samplePos = P + dir * gRadius;
-
-        // 샘플 월드 위치를 화면으로 재투영
-        float4 clip = mul(float4(samplePos, 1.0), gViewProj);
-        float2 sUV  = (clip.xy / clip.w) * 0.5 + 0.5;
-        sUV.y = 1.0 - sUV.y;
-
-        // 화면 밖이면 기여 없음
-        if (any(sUV &lt; 0.0) || any(sUV &gt; 1.0)) continue;
-
-        float3 sColor = gColor.Sample(gSamp, sUV).rgb;   // 그 픽셀이 내뿜는 빛
-        float  cosTerm = max(dot(N, dir), 0.0);          // 코사인 가중
-
-        gi += sColor * cosTerm;
-    }
-    return gi * (1.0 / gNumSamples);   // 평균
-}
-</code></pre>
-    </div>
-
-    <h4>위치 복원 <code>ReconstructWorldPos</code> 해부</h4>
-    <p>
-      <strong>수학:</strong> 래스터화는 월드 점을 <code>clip = world * (View·Proj)</code>로 보낸 뒤 <code>xyz/w</code>로 NDC를 만들고,
-      NDC를 화면 UV·깊이로 저장합니다. 위치 복원은 이 과정을 <strong>역으로</strong> 밟습니다 —
-      UV·깊이 → NDC → (역행렬 곱) → 월드.
-    </p>
-    <p>
-      <strong>줄 매핑:</strong> <code>uv*2-1</code>은 [0,1] UV를 [-1,1] NDC로 펴고, <code>ndc.y = -ndc.y</code>는
-      텍스처 V축(위→아래)과 NDC y축(아래→위)의 방향이 반대라서 뒤집는 보정입니다(우리 규약에서 꼭 필요).
-      <code>clip.z = depth</code>는 이미 [0,1] 범위(우리 클립 z 규약)라 그대로 넣습니다.
-      <code>mul(clip, gInvViewProj)</code>는 <strong>행벡터 규약</strong>이라 벡터가 왼쪽입니다 — 이 순서를 바꾸면 결과가 완전히 틀립니다.
-      마지막 <code>world.xyz / world.w</code>는 동차좌표를 실제 3D 점으로 되돌리는 원근 나눗셈입니다.
-    </p>
-
-    <div class="callout gotcha">
-      <span class="tag">함정</span>
-      법선을 <code>tex * 2 - 1</code>로 디코드하는 이유: 법선 <code>[-1,1]</code>을 <code>[0,1]</code> 텍스처에 저장할 때
-      <code>n*0.5+0.5</code>로 인코딩했기 때문입니다. 짝이 되는 디코드를 빠뜨리면 법선이 절반만 표현돼 조명이 어긋납니다.
-      또 <code>gViewProj</code>와 <code>gInvViewProj</code>는 정확히 서로 역이어야 하며, DirectXMath로 만들 때
-      <strong>cbuffer 업로드 전 transpose</strong>를 잊으면(행/열 규약 불일치) 화면이 깨집니다.
-    </div>
-
-    <div class="callout perf">
-      <span class="tag">성능</span>
-      SSGI는 샘플마다 <code>gColor</code> 텍스처를 랜덤 위치로 읽으므로 <strong>캐시 미스</strong>가 병목입니다. 반경을 크게 잡으면
-      메모리 접근이 흩어져 급격히 느려집니다. 보통 저해상도(half-res)로 계산하고, 블루노이즈로 샘플 수를 줄인 뒤
-      시공간 디노이저로 다듬어 성능을 확보합니다.
-    </div>
-
-    <div class="callout">
-      <span class="tag warn">주의</span>
-      화면 공간의 근본 한계: <code>any(sUV &lt; 0) || any(sUV &gt; 1)</code>로 걸러지는 <strong>화면 밖 픽셀</strong>과
-      다른 물체 뒤에 가려진 픽셀은 정보가 없어 기여하지 못합니다. 그래서 SSGI는 카메라를 돌리면 GI가 나타났다 사라지는
-      불안정성이 있고, 프로브·RTGI 같은 화면 밖 정보원과 <em>결합</em>해 쓰는 경우가 많습니다.
-    </div>
-
-    <h4>D3D API / DirectXMath 대응</h4>
-    <p>
-      <code>Texture2D … : register(t0)</code>는 C++에서 <code>ID3D11ShaderResourceView</code>를
-      <code>PSSetShaderResources(0, 1, &amp;srv)</code>로 바인딩한 슬롯에 대응합니다. <code>SamplerState … register(s0)</code>는
-      <code>PSSetSamplers</code>, <code>cbuffer … register(b0)</code>는 <code>PSSetConstantBuffers</code>에 대응합니다.
-      <code>gInvViewProj</code>는 <code>XMMatrixInverse(nullptr, XMMatrixMultiply(view, proj))</code>로 만들고,
-      cbuffer에 넣기 전 <code>XMMatrixTranspose</code>를 반드시 적용합니다(행벡터·행우선 규약 유지).
-    </p>
-  </section>
-
-  <!-- ================================================================ -->
-  <!-- 4. Voxel Cone Tracing -->
-  <!-- ================================================================ -->
-  <section id="vxgi">
-    <h2>4. Voxel Cone Tracing — 복셀화한 씬을 원뿔로 훑어 GI 근사</h2>
-    <p>
-      <strong>무엇을 만드나:</strong> 씬 전체를 3D 격자(복셀)에 밀도·발광 정보로 구워 밉맵(mip)을 만든 뒤,
-      표면에서 반구 방향으로 몇 개의 <em>원뿔(cone)</em>을 쏴 밉 레벨을 점점 올려 읽으며 간접광을 모읍니다.
-      <strong>왜 필요한가:</strong> 개별 광선 대신 <em>원뿔 하나로 넓은 각도를 한 번에</em> 근사하므로,
-      완전 동적 씬에서도 부드러운 GI를 실시간에 가깝게 얻을 수 있습니다.
-    </p>
-    <ol class="steps">
-      <li>씬을 3D 텍스처에 복셀화(각 복셀에 색·불투명도 누적)하고 밉맵을 생성한다.</li>
-      <li>표면에서 반구를 덮는 여러 원뿔을 정한다(예: 5~6개).</li>
-      <li>각 원뿔을 따라 전진하며, 거리에 비례해 큰 밉 레벨을 샘플하고 알파 블렌딩으로 누적한다.</li>
-    </ol>
-
-    <div class="code">
-      <div class="code-head"><span>voxel_cone.hlsl</span><span class="lang">hlsl</span></div>
-<pre><code class="language-hlsl">Texture3D    gVoxel : register(t0);  // 복셀화된 씬(RGBA: rgb=색, a=불투명도), 밉맵 있음
-SamplerState gSamp  : register(s0);  // 3선형(trilinear) 필터
-
-cbuffer VoxelCB : register(b0)
-{
-    float3 gVoxelGridMin;   // 복셀 격자의 월드 최소 좌표
-    float  gVoxelSize;      // 복셀 하나의 월드 크기
-    int    gVoxelRes;       // 한 축 해상도(예: 128)
-};
-
-// 월드 위치 → 복셀 텍스처 UV(0..1)
-float3 WorldToVoxelUV(float3 p)
-{
-    return (p - gVoxelGridMin) / (gVoxelSize * gVoxelRes);
-}
-
-// 원점 o에서 방향 d로 원뿔을 추적해 누적 색을 돌려준다. aperture=반각 tan값.
-float4 TraceCone(float3 o, float3 d, float aperture)
-{
-    float4 acc  = float4(0, 0, 0, 0);   // (rgb=누적색, a=누적 불투명도)
-    float  dist = gVoxelSize;           // 자기 자신을 안 읽도록 한 복셀 띄우고 시작
-
-    [loop]
-    while (dist &lt; gVoxelSize * gVoxelRes &amp;&amp; acc.a &lt; 1.0)
-    {
-        // 현재 거리에서 원뿔의 지름 → 그에 맞는 밉 레벨 선택
-        float diameter = max(gVoxelSize, 2.0 * aperture * dist);
-        float mip      = log2(diameter / gVoxelSize);
-
-        float3 pos = o + d * dist;
-        float4 s   = gVoxel.SampleLevel(gSamp, WorldToVoxelUV(pos), mip);
-
-        // front-to-back 알파 합성: 앞쪽이 가릴수록 뒤쪽 기여 감소
-        acc.rgb += (1.0 - acc.a) * s.a * s.rgb;
-        acc.a   += (1.0 - acc.a) * s.a;
-
-        dist += diameter * 0.5;         // 지름의 절반만큼 전진(겹침 = 부드러움)
-    }
-    return acc;
-}
-</code></pre>
-    </div>
-
-    <h4>원뿔 추적의 핵심 아이디어</h4>
-    <p>
-      <strong>수학·직관:</strong> 하나의 광선은 무한히 가는 선이라 넓은 반구를 덮으려면 수백 개가 필요합니다.
-      원뿔은 <em>점점 벌어지는 부피</em>라, 멀리 갈수록 넓은 영역을 대표합니다. "멀리 있는 것은 뭉개서 봐도 된다"는
-      직관을 <strong>밉맵</strong>으로 정확히 구현합니다 — 거리 <code>dist</code>가 멀수록 원뿔 지름 <code>2·aperture·dist</code>가 커지고,
-      그에 맞춰 <code>mip = log2(지름/복셀크기)</code>로 더 흐릿한(넓은 영역을 평균한) 밉을 읽습니다.
-    </p>
-    <p>
-      <strong>줄 매핑:</strong> <code>SampleLevel</code>은 <em>지정한 밉 레벨</em>을 직접 읽습니다(자동 밉 선택인 <code>Sample</code>과 달리).
-      원뿔 추적은 밉을 우리가 계산하므로 <code>SampleLevel</code>이 필수입니다.
-      <code>dist += diameter*0.5</code>는 원뿔의 원판들이 절반씩 겹치도록 전진해 계단 현상을 없앱니다.
-    </p>
-
-    <h4>front-to-back 알파 합성 해부</h4>
-    <p>
-      <strong>수학:</strong> <code>acc.rgb += (1 - acc.a) · s.a · s.rgb</code>와 <code>acc.a += (1 - acc.a) · s.a</code>는
-      볼륨 렌더링의 <em>앞→뒤 합성 공식</em>입니다. <code>(1 - acc.a)</code>는 "아직 안 가려진 투명도 여분"으로,
-      이미 앞쪽에서 많이 가려졌으면(<code>acc.a</code>가 1에 가까우면) 뒤쪽 기여를 자동으로 줄입니다.
-    </p>
-    <p>
-      <strong>구체 수치:</strong> 첫 샘플 <code>s.a=0.5</code>, <code>s.rgb=(1,0,0)</code>이면
-      <code>acc.rgb = (1-0)·0.5·(1,0,0) = (0.5,0,0)</code>, <code>acc.a = 0.5</code>가 됩니다.
-      다음 샘플이 같은 값이면 <code>acc.rgb += (1-0.5)·0.5·(1,0,0) = (0.25,0,0)</code> → 합 <code>(0.75,0,0)</code>,
-      <code>acc.a = 0.75</code>. 뒤로 갈수록 기여가 반씩 줄어드는 게 보입니다.
-    </p>
-    <p>
-      루프 종료 조건 <code>acc.a &lt; 1.0</code>은 <strong>완전히 불투명해지면 조기 종료</strong>(early-out)로,
-      그 뒤는 어차피 안 보이므로 계산을 아낍니다.
-    </p>
-
-    <div class="callout perf">
-      <span class="tag">성능</span>
-      복셀 텍스처는 <code>gVoxelRes³ × 4바이트</code>입니다 — 128³이면 8MB(밉 포함 약 9.3MB)지만 256³이면 64MB로 급증합니다.
-      해상도를 2배 올리면 메모리·복셀화 비용이 8배가 되므로, 실무는 카메라 주변만 덮는 <em>클립맵/캐스케이드</em> 구조로
-      한정된 해상도를 효율 배치합니다.
-    </div>
-
-    <div class="callout gotcha">
-      <span class="tag">함정</span>
-      <code>dist</code>를 한 복셀 이상 띄우지 않으면 표면이 <strong>자기 복셀</strong>을 읽어 자기 색으로 자기를 밝히는
-      self-illumination 아티팩트가 생깁니다. 또 복셀 해상도가 낮으면 얇은 벽 사이로 빛이 새는 leak이 흔합니다.
-    </div>
-  </section>
-
-  <!-- ================================================================ -->
-  <!-- 5. DXR RTGI -->
-  <!-- ================================================================ -->
-  <section id="rtgi">
-    <h2>5. 하드웨어 RT (DXR) — RT 코어로 소수 광선을 실시간 추적</h2>
-    <p>
-      <strong>무엇을 만드나:</strong> DirectX Raytracing(DXR)의 RT 코어를 이용해, 각 픽셀에서 <em>진짜 광선 하나</em>를
-      반구로 쏴 실제 씬과 교차시키고 1바운스 간접광을 얻습니다. 화면 밖·가려진 정보까지 정확하다는 점이 SSGI와의 결정적 차이입니다.
-      <strong>왜 필요한가:</strong> 근사가 아닌 <em>실제 가시성</em> 기반 GI라서 반사·그림자와 물리적으로 일관됩니다.
-      대신 픽셀당 광선 수가 적어 노이즈가 크고, 디노이저가 필수입니다.
-    </p>
-    <p>
-      DXR은 <strong>ray generation → traversal → hit/miss</strong> 셰이더로 나뉩니다. 아래는 픽셀마다 광선을 만들고 쏘는
-      ray generation 셰이더입니다.
-    </p>
-
-    <div class="code">
-      <div class="code-head"><span>rtgi_raygen.hlsl</span><span class="lang">hlsl</span></div>
-<pre><code class="language-hlsl">RaytracingAccelerationStructure gScene : register(t0);  // TLAS(가속 구조)
-RWTexture2D&lt;float4&gt;             gOutput : register(u0);  // GI 결과 출력(UAV)
-Texture2D&lt;float4&gt;              gGBufPos : register(t1);  // 픽셀별 월드 위치
-Texture2D&lt;float4&gt;              gGBufNrm : register(t2);  // 픽셀별 월드 법선
-
-struct Payload { float3 color; };   // 히트/미스 셰이더가 채워 돌려줄 데이터
-
-[shader("raygeneration")]
-void RayGen()
-{
-    uint2 px = DispatchRaysIndex().xy;          // 현재 픽셀 좌표
-    float3 P = gGBufPos[px].xyz;                // 이 픽셀의 표면 위치
-    float3 N = normalize(gGBufNrm[px].xyz);     // 표면 법선
-
-    float3 dir = CosineHemisphere(px, N);       // 코사인 가중 반구 방향 1개
-
-    RayDesc ray;
-    ray.Origin    = P + N * 1e-3;               // self-hit 방지용 오프셋
-    ray.Direction = dir;
-    ray.TMin      = 0.0;
-    ray.TMax      = 1e30;                        // 사실상 무한대
-
-    Payload pl = { float3(0, 0, 0) };
-    TraceRay(gScene,
-             RAY_FLAG_NONE,
-             0xFF,          // instance mask: 모든 인스턴스와 교차
-             0, 0, 0,       // hit group / miss shader 인덱스
-             ray, pl);
-
-    gOutput[px] = float4(pl.color, 1.0);        // 1바운스 간접광 기록
-}
-</code></pre>
-    </div>
-
-    <h4>DXR 자원·문법 해부</h4>
-    <p>
-      <code>RaytracingAccelerationStructure gScene</code>는 씬 지오메트리를 광선 교차에 최적화된 트리로 담은
-      <strong>가속 구조(TLAS/BLAS)</strong>입니다 — C++에서 <code>BuildRaytracingAccelerationStructure</code>로 미리 만듭니다.
-      <code>RWTexture2D&lt;float4&gt;</code>는 셰이더가 <em>쓸 수 있는</em> 텍스처(UAV, slot <code>u0</code>)로, GI 결과를 여기에 기록합니다.
-      <code>&lt;float4&gt;</code>는 원소 타입 지정(제네릭 문법)입니다.
-    </p>
-    <p>
-      <code>[shader("raygeneration")]</code> 어트리뷰트는 이 함수가 <strong>ray generation 진입점</strong>임을 런타임에 알립니다.
-      <code>DispatchRaysIndex().xy</code>는 <code>DispatchRays(width, height, 1)</code>로 뿌린 격자에서
-      <em>이 스레드가 담당하는 픽셀</em>을 줍니다(컴퓨트 셰이더의 <code>SV_DispatchThreadID</code>와 유사).
-    </p>
-
-    <h4>RayDesc·TraceRay 매핑</h4>
-    <p>
-      <code>RayDesc</code>는 광선 하나의 명세입니다: <code>Origin</code>(시작점), <code>Direction</code>(방향),
-      <code>TMin</code>/<code>TMax</code>(유효 거리 구간). <code>TMax = 1e30</code>은 "얼마든 멀리까지"라는 뜻이고,
-      <code>TMin = 0</code>이라도 <code>Origin</code>을 법선으로 <code>1e-3</code> 띄워 self-hit(라이트맵 절과 동일한 함정)을 막습니다.
-    </p>
-    <p>
-      <code>TraceRay</code>가 실제로 RT 코어를 돌립니다. 인자 <code>0xFF</code>는 인스턴스 마스크(모든 물체와 교차 허용),
-      그다음 세 <code>0</code>은 hit group·miss shader·SBT 오프셋 인덱스입니다. 광선이 무언가에 맞으면 closest-hit 셰이더가,
-      아무것도 못 맞으면 miss 셰이더가 <code>pl.color</code>를 채워 돌려줍니다 — 그 값을 <code>gOutput</code>에 씁니다.
-    </p>
-
-    <div class="callout gotcha">
-      <span class="tag">함정</span>
-      <code>Payload</code> 크기는 작게 유지해야 합니다 — 모든 재귀 광선이 이 구조체를 들고 다녀 크면 레지스터 압박과 성능 저하를 부릅니다.
-      또 픽셀당 광선 1개라 <strong>결과는 매우 노이즈</strong>합니다. 그대로 화면에 쓰면 지글거리므로 반드시 시공간 디노이저
-      (예: SVGF, ReSTIR)를 뒤에 붙여야 실사용 가능합니다.
-    </div>
-
-    <div class="callout perf">
-      <span class="tag">성능</span>
-      RTGI 비용은 <em>픽셀 수 × 픽셀당 광선 × 광선당 순회·셰이딩</em>입니다. 1080p·픽셀당 1광선이면 프레임당 약 200만 광선이고,
-      바운스를 늘리면 배가됩니다. 그래서 실무는 광선 수를 극도로 아끼고(픽셀당 1개 이하 + 시간적 누적/ReSTIR),
-      디노이저와 <em>업스케일러(DLSS/FSR)</em>로 최종 품질을 확보합니다.
-    </div>
-
-    <h4>C++/D3D12 대응</h4>
-    <p>
-      <code>gScene</code>는 <code>ID3D12Device5::CreateStateObject</code>로 만든 RT 파이프라인과
-      가속 구조 SRV로 바인딩하고, <code>TraceRay</code>를 유발하는 디스패치는 CPU에서
-      <code>ID3D12GraphicsCommandList4::DispatchRays</code>로 호출합니다. <code>DispatchRaysIndex</code>의 격자는
-      이 <code>DispatchRays</code>의 <code>Width/Height/Depth</code>에 대응합니다. DXR은 D3D12 전용이라,
-      D3D11 기반의 앞 절들과 달리 별도 파이프라인·SBT(Shader Binding Table) 구성이 필요합니다.
-    </p>
-  </section>
+  <h2 style="margin-top:40px;">기법별로 들어가기 — 각 페이지에 비주얼 데모 + 직접 구현</h2>
+  <p>다섯 기법을 <strong>런타임 비용이 낮은 순(정적 → 동적)</strong>으로 배치했습니다. 각 페이지는 만지는 데모로 감을 잡은 뒤 코드를 한 줄씩 해부합니다.</p>
+  <div class="hub-grid">
+    <a class="hub-card" href="./06-gi-lightmap.html">
+      <div class="num">1 / 5</div>
+      <h3>라이트맵 베이킹</h3>
+      <p>정적 GI를 오프라인에서 텍셀마다 구워 텍스처에 저장. 런타임 비용 0. 반구 몬테카를로 적분을 직접 구현.</p>
+      <div class="topics">라이트맵 UV · 반구 샘플 · 텍셀 irradiance · 코사인 가중</div>
+    </a>
+    <a class="hub-card" href="./06-gi-probe.html">
+      <div class="num">2 / 5</div>
+      <h3>Irradiance 프로브 (SH) · 그리드 · DDGI</h3>
+      <p>공간에 프로브를 놓고 SH 9계수로 간접광 압축. 그리드 삼선형 보간 → DDGI 가시성으로 누수 제거.</p>
+      <div class="topics">구면 조화(SH) · 프로브 그리드 · 삼선형 보간 · DDGI</div>
+    </a>
+    <a class="hub-card" href="./06-gi-ssgi.html">
+      <div class="num">3 / 5</div>
+      <h3>SSGI (스크린 스페이스 GI)</h3>
+      <p>G-buffer만으로 화면 안 픽셀끼리 1바운스 간접광. 저렴하지만 화면 밖은 못 씀. 위치 복원·재투영 해부.</p>
+      <div class="topics">화면 공간 · 위치 복원 · 재투영 · color bleeding</div>
+    </a>
+    <a class="hub-card" href="./06-gi-vxgi.html">
+      <div class="num">4 / 5</div>
+      <h3>Voxel Cone Tracing (VXGI)</h3>
+      <p>씬을 복셀화해 밉맵으로 굽고, 원뿔 하나로 넓은 각도를 근사 추적. 완전 동적 GI. 볼륨 합성 해부.</p>
+      <div class="topics">복셀화 · 밉맵 · 콘 트레이싱 · front-to-back 합성</div>
+    </a>
+    <a class="hub-card" href="./06-gi-rtgi.html">
+      <div class="num">5 / 5</div>
+      <h3>하드웨어 RT (DXR RTGI)</h3>
+      <p>RT 코어로 픽셀당 진짜 광선을 쏴 실제 가시성 기반 GI. 노이즈 → 디노이저. DXR ray generation 해부.</p>
+      <div class="topics">DXR · 가속 구조 · TraceRay · 디노이징</div>
+    </a>
+  </div>
 
   <!-- ================================================================ -->
   <!-- 마무리 -->
   <!-- ================================================================ -->
   <section id="wrap">
-    <h2>6. 마무리 — 무엇을 언제 쓰나</h2>
+    <h2 style="margin-top:40px;">마무리 — 무엇을 언제 쓰나</h2>
     <table class="impl">
       <thead><tr><th>상황</th><th>추천 조합</th></tr></thead>
       <tbody>
-        <tr><td>정적 배경·모바일</td><td>라이트맵 + 동적 물체용 Irradiance Probe</td></tr>
-        <tr><td>중간 사양 PC/콘솔</td><td>SSGI(스크린) + 프로브(폴백) + SSAO</td></tr>
-        <tr><td>완전 동적 씬</td><td>Voxel Cone Tracing 또는 RTGI</td></tr>
-        <tr><td>고사양·최신 GPU</td><td>DXR RTGI + 디노이저 + 업스케일러(하이브리드)</td></tr>
+        <tr><td>정적 배경·모바일</td><td><a class="btn-link" href="./06-gi-lightmap.html">라이트맵</a> + 동적 물체용 <a class="btn-link" href="./06-gi-probe.html">Irradiance 프로브</a></td></tr>
+        <tr><td>중간 사양 PC/콘솔</td><td><a class="btn-link" href="./06-gi-ssgi.html">SSGI</a>(스크린) + 프로브(폴백) + SSAO</td></tr>
+        <tr><td>완전 동적 씬</td><td><a class="btn-link" href="./06-gi-vxgi.html">Voxel Cone Tracing</a> 또는 <a class="btn-link" href="./06-gi-rtgi.html">RTGI</a></td></tr>
+        <tr><td>고사양·최신 GPU</td><td><a class="btn-link" href="./06-gi-rtgi.html">DXR RTGI</a> + 디노이저 + 업스케일러(하이브리드)</td></tr>
       </tbody>
     </table>
     <p style="color:var(--text-dim); font-size:14px;">
@@ -889,7 +177,7 @@ void RayGen()
   <!-- 페이지 하단 이전/다음 네비 -->
   <nav class="page-nav">
     <a href="./06-pathtracing.html">← 패스 트레이싱 (CPU)</a>
-    <a href="./index.html">구현 허브 →</a>
+    <a href="./06-gi-lightmap.html">1. 라이트맵 베이킹 →</a>
   </nav>
 
 </main>

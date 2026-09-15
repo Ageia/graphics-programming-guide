@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: Irradiance 프로브(SH) · 프로브 그리드 · DDGI — C++/DirectX 11</title>
+<meta name="description" content="공간에 배치한 Irradiance 프로브를 구면 조화(SH) 9계수로 압축하고, 프로브 그리드 삼선형 보간과 DDGI 가시성 가중으로 빛 누수를 없애는 실시간 간접 디퓨즈 GI를 HLSL/C++로 한 줄씩 직접 구현하는 가이드." />
+<link rel="stylesheet" href="../css/theme.css" />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+<script src="./embed.js"></script>
+</head>
+<body>
+<main class="content" style="max-width:1200px;">
+  <a class="back-link" href="./index.html" onclick="if(history.length>1){history.back();return false}">← 뒤로가기</a>
+
+  <!-- 타이틀 히어로 배너: 공간에 깔린 프로브 격자가 방향별 간접광을 로브로 담아 빛나는 모습. -->
+  <div class="grass-hero" id="pbHero">
+    <canvas id="pbHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Irradiance <span class="accent">Probes</span></h2>
+      <p class="gh-sub">SH · Probe Grid · Trilinear · DDGI</p>
+    </div>
+  </div>
+
+  <h1 style="font-size:32px; margin:0 0 12px;">Irradiance 프로브(SH) · 프로브 그리드 · DDGI — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead" style="font-size:16px;">
+    <a class="btn-link" href="./06-gi-lightmap.html">라이트맵</a>은 정적 표면에만 GI를 붙일 수 있습니다. 걸어다니는 캐릭터 같은
+    <strong>동적 물체</strong>도 GI를 받으려면 <em>공간 자체</em>를 샘플해야 합니다. 그 해법이 <strong>Irradiance 프로브</strong>입니다 —
+    공간 곳곳에 프로브를 놓아 방향별 간접광을 <strong>구면 조화(SH) 9계수</strong>로 압축 저장하고, 물체는 가까운 프로브들을 보간해 씁니다.
+    이 페이지에서는 SH 기저 평가·복원, 프로브를 <em>격자</em>로 깔아 <strong>삼선형 보간</strong>하는 법, 그리고 그 최대 약점인
+    <strong>빛 누수</strong>를 <strong>DDGI</strong>의 가시성 저장으로 없애는 데까지 한 줄씩 만들어 봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    행벡터 <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행 우선, 왼손 좌표계, 클립 z ∈ [0,1], 텍스처 V축 위→아래.
+    코드는 <strong>원리 학습용</strong>으로 최소 형태만 남겼습니다. 이 페이지는 간접 <strong>디퓨즈</strong> GI를 다루며, 간접 스페큘러는
+    <a class="btn-link" href="./06-ibl.html">IBL · 리플렉션 프로브</a>에서 다룹니다.
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- 인터랙티브 데모 -->
+  <!-- ================================================================ -->
+  <section id="demo">
+    <h2>직관 데모 — 그리드 보간과 빛 누수, 그리고 DDGI</h2>
+    <p>
+      위에서 내려다본 평면도입니다. 왼쪽은 <strong>밝은 방</strong>(따뜻한 빛), 오른쪽은 <strong>어두운 방</strong>이고
+      가운데 <strong>벽</strong>이 둘을 가릅니다. 규칙적으로 깔린 <strong>프로브</strong>(점)는 각자 자기 위치의 간접광 색을 담습니다.
+      <strong>물체를 드래그</strong>하면 그 물체를 감싼 <em>4개 최근접 프로브</em>가 켜지고, 셀 안 상대 위치로 만든 <strong>이중선형 가중</strong>
+      (3D에선 삼선형)으로 네 색을 섞어 물체를 칠합니다. 각 프로브→물체 선의 굵기가 그 프로브의 몫입니다.
+    </p>
+    <p>
+      물체를 어두운 방으로 옮긴 뒤 <strong>가시성 가중</strong>을 꺼 보세요 — 벽 <em>반대편</em>(밝은 방) 프로브까지 보간에 끌려와
+      어두워야 할 물체가 <strong>새어(누수) 밝아집니다</strong>. 가시성 가중을 켜면 벽 뒤 프로브의 몫이 0에 가까워져 누수가 사라집니다.
+      이것이 <strong>DDGI</strong>가 프로브에 <em>거리(가시성)</em>를 함께 저장해 푸는 문제입니다.
+    </p>
+    <div class="gdemo">
+      <div class="gcanvas-wrap">
+        <canvas id="pb-demo" class="gcanvas" width="900" height="360"></canvas>
+        <div class="hud" id="pb-hud">물체를 드래그하세요</div>
+      </div>
+      <div class="gctrls">
+        <div class="gctl">
+          <label>프로브 간격 <span class="gval" id="pb-spaceVal">96</span></label>
+          <input type="range" id="pb-space" min="60" max="150" step="2" value="96" />
+        </div>
+        <div class="gctl">
+          <label><input type="checkbox" id="pb-vis" checked /> 가시성 가중(누수 방지)</label>
+        </div>
+      </div>
+      <p class="ghint">
+        물체(흰 원)를 드래그. 켜진 4개 프로브의 가중치 합은 1입니다. 어두운 방에서 <strong>가시성 가중</strong>을 끄면 누수가,
+        켜면 벽 뒤 프로브가 배제되어 정상 그늘이 됩니다.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 본문: Irradiance Probe (SH) -->
+  <!-- ================================================================ -->
+  <section id="probe">
+    <h2>Irradiance 프로브 — 구면 조화(SH)로 방향별 간접광 압축</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 공간 곳곳에 "프로브"를 놓고, 각 프로브가 자기 위치에서 <em>모든 방향</em>으로 들어오는
+      간접광을 아주 적은 계수(보통 9개)로 압축 저장합니다. 런타임에는 동적 물체가 가까운 프로브들을 보간해
+      자기 법선 방향의 간접광을 즉시 얻습니다.
+      <strong>왜 필요한가:</strong> 라이트맵은 정적 표면에만 붙지만, 프로브는 <em>공간 자체</em>를 샘플하므로
+      걸어다니는 캐릭터 같은 동적 물체도 GI를 받을 수 있습니다.
+    </p>
+    <p>
+      핵심 도구는 <strong>구면 조화 함수(Spherical Harmonics, SH)</strong>입니다. SH는 구면 위의 함수(방향→값)를
+      푸리에 급수처럼 <em>기저 함수들의 가중합</em>으로 전개합니다. 부드러운 irradiance는 저차(low-frequency)라서
+      <strong>2차(9개 계수)만으로</strong> 놀랍도록 정확하게 표현됩니다.
+    </p>
+
+    <h3>1. 방향 하나로 SH 기저 9개 평가 (HLSL)</h3>
+    <div class="code">
+      <div class="code-head"><span>sh_basis.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 단위 방향 dir로 실수형 SH 기저(l=0..2, 총 9개)를 평가한다.
+void EvalSH9(float3 dir, out float sh[9])
+{
+    float x = dir.x, y = dir.y, z = dir.z;
+
+    // l = 0 (상수항, 방향과 무관)
+    sh[0] = 0.282095;                       // 1/(2√π)
+
+    // l = 1 (선형항: 방향 성분에 비례)
+    sh[1] = 0.488603 * y;                   // -√(3/4π)·y 계열
+    sh[2] = 0.488603 * z;
+    sh[3] = 0.488603 * x;
+
+    // l = 2 (2차항: 성분들의 곱)
+    sh[4] = 1.092548 * x * y;
+    sh[5] = 1.092548 * y * z;
+    sh[6] = 0.315392 * (3.0 * z * z - 1.0);
+    sh[7] = 1.092548 * x * z;
+    sh[8] = 0.546274 * (x * x - y * y);
+}
+</code></pre>
+    </div>
+
+    <h4>시그니처·문법 해부</h4>
+    <p>
+      <code>void EvalSH9(float3 dir, out float sh[9])</code>: HLSL에는 참조가 없으니 결과를 돌려줄 때
+      <code>out</code> 한정자를 씁니다 — 함수가 <code>sh</code> 배열을 채워서 호출자에게 되돌려준다는 뜻입니다.
+      <code>float sh[9]</code>는 9개짜리 고정 크기 배열입니다(2차 SH의 계수 개수 = (l+1)² = 3² = 9).
+      <code>dir</code>은 <strong>반드시 단위벡터</strong>여야 합니다 — 아래 다항식들이 단위 구면 위에서 정의되기 때문입니다.
+    </p>
+
+    <h4>수학 → 기하 직관 → 코드 매핑</h4>
+    <p>
+      <strong>수학:</strong> SH 기저는 라플라스 방정식의 구면 해로, 차수 <code>l</code>마다 <code>2l+1</code>개가 있습니다
+      (l=0 → 1개, l=1 → 3개, l=2 → 5개, 합 9개). 각 상수(<code>0.282095</code> 등)는 기저가 구면 위에서
+      직교·정규가 되도록 맞추는 정규화 상수입니다. 예를 들어 <code>0.282095 = 1/(2√π)</code>입니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> l=0 항은 방향과 무관한 <em>평균 밝기</em>(전체를 균일하게 채우는 빛)입니다.
+      l=1 세 항(<code>x, y, z</code>에 비례)은 <em>한쪽이 밝고 반대쪽이 어두운</em> 기울기 — 즉 지배적인 빛의 방향입니다.
+      l=2 다섯 항은 더 미세한 "언덕과 골짜기" 패턴을 담습니다. 저차만 쓰면 뭉툭하지만 부드러운 GI에는 충분합니다.
+    </p>
+    <p>
+      <strong>코드 매핑:</strong> <code>sh[0]</code>은 상수, <code>sh[1..3]</code>은 방향 성분에 정확히 비례,
+      <code>sh[4..8]</code>은 성분들의 이차 곱(<code>xy</code>, <code>yz</code>, <code>3z²−1</code>, <code>xz</code>, <code>x²−y²</code>)입니다.
+      이 형태는 SH 실수 기저의 표준 공식을 그대로 옮긴 것입니다.
+    </p>
+
+    <h3>2. 프로브가 저장한 SH로 법선 방향 irradiance 복원 (HLSL)</h3>
+    <p>
+      베이킹 때 각 프로브는 위 기저로 <em>3채널(RGB) × 9계수 = 27개 float</em>을 저장해 둡니다.
+      런타임에는 표면 법선 <code>n</code>에 대해 다시 SH를 평가하고, 저장된 계수와 내적하면 그 방향의 간접광이 나옵니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>probe_sample.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">cbuffer ProbeCB : register(b3)
+{
+    float4 gSH_R[9];   // R채널 9계수 (.x만 사용, 정렬용 float4)
+    float4 gSH_G[9];
+    float4 gSH_B[9];
+};
+
+// 표면 법선 n으로 프로브의 간접광(RGB)을 복원한다.
+float3 SampleProbeIrradiance(float3 n)
+{
+    float basis[9];
+    EvalSH9(n, basis);                 // 법선 방향의 기저값 9개
+
+    float3 result = 0;
+    [unroll]
+    for (int i = 0; i &lt; 9; ++i)
+    {
+        // 각 계수 · 해당 기저값을 채널별로 누적 = SH 내적(재구성)
+        result.r += gSH_R[i].x * basis[i];
+        result.g += gSH_G[i].x * basis[i];
+        result.b += gSH_B[i].x * basis[i];
+    }
+    return max(result, 0.0);           // 음수 조명은 물리적으로 없으니 클램프
+}
+</code></pre>
+    </div>
+
+    <h4>줄 단위 해부</h4>
+    <p>
+      <code>cbuffer ProbeCB : register(b3)</code>는 프로브 계수를 상수 버퍼 슬롯 <code>b3</code>에 바인딩합니다.
+      HLSL cbuffer는 16바이트(<code>float4</code>) 정렬을 강제하므로, 스칼라 9개를 그냥 <code>float gSH_R[9]</code>로 두면
+      각 원소가 16바이트로 패딩돼 레이아웃이 어긋납니다. 그래서 <code>float4</code> 배열로 잡고 <code>.x</code>만 씁니다
+      (실무에서는 4계수씩 묶어 낭비를 줄이기도 합니다).
+    </p>
+    <p>
+      <code>[unroll]</code>은 컴파일러에게 이 9회 루프를 <strong>완전히 펼치라</strong>는 힌트입니다 — 반복 횟수가 상수라
+      분기 없이 곱셈-덧셈 27쌍으로 전개되어 GPU에서 훨씬 빠릅니다.
+    </p>
+    <p>
+      <strong>수학:</strong> <code>result = Σ c<sub>i</sub> · Y<sub>i</sub>(n)</code>은 SH 재구성(reconstruction) 그 자체입니다.
+      저장된 계수 <code>c<sub>i</sub></code>와 법선에서 평가한 기저 <code>Y<sub>i</sub>(n)</code>의 내적이 곧
+      "이 법선 방향으로 들어오는 평균 간접광"입니다. 푸리에 급수에서 계수와 기저를 곱해 신호를 복원하는 것과 똑같습니다.
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      SH 재구성 결과는 <strong>음수가 될 수 있습니다</strong>(ringing/Gibbs 현상). 그대로 쓰면 검은 얼룩이 생기므로
+      <code>max(result, 0)</code>로 클램프합니다. 강한 그림자 경계처럼 고주파 성분이 큰 경우 저차 SH로는 표현 한계가 있어
+      "빛 누수"나 "과도한 부드러움"이 나타납니다.
+    </div>
+
+    <h4>DirectXMath / C++ 대응 (프로브 베이킹 시 계수 적립)</h4>
+    <div class="code">
+      <div class="code-head"><span>probe_bake.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 프로브 위치에서 방향 dir로 받은 radiance를 SH 계수에 적립한다.
+// 몬테카를로 적분: c_i += L(dir) * Y_i(dir) / pdf,  균일 구면이면 pdf = 1/(4π)
+void AccumulateSH(float sh[9], const Vec3&amp; radiance, const Vec3&amp; dir, float weight)
+{
+    float Y[9];
+    EvalSH9(dir, Y);                       // 셰이더와 동일한 기저 공식
+    for (int i = 0; i &lt; 9; ++i)
+        sh[i] += Y[i] * weight;            // (채널은 바깥에서 radiance별로 분리 처리)
+}
+</code></pre>
+    </div>
+    <p>
+      베이킹의 <code>Y_i(dir)</code>와 셰이딩의 <code>basis[i]</code>는 <strong>같은 공식</strong>이어야 합니다 —
+      한쪽 부호나 상수가 다르면 조명이 뒤집히거나 어긋납니다. <code>XMVector3Dot</code>은 계수와 기저를 한 번에 내적할 때
+      쓸 수 있고, <code>XMVectorSaturate</code>는 <code>max(·,0)</code>+<code>min(·,1)</code> 클램프에 대응합니다.
+    </p>
+
+    <!-- ---- 3. 프로브 그리드 배치 + 삼선형 보간 ---- -->
+    <h3>3. 프로브 <em>그리드</em> 배치와 삼선형 보간 — 공간을 촘촘히 덮는 법</h3>
+    <p>
+      <strong>무엇을 만드나:</strong> 프로브 하나로는 방 하나를 못 덮습니다. 그래서 프로브를 <em>3D 격자(grid)</em>로 규칙적으로 배치하고,
+      동적 물체는 자기를 감싼 <strong>8개의 최근접 프로브</strong>를 <strong>삼선형 보간(trilinear interpolation)</strong>으로 섞어
+      자기 위치의 간접광을 얻습니다. 이것이 언리얼의 <em>Volumetric Lightmap</em>, 유니티의 <em>Light Probe Volume</em>, DDGI의 공통 뼈대입니다.
+      <strong>왜 필요한가:</strong> 격자 + 보간은 <em>공간 어디서든</em> 부드럽게 변하는 간접광을 주면서도, 저장은 격자점(프로브)에만 하면 되어 효율적입니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> 표면 점 <code>P</code>가 놓인 격자 셀(정육면체)의 여덟 꼭짓점이 여덟 프로브입니다. <code>P</code>가 어느 꼭짓점에
+      가까울수록 그 프로브의 몫이 커지도록, 셀 안에서의 상대 위치 <code>(fx,fy,fz)∈[0,1]³</code>로 가중치를 만들어 여덟 값을 섞습니다 —
+      1차원 선형 보간을 세 축으로 중첩한 것이 삼선형 보간입니다.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>probe_grid_sample.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 프로브 격자: gGridMin에서 시작해 gSpacing 간격으로 gGridDim개씩 배치.
+// 각 프로브는 27 float(RGB×9 SH)를 구조적 버퍼에 저장.
+StructuredBuffer&lt;ProbeSH&gt; gProbes : register(t6);  // 길이 = dimX*dimY*dimZ
+cbuffer GridCB : register(b2)
+{
+    float3 gGridMin;    // 격자 원점(월드)
+    float3 gSpacing;    // 축별 프로브 간격
+    int3   gGridDim;    // 축별 프로브 개수
+};
+
+// 3D 격자 인덱스 → 1D 버퍼 인덱스
+int ProbeIndex(int3 c) { return (c.z*gGridDim.y + c.y)*gGridDim.x + c.x; }
+
+// 표면 위치 P·법선 N의 간접광을, 감싼 8개 프로브의 삼선형 보간으로 구한다.
+float3 SampleProbeGrid(float3 P, float3 N)
+{
+    float3 g   = (P - gGridMin) / gSpacing;   // 격자 좌표(실수)
+    int3   base = (int3)floor(g);             // 셀의 최소 꼭짓점
+    float3 f   = g - (float3)base;            // 셀 안 상대 위치 [0,1]³
+
+    float3 sum = 0;  float wSum = 0;
+    [unroll] for (int i = 0; i &lt; 8; ++i)
+    {
+        int3 off = int3(i&amp;1, (i&gt;&gt;1)&amp;1, (i&gt;&gt;2)&amp;1);   // 여덟 꼭짓점 (0/1)³
+        int3 c   = clamp(base + off, 0, gGridDim - 1); // 격자 밖은 가장자리로 클램프
+
+        // 삼선형 가중: 각 축에서 가까운 꼭짓점일수록 큰 몫
+        float3 tw = lerp(1.0 - f, f, (float3)off);
+        float  w  = tw.x * tw.y * tw.z;
+
+        // (선택) 누수 방지: 프로브→P 방향이 법선과 반대면(벽 뒤) 가중 감소
+        float3 dir = normalize(gGridMin + (float3)c*gSpacing - P);
+        w *= saturate(dot(N, -dir) + 0.2);
+
+        sum  += SampleProbeSH(gProbes[ProbeIndex(c)], N) * w;
+        wSum += w;
+    }
+    return wSum &gt; 1e-4 ? sum / wSum : 0;
+}
+</code></pre>
+    </div>
+    <h4>줄 단위 해부</h4>
+    <p>
+      <code>(P - gGridMin) / gSpacing</code>는 월드 위치를 <em>격자 칸 단위</em> 실수 좌표로 바꿉니다. <code>floor</code>가 셀의 최소 꼭짓점,
+      소수부 <code>f</code>가 셀 안 위치입니다. <code>off = int3(i&amp;1, (i&gt;&gt;1)&amp;1, (i&gt;&gt;2)&amp;1)</code>은 <code>i=0..7</code>을 정육면체의
+      여덟 꼭짓점 <code>(0/1, 0/1, 0/1)</code>로 펼치는 비트 트릭입니다.
+    </p>
+    <p>
+      <strong>삼선형 가중의 핵심:</strong> <code>lerp(1-f, f, off)</code>는 그 꼭짓점이 <code>off=0</code>인 축에선 <code>1-f</code>,
+      <code>off=1</code>인 축에선 <code>f</code>를 고릅니다. 세 축 가중을 곱한 <code>w = tw.x·tw.y·tw.z</code>가 그 프로브의 몫이고,
+      여덟 몫의 합은 항상 1이 됩니다(정규화 전에도). 각 프로브에서 <code>SampleProbeSH(·, N)</code>으로 <em>법선 방향</em>의 SH를 복원해 섞습니다.
+    </p>
+    <div class="callout gotcha">
+      <span class="tag">함정 — 빛 누수(light leak)</span>
+      순수 삼선형 보간의 최대 약점은 <strong>벽을 뚫는 누수</strong>입니다. 밝은 방과 어두운 방 사이 벽에 걸친 표면이,
+      벽 <em>반대편</em>(밝은 방)의 프로브까지 보간에 끌어들여 어두워야 할 면이 밝아집니다. 위 코드의 <code>dot(N, -dir)</code> 가중은
+      "표면 뒤쪽에 있는 프로브의 몫을 줄이는" 값싼 완화책이지만 완전하지 않습니다 — 근본 해법은 아래 DDGI의 <em>가시성 저장</em>입니다.
+    </div>
+
+    <!-- ---- 4. DDGI 연결 ---- -->
+    <h3>4. DDGI로의 연결 — 프로브가 <em>거리</em>까지 기억하면 누수가 사라진다</h3>
+    <p>
+      <strong>DDGI(Dynamic Diffuse Global Illumination, NVIDIA 2019)</strong>는 위 프로브 그리드를 두 방향으로 확장해 실시간 GI로 끌어올립니다.
+      첫째, 각 프로브가 매 프레임 <em>소수의 광선을 레이트레이싱</em>해 irradiance를 갱신합니다(정적 베이킹 → 동적).
+      둘째, irradiance뿐 아니라 <strong>방향별 거리·거리²(가시성)</strong>를 작은 옥타헤드럴 맵에 함께 저장합니다.
+    </p>
+    <div class="callout">
+      <span class="tag">직관</span>
+      보간할 때 각 프로브에게 <em>"너와 이 표면 사이에 벽이 있니?"</em>를 물을 수 있게 됩니다. 프로브가 저장한
+      "그 방향으로 본 평균 거리"보다 표면이 <em>더 멀리</em> 있으면(즉 프로브에서 안 보이면) 그 프로브의 가중을 0에 가깝게 낮춥니다
+      — 체비셰프 부등식으로 <em>가려질 확률</em>을 추정하는 <strong>variance shadow map</strong>과 같은 원리입니다. 그래서 벽 반대편 프로브가 자동으로 배제되어
+      <strong>누수</strong>가 사라집니다.
+    </div>
+    <p>
+      즉 3절의 삼선형 가중 <code>w</code>에 <strong>가시성 항</strong>이 하나 더 곱해지는 것이 DDGI 보간의 실체입니다:
+    </p>
+    <div class="code">
+      <div class="code-head"><span>ddgi_visibility_weight.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">// 프로브 i의 삼선형 가중 w에, 체비셰프 가시성 항을 곱한다.
+//   probeToP  : 프로브 → 표면 P 방향/거리
+//   meanDist, meanDist2 : 그 방향으로 프로브가 저장한 거리·거리²(옥타헤드럴 맵에서 조회)
+float VisibilityWeight(float3 probePos, float3 P, float meanDist, float meanDist2)
+{
+    float  dist = distance(probePos, P);
+    if (dist &lt;= meanDist) return 1.0;            // 프로브에서 보이면 완전 신뢰
+
+    float variance = abs(meanDist*meanDist - meanDist2);
+    float d = dist - meanDist;
+    return variance / (variance + d*d);          // 체비셰프: 가려질수록 0으로
+}
+// 사용: w *= VisibilityWeight(probePos, P, md, md2);  // 3절의 w에 곱함
+</code></pre>
+    </div>
+    <p>
+      결과적으로 DDGI는 <em>정적 베이킹 없이</em>(레벨 로드·라이트 이동에 즉시 반응) 누수까지 억제한 디퓨즈 GI를 줍니다. 대신
+      프로브당 매 프레임 레이 + 갱신 비용이 들어 하드웨어 RT를 전제로 합니다. UE5의 초기 Lumen 이전 세대, 여러 콘솔 타이틀이 이 구조를 채택했습니다.
+      간접 <strong>스페큘러</strong>는 여전히 별도로 — <a class="btn-link" href="./06-ibl.html#reflection-probe">리플렉션 프로브</a>나 SSR/RT 반사로 — 처리합니다.
+    </p>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-gi-lightmap.html">← 1. 라이트맵 베이킹</a>
+    <a href="./06-gi-ssgi.html">3. SSGI →</a>
+  </nav>
+
+</main>
+
+<script>if (window.GFX && GFX.runPendingDemos) GFX.runPendingDemos();</script>
+
+<!-- ================================================================ -->
+<!-- 히어로 배너: 공간에 깔린 프로브 격자가 방향별 간접광을 로브로 담아 빛나는 모습(Canvas2D). -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  var cv = document.getElementById("pbHeroCanvas");
+  try {
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+    var W = 0, H = 0, dpr = Math.min(2, window.devicePixelRatio || 1);
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // 색이 다른 두 광원 영역(간접광 색). 프로브가 위치에 따라 이 색을 담는다.
+    var HUES = [[255, 150, 90], [110, 190, 255]];
+    var raf = 0, t0 = null;
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+      var bg = ctx.createLinearGradient(0, 0, 0, H);
+      bg.addColorStop(0, "#0c1a2e"); bg.addColorStop(1, "#101a28");
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+      // 원근감 있는 프로브 격자(아래 행일수록 넓고 큼)
+      var rows = 5, cols = 12;
+      for (var j = 0; j < rows; j++) {
+        var v = j / (rows - 1);
+        var y = H * (0.32 + v * 0.6);
+        var scale = 0.45 + v * 0.9;                 // 원근 스케일
+        var inset = (1 - scale) * W * 0.28;
+        for (var i = 0; i < cols; i++) {
+          var u = cols === 1 ? 0.5 : i / (cols - 1);
+          var x = inset + u * (W - 2 * inset);
+          // 위치로 두 색을 섞고, 시간에 따라 은은히 맥동
+          var mix = 0.5 + 0.5 * Math.sin(u * 3.14159 + t * 0.6 + v);
+          var c0 = HUES[0], c1 = HUES[1];
+          var r = c0[0] * mix + c1[0] * (1 - mix);
+          var g = c0[1] * mix + c1[1] * (1 - mix);
+          var b = c0[2] * mix + c1[2] * (1 - mix);
+          var pulse = 0.55 + 0.45 * Math.sin(t * 1.4 + i * 0.5 + j);
+          var rad = (7 + 10 * scale) * (0.8 + 0.2 * pulse);
+          ctx.globalCompositeOperation = "lighter";
+          var gr = ctx.createRadialGradient(x, y, 0, x, y, rad * 2.2);
+          gr.addColorStop(0, "rgba(" + (r|0) + "," + (g|0) + "," + (b|0) + "," + (0.5 * pulse).toFixed(3) + ")");
+          gr.addColorStop(1, "rgba(" + (r|0) + "," + (g|0) + "," + (b|0) + ",0)");
+          ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(x, y, rad * 2.2, 0, Math.PI * 2); ctx.fill();
+          ctx.globalCompositeOperation = "source-over";
+          ctx.beginPath(); ctx.arc(x, y, 3.2 * scale + 1.4, 0, Math.PI * 2);
+          ctx.fillStyle = "rgb(" + (r|0) + "," + (g|0) + "," + (b|0) + ")"; ctx.fill();
+        }
+      }
+      raf = requestAnimationFrame(draw);
+    }
+    function start() { if (!raf) raf = requestAnimationFrame(draw); }
+    function stop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+    document.addEventListener("visibilitychange", function () { document.hidden ? stop() : start(); });
+    start();
+  } catch (e) {
+    try { var c = cv.getContext("2d"); if (c) { c.fillStyle = "#101a28"; c.fillRect(0, 0, cv.width, cv.height); } } catch (_) {}
+  }
+})();
+</script>
+
+<!-- ================================================================ -->
+<!-- 인터랙티브 데모: 프로브 그리드 이중선형 보간 + 빛 누수 + DDGI 가시성 가중 (Canvas2D). -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  try {
+    var cv = document.getElementById("pb-demo");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+    var spaceEl = document.getElementById("pb-space");
+    var spaceVal = document.getElementById("pb-spaceVal");
+    var visEl = document.getElementById("pb-vis");
+    var hud = document.getElementById("pb-hud");
+    if (!spaceEl || !visEl || !hud) return;
+
+    var W = 0, H = 0, dpr = Math.min(2, window.devicePixelRatio || 1);
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // 물체 위치(정규화 0..1) — 초기엔 오른쪽(어두운 방)
+    var obj = { u: 0.68, v: 0.5 };
+    var dragging = false;
+
+    function toLocal(e) {
+      var r = cv.getBoundingClientRect();
+      var cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+      var cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+      return { x: cx, y: cy };
+    }
+    function setObj(e) {
+      var p = toLocal(e);
+      obj.u = Math.max(0.04, Math.min(0.96, p.x / W));
+      obj.v = Math.max(0.08, Math.min(0.92, p.y / H));
+    }
+    cv.addEventListener("mousedown", function (e) { dragging = true; setObj(e); });
+    window.addEventListener("mousemove", function (e) { if (dragging) setObj(e); });
+    window.addEventListener("mouseup", function () { dragging = false; });
+    cv.addEventListener("touchstart", function (e) { dragging = true; setObj(e); e.preventDefault(); }, { passive: false });
+    cv.addEventListener("touchmove", function (e) { if (dragging) { setObj(e); e.preventDefault(); } }, { passive: false });
+    window.addEventListener("touchend", function () { dragging = false; });
+
+    spaceEl.addEventListener("input", function () { spaceVal.textContent = spaceEl.value; });
+
+    // 프로브 색: 벽 왼쪽 = 밝은(따뜻) 방, 오른쪽 = 어두운 방
+    function probeColor(x, wallX) {
+      if (x < wallX) return [255, 186, 116];      // 밝은 방 간접광(따뜻)
+      return [26, 30, 44];                          // 어두운 방
+    }
+
+    var raf = 0;
+    function draw() {
+      var spacing = parseFloat(spaceEl.value);
+      var visOn = visEl.checked;
+      var wallX = W * 0.5;
+      ctx.clearRect(0, 0, W, H);
+
+      // 두 방 배경
+      var gl = ctx.createLinearGradient(0, 0, wallX, 0);
+      gl.addColorStop(0, "#4a3413"); gl.addColorStop(1, "#3a2b13");
+      ctx.fillStyle = gl; ctx.fillRect(0, 0, wallX, H);
+      ctx.fillStyle = "#0f1119"; ctx.fillRect(wallX, 0, W - wallX, H);
+      // 방 라벨
+      ctx.fillStyle = "rgba(255,220,170,0.5)"; ctx.font = "600 12px 'JetBrains Mono',monospace";
+      ctx.fillText("밝은 방 (따뜻한 간접광)", 12, 18);
+      ctx.fillStyle = "rgba(150,170,210,0.5)"; ctx.fillText("어두운 방", wallX + 12, 18);
+
+      // 벽
+      ctx.fillStyle = "#6b7280"; ctx.fillRect(wallX - 3, 0, 6, H);
+
+      // 프로브 격자
+      var probes = [];
+      var nx = Math.floor(W / spacing), ny = Math.floor(H / spacing);
+      var ox = (W - nx * spacing) / 2, oy = (H - ny * spacing) / 2;
+      for (var j = 0; j <= ny; j++) for (var i = 0; i <= nx; i++) {
+        var px = ox + i * spacing, py = oy + j * spacing;
+        probes.push({ i: i, j: j, x: px, y: py, c: probeColor(px, wallX) });
+      }
+      function probeAt(i, j) {
+        if (i < 0) i = 0; if (i > nx) i = nx; if (j < 0) j = 0; if (j > ny) j = ny;
+        return probes[j * (nx + 1) + i];
+      }
+      // 프로브 점
+      for (var k = 0; k < probes.length; k++) {
+        var p = probes[k];
+        ctx.beginPath(); ctx.arc(p.x, p.y, 3.4, 0, Math.PI * 2);
+        ctx.fillStyle = "rgb(" + p.c[0] + "," + p.c[1] + "," + p.c[2] + ")"; ctx.fill();
+        ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.stroke();
+      }
+
+      // 물체를 감싼 셀의 4개 프로브
+      var oxp = obj.u * W, oyp = obj.v * H;
+      var gi = (oxp - ox) / spacing, gj = (oyp - oy) / spacing;
+      var i0 = Math.floor(gi), j0 = Math.floor(gj);
+      var fx = gi - i0, fy = gj - j0;
+      var corners = [
+        { p: probeAt(i0, j0), w: (1 - fx) * (1 - fy) },
+        { p: probeAt(i0 + 1, j0), w: fx * (1 - fy) },
+        { p: probeAt(i0, j0 + 1), w: (1 - fx) * fy },
+        { p: probeAt(i0 + 1, j0 + 1), w: fx * fy }
+      ];
+
+      // 가시성 가중: 물체와 프로브가 벽 반대편이면 가중을 크게 낮춤
+      var objSide = oxp < wallX ? -1 : 1;
+      var leaked = false;
+      for (var c = 0; c < corners.length; c++) {
+        var pSide = corners[c].p.x < wallX ? -1 : 1;
+        var opposite = pSide !== objSide;
+        if (visOn && opposite) corners[c].w *= 0.02;      // DDGI 가시성 배제
+        if (!visOn && opposite && corners[c].w > 0.05) leaked = true;
+      }
+      var wsum = 0; for (var c = 0; c < corners.length; c++) wsum += corners[c].w;
+      if (wsum < 1e-5) wsum = 1e-5;
+
+      // 가중치 선 + 활성 프로브 링
+      var mix = [0, 0, 0];
+      for (var c = 0; c < corners.length; c++) {
+        var cc = corners[c], wn = cc.w / wsum;
+        mix[0] += cc.p.c[0] * wn; mix[1] += cc.p.c[1] * wn; mix[2] += cc.p.c[2] * wn;
+        ctx.beginPath(); ctx.moveTo(cc.p.x, cc.p.y); ctx.lineTo(oxp, oyp);
+        ctx.lineWidth = 1 + wn * 7;
+        ctx.strokeStyle = "rgba(126,231,135," + (0.15 + wn * 0.6).toFixed(3) + ")"; ctx.stroke();
+        ctx.beginPath(); ctx.arc(cc.p.x, cc.p.y, 7, 0, Math.PI * 2);
+        ctx.lineWidth = 2; ctx.strokeStyle = "rgba(126,231,135,0.9)"; ctx.stroke();
+      }
+
+      // 물체(보간 색으로 채움)
+      ctx.beginPath(); ctx.arc(oxp, oyp, 15, 0, Math.PI * 2);
+      ctx.fillStyle = "rgb(" + (mix[0]|0) + "," + (mix[1]|0) + "," + (mix[2]|0) + ")"; ctx.fill();
+      ctx.lineWidth = 2.5; ctx.strokeStyle = "#ffffff"; ctx.stroke();
+
+      // HUD
+      var wtxt = corners.map(function (c) { return (100 * c.w / wsum).toFixed(0) + "%"; }).join(" · ");
+      hud.innerHTML =
+        "4개 프로브 가중: <b>" + wtxt + "</b><br>" +
+        "혼합 간접광 = rgb(" + (mix[0]|0) + "," + (mix[1]|0) + "," + (mix[2]|0) + ")<br>" +
+        (objSide > 0
+          ? (leaked ? "<span style='color:#ff9a6a'>누수 발생 — 벽 뒤 밝은 방이 새어듦</span>"
+                    : (visOn ? "<span style='color:#7ee787'>가시성 가중 ON — 누수 차단(정상 그늘)</span>" : "정상"))
+          : "밝은 방 — 물체가 따뜻한 간접광을 받음");
+
+      raf = requestAnimationFrame(draw);
+    }
+    function start() { if (!raf) raf = requestAnimationFrame(draw); }
+    function stop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+    document.addEventListener("visibilitychange", function () { document.hidden ? stop() : start(); });
+    start();
+  } catch (e) { /* 데모 격리 */ }
+})();
+</script>
+
+<script src="./highlight.js"></script>
+</body>
+</html>

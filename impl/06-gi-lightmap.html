@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 라이트맵 베이킹 — C++/DirectX 11</title>
+<meta name="description" content="정적 씬의 간접광(irradiance)을 오프라인에서 텍셀마다 반구 몬테카를로 적분으로 구워 텍스처에 저장하는 라이트맵 베이킹을, 코사인 가중 반구 샘플링부터 C++/DirectXMath 코드 한 줄까지 직접 구현하며 해부하는 입문자용 가이드." />
+<link rel="stylesheet" href="../css/theme.css" />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+<script src="./embed.js"></script>
+</head>
+<body>
+<main class="content" style="max-width:1200px;">
+  <a class="back-link" href="./index.html" onclick="if(history.length>1){history.back();return false}">← 뒤로가기</a>
+
+  <!-- 타이틀 히어로 배너: 어두운 씬에서 광선이 벽에 튕겨 텍셀 격자가 하나씩 '구워지는' 라이트맵 베이킹의 본질.
+       Canvas2D · 격리 실행 · 캔버스 크기 피드백 루프 방지(논리 크기는 표시 크기에서, height 속성 재대입 금지). -->
+  <div class="grass-hero" id="lmHero">
+    <canvas id="lmHeroCanvas" width="940" height="300"></canvas>
+    <div class="gh-shade"></div>
+    <div class="gh-caption">
+      <h2 class="gh-title">Lightmap <span class="accent">Baking</span></h2>
+      <p class="gh-sub">Texel Irradiance · Hemisphere Monte-Carlo · Bake Once, Read Once</p>
+    </div>
+  </div>
+
+  <h1 style="font-size:32px; margin:0 0 12px;">라이트맵 베이킹 — 한 줄 한 줄 직접 구현</h1>
+  <p class="lead" style="font-size:16px;">
+    움직이지 않는 벽·바닥의 <strong>간접광(irradiance)</strong>은 매 프레임 다시 계산할 이유가 없습니다.
+    <strong>라이트맵 베이킹</strong>은 정적 표면의 각 점이 받는 간접광을 <em>오프라인에서 미리 계산</em>해 2D 텍스처(라이트맵)에 굽고,
+    런타임에는 UV로 <em>텍스처 읽기 한 번</em>만 하는 기법입니다. 런타임 비용이 사실상 0이라 모바일·정적 배경의 표준입니다.
+    이 페이지에서는 라이트맵 텍셀 하나의 irradiance를 <strong>반구 몬테카를로 적분</strong>으로 굽는 커널을,
+    코사인 가중 반구 샘플링의 수학부터 C++/DirectXMath 코드 한 줄까지 해부하며 직접 만들어 봅니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 페이지의 코드는 <strong>행벡터 규약</strong>(<code>v' = v * M</code>, HLSL <code>mul(v, M)</code>), 행 우선 저장,
+    <strong>왼손 좌표계</strong>, 클립 z ∈ [0,1], 텍스처 V축 위→아래를 따릅니다. 코드는 검증된 라이브러리 대신 <strong>원리 학습용</strong>으로 최소 형태만 남겼습니다.
+    이 페이지는 <a class="btn-link" href="./06-gi.html">전역 조명(GI) 허브</a>의 첫 기법입니다.
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- 인터랙티브 데모 -->
+  <!-- ================================================================ -->
+  <section id="demo">
+    <h2>직관 데모 — 텍셀마다 반구를 적분해 굽는다</h2>
+    <p>
+      2D 방 단면입니다. <strong>좌벽은 빨강, 우벽은 파랑</strong>, 광원은 가운데 있습니다. 벽·바닥·천장을 따라 늘어선 작은 사각형이 <strong>텍셀</strong>이고,
+      각 텍셀에서 반구(2D라 반원) 방향으로 광선을 쏴 벽·광원의 빛을 <em>코사인 가중 평균</em>해 그 텍셀의 간접광을 굽습니다.
+      표본 수를 늘리면 노이즈(지글거림)가 <code>1/√N</code>로 줄고, <strong>GI 켜기</strong>를 끄면 색 번짐(color bleeding)이 사라져
+      빨간·파란 벽이 이웃 면을 물들이지 못하는 걸 볼 수 있습니다. 아래 스트립이 완성된 <strong>1D 라이트맵</strong>입니다.
+    </p>
+    <div class="gdemo">
+      <div class="gcanvas-wrap">
+        <canvas id="lm-demo" class="gcanvas" width="900" height="360"></canvas>
+        <div class="hud" id="lm-hud">베이킹…</div>
+      </div>
+      <div class="gctrls">
+        <div class="gctl">
+          <label>텍셀당 표본 수 N <span class="gval" id="lm-nVal">64</span></label>
+          <input type="range" id="lm-n" min="1" max="256" value="64" />
+        </div>
+        <div class="gctl">
+          <label>벽당 텍셀 수 <span class="gval" id="lm-resVal">16</span></label>
+          <input type="range" id="lm-res" min="4" max="40" value="16" />
+        </div>
+        <div class="gctl">
+          <label>GI(색 번짐) <span class="gval" id="lm-giVal">켬</span></label>
+          <input type="range" id="lm-gi" min="0" max="1" step="1" value="1" />
+        </div>
+      </div>
+      <p class="ghint">
+        표본 수를 올리면 노이즈가 줄고(1/√N), 텍셀 수를 올리면 라이트맵 해상도가 올라갑니다. GI를 끄면 직접광만 남아 색 번짐이 사라집니다.
+        값은 개념 이해용 근사입니다.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <!-- 본문: 라이트맵 베이킹 (옛 06-gi.html §1 verbatim) -->
+  <!-- ================================================================ -->
+  <section id="lightmap">
+    <h2>라이트맵 베이킹 — 정답을 미리 구워 텍스처에 저장</h2>
+    <p>
+      <strong>무엇을 만드나:</strong> 정적인 씬의 각 표면 점이 받는 간접광(irradiance)을 오프라인에서 계산해
+      2D 텍스처(라이트맵)에 저장하고, 런타임에는 UV로 한 번 샘플만 하는 파이프라인입니다.
+      <strong>왜 필요한가:</strong> 매 프레임 적분을 다시 풀 필요 없이, 벽·바닥처럼 움직이지 않는 물체의 GI를
+      <em>텍스처 읽기 한 번</em>으로 끝낼 수 있습니다 — 런타임 비용이 사실상 0입니다.
+    </p>
+    <ol class="steps">
+      <li>메시의 모든 삼각형을 겹치지 않게 2D 아틀라스에 펼치는 <strong>라이트맵 UV</strong>(제2 UV 채널)를 만든다.</li>
+      <li>각 라이트맵 텍셀 ↔ 월드 공간 위치·법선을 대응시킨다(텍셀 하나가 표면의 작은 패치 하나).</li>
+      <li>각 텍셀에서 반구 방향으로 광선을 쏴 도착한 빛을 적분한다 → 그 텍셀의 irradiance.</li>
+      <li>결과를 텍스처로 저장한다. 런타임 셰이더는 라이트맵 UV로 이 값을 읽어 albedo에 곱한다.</li>
+    </ol>
+
+    <h3>1. 텍셀 하나의 irradiance를 굽는 커널 (C++)</h3>
+    <p>
+      먼저 오프라인 베이커의 심장부입니다. 라이트맵 텍셀 하나에 대응하는 표면 점 <code>p</code>와 법선 <code>n</code>이
+      주어졌을 때, 그 점이 반구 전체에서 받는 빛(irradiance)을 몬테카를로 적분으로 구합니다.
+      이 함수가 라이트맵의 모든 텍셀마다 한 번씩 호출됩니다.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>lightmap_baker.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 한 텍셀(표면 점 p, 법선 n)이 반구에서 받는 간접광(irradiance)을 적분한다.
+// scene.trace()는 광선을 쏴 가장 가까운 교차의 방출/반사광(radiance)을 돌려준다고 가정.
+Vec3 BakeTexelIrradiance(const Scene&amp; scene, const Vec3&amp; p, const Vec3&amp; n, int numSamples)
+{
+    Vec3 irradiance = { 0.0f, 0.0f, 0.0f };   // 누적기: RGB 각 채널의 빛 합
+
+    // 법선 n을 축으로 하는 정규직교 기저(접선 공간)를 만든다.
+    Vec3 tangent, bitangent;
+    BuildOrthonormalBasis(n, tangent, bitangent);
+
+    for (int i = 0; i &lt; numSamples; ++i)
+    {
+        // [0,1)^2 난수 두 개 → 코사인 가중 반구 방향(local)으로 매핑
+        float u1 = RandomFloat();
+        float u2 = RandomFloat();
+        float r     = sqrtf(u1);          // 반경  = sqrt(u1)
+        float phi   = 6.2831853f * u2;    // 방위각 = 2π·u2
+        Vec3 localDir = {
+            r * cosf(phi),                // x
+            r * sinf(phi),                // y
+            sqrtf(1.0f - u1)              // z = cosθ (법선 방향 성분)
+        };
+
+        // local(접선 공간) → world(월드 공간)로 변환: 기저 3벡터의 선형결합
+        Vec3 worldDir =
+            tangent   * localDir.x +
+            bitangent * localDir.y +
+            n         * localDir.z;
+
+        // p에서 아주 살짝 띄운 곳부터 광선을 쏴 도착한 radiance를 받는다.
+        Ray ray = { p + n * 1e-4f, worldDir };
+        Vec3 incoming = scene.Trace(ray, /*depth=*/0);
+
+        // 코사인 가중 PDF로 샘플했으므로 cosθ와 PDF가 상쇄된다(아래 해부 참조).
+        irradiance = irradiance + incoming;
+    }
+
+    // 몬테카를로 추정치: 합을 표본 수로 나눠 평균을 낸다.
+    return irradiance * (1.0f / (float)numSamples);
+}
+</code></pre>
+    </div>
+
+    <h4>시그니처 해부 — 각 인자와 타입이 왜 이 모양인가</h4>
+    <p>
+      <code>const Scene&amp; scene</code>: 씬은 삼각형·BVH·재질 등 무거운 데이터 덩어리라 <strong>값 복사가 매우 비쌉니다.</strong>
+      그래서 <code>&amp;</code>(참조)로 받아 복사를 피하고, 이 함수는 씬을 읽기만 하므로 <code>const</code>를 붙여
+      "여기서는 씬을 수정하지 않겠다"를 컴파일러와 독자에게 약속합니다.
+    </p>
+    <p>
+      <code>const Vec3&amp; p</code>, <code>const Vec3&amp; n</code>: <code>Vec3</code>는 12바이트로 작지만 관례상 참조로 받아
+      복사를 줄이고, 역시 수정하지 않으니 <code>const</code>입니다. <code>p</code>는 텍셀에 대응하는 월드 위치,
+      <code>n</code>은 그 점의 단위 법선입니다(반드시 정규화되어 있어야 반구 기저가 정확합니다).
+    </p>
+    <p>
+      <code>int numSamples</code>: 표본 개수입니다. 몬테카를로의 오차는 <code>1/√N</code>로 줄어들기 때문에
+      노이즈를 절반으로 줄이려면 표본을 <strong>4배</strong>로 늘려야 합니다(뒤 성능 callout 참조).
+      반환 타입 <code>Vec3</code>는 RGB 세 채널의 irradiance입니다.
+    </p>
+
+    <h4>수학 → 기하 직관 → 코드 매핑: 코사인 가중 반구 샘플링</h4>
+    <p>
+      <strong>수학:</strong> irradiance는 <code>E = ∫<sub>Ω</sub> L<sub>i</sub>(ω) · cosθ dω</code> 입니다.
+      이를 몬테카를로로 추정하면 <code>E ≈ (1/N) Σ L<sub>i</sub>(ω<sub>k</sub>)·cosθ<sub>k</sub> / p(ω<sub>k</sub>)</code>가 됩니다.
+      여기서 우리가 방향을 <strong>코사인 비례 확률</strong>로 뽑으면 PDF가 <code>p(ω) = cosθ / π</code>가 되어,
+      식의 <code>cosθ / p(ω) = cosθ / (cosθ/π) = π</code>… 가 아니라, 실제로는 반사 BRDF까지 포함하면
+      깔끔하게 <code>cosθ</code>와 PDF가 상쇄됩니다. 그래서 코드에서는 <code>incoming</code>을 그냥 더하기만 합니다.
+    </p>
+    <p>
+      <strong>기하 직관:</strong> 법선 <code>n</code>이 하늘을 가리키는 반구를 상상하세요. 표면은 정면(법선 방향)에서
+      오는 빛을 가장 많이 "받고", 옆(수평)에서 스치는 빛은 거의 못 받습니다 — 이게 <code>cosθ</code> 항의 의미입니다.
+      코사인 가중 샘플링은 <em>어차피 기여가 큰 정면 쪽으로 표본을 더 촘촘히 뿌리는</em> 영리한 전략이라,
+      같은 표본 수로도 노이즈가 훨씬 적습니다.
+    </p>
+    <p>
+      <strong>코드 매핑:</strong> <code>r = sqrt(u1)</code>, <code>phi = 2π·u2</code>로 원판 위의 점을 뽑은 뒤
+      <code>z = sqrt(1 - u1) = cosθ</code>로 반구에 투영합니다(이게 바로 코사인 가중을 만드는 Malley 방법입니다).
+      <code>localDir.x, y</code>는 원판 좌표, <code>localDir.z</code>는 법선 방향 높이입니다.
+    </p>
+
+    <h4>local → world 변환: 3벡터의 선형결합</h4>
+    <p>
+      <code>worldDir = tangent*x + bitangent*y + n*z</code>는 접선 공간 좌표 <code>(x,y,z)</code>를
+      월드 공간의 세 축 벡터로 <strong>재조립</strong>하는 것입니다. 정규직교 기저 <code>{tangent, bitangent, n}</code>에서
+      각 성분에 해당 축 벡터를 곱해 더하면, 그 좌표가 가리키던 방향이 월드에서 어디를 향하는지 나옵니다.
+      이는 행벡터 규약으로 보면 <code>localDir</code>에 기저 행렬을 곱하는 것과 같습니다:
+      <code>worldDir = localDir * [tangent; bitangent; n]</code>.
+    </p>
+
+    <div class="callout gotcha">
+      <span class="tag">함정</span>
+      <code>p + n * 1e-4f</code>로 광선 시작점을 법선 방향으로 살짝 띄우는 이유는 <strong>self-intersection(그림자 여드름)</strong>
+      때문입니다. 부동소수점 오차로 광선이 자기 표면과 즉시 교차해 검은 점이 생기는 것을 막습니다. 엡실론이 너무 작으면
+      여전히 여드름이 생기고, 너무 크면 얇은 물체를 통과해 빛이 새니 씬 스케일에 맞춰 조정해야 합니다.
+    </div>
+
+    <div class="callout perf">
+      <span class="tag">성능</span>
+      베이킹은 <em>텍셀 수 × 표본 수 × 광선당 BVH 순회 비용</em>입니다. 1024² 라이트맵에 텍셀당 256표본이면
+      약 2.7억 개의 1차 광선이고, 바운스까지 재귀하면 수십 배가 됩니다. 그래서 실무 베이커는 텍셀 단위로
+      완전 병렬화(스레드/GPU)하고, 표본은 코사인 가중 + 저불일치 수열(Halton/Sobol)로 효율을 끌어올립니다.
+    </div>
+
+    <h4>DirectXMath 대응</h4>
+    <p>학습용 <code>Vec3</code> 연산을 실무 SIMD로 바꾸면 다음과 같이 1:1 대응합니다.</p>
+    <div class="code">
+      <div class="code-head"><span>lightmap_baker_dxmath.cpp</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">using namespace DirectX;
+
+XMVECTOR nV = XMLoadFloat3(&amp;n);              // Vec3 n  → SIMD 레지스터
+XMVECTOR t  = XMVector3Normalize(/* 접선 */); // BuildOrthonormalBasis의 tangent
+XMVECTOR b  = XMVector3Cross(nV, t);          // bitangent = n × tangent
+
+// local(x,y,z) → world : t*x + b*y + n*z  (성분 곱 후 누적)
+XMVECTOR world = XMVectorAdd(
+    XMVectorAdd(XMVectorScale(t, lx), XMVectorScale(b, ly)),
+    XMVectorScale(nV, lz));
+world = XMVector3Normalize(world);            // 방향은 단위벡터로
+
+XMFLOAT3 worldDir; XMStoreFloat3(&amp;worldDir, world); // 결과를 다시 float3로
+</code></pre>
+    </div>
+    <p>
+      <code>XMLoadFloat3</code>는 원본의 <code>Vec3</code>를 SIMD 레지스터로 올리는 로드, <code>XMStoreFloat3</code>는 그 반대,
+      <code>XMVectorScale(v, s)</code>는 <code>v * s</code>(스칼라 곱), <code>XMVectorAdd</code>는 <code>+</code>,
+      <code>XMVector3Cross</code>는 외적으로 <code>bitangent = n × tangent</code>에 대응합니다.
+    </p>
+
+    <div class="callout">
+      <span class="tag warn">다음</span>
+      라이트맵은 <em>정적 표면</em>에만 붙습니다. 걸어다니는 캐릭터 같은 <strong>동적 물체</strong>는 라이트맵 UV가 없으니,
+      공간 자체를 샘플하는 <a class="btn-link" href="./06-gi-probe.html">Irradiance 프로브(SH)</a>가 필요합니다 — 다음 페이지입니다.
+    </div>
+  </section>
+
+  <!-- 페이지 하단 이전/다음 네비 -->
+  <nav class="page-nav">
+    <a href="./06-gi.html">← GI 허브</a>
+    <a href="./06-gi-probe.html">2. Irradiance 프로브 (SH) →</a>
+  </nav>
+
+</main>
+
+<script>if (window.GFX && GFX.runPendingDemos) GFX.runPendingDemos();</script>
+
+<!-- ================================================================ -->
+<!-- 히어로 배너 스크립트: 어두운 씬에서 텍셀 격자가 광선 바운스로 '구워지는' 애니메이션. Canvas2D. -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  var cv = document.getElementById("lmHeroCanvas");
+  try {
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    var W = 0, H = 0, dpr = Math.min(2, window.devicePixelRatio || 1);
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // 텍셀 격자: 각 텍셀은 목표색(따뜻~차가운 GI)과 현재 채워진 정도(bake)를 가진다.
+    var raf = 0, t0 = null;
+    var cols = 26, rows = 8, cells = [];
+    function rebuild() {
+      cells = [];
+      for (var y = 0; y < rows; y++) for (var x = 0; x < cols; x++) {
+        // 좌측=붉은 벽 영향, 우측=푸른 벽 영향(색 번짐 느낌)
+        var tx = x / (cols - 1);
+        var r = 210 - tx * 150, g = 120, b = 90 + tx * 150;
+        cells.push({ x: x, y: y, r: r, g: g, b: b, bake: 0, order: Math.random() });
+      }
+      cells.sort(function (a, b) { return a.order - b.order; });
+    }
+    rebuild();
+
+    function draw(ts) {
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+      var bg = ctx.createLinearGradient(0, 0, 0, H);
+      bg.addColorStop(0, "#0a1622"); bg.addColorStop(1, "#0d2a1e");
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+      var mx = W * 0.06, my = H * 0.14, gw = W - mx * 2, gh = H - my * 2;
+      var cw = gw / cols, ch = gh / rows;
+      // 진행하는 베이킹 전선(wave)
+      var frontier = ((t * 0.35) % 1.15) * cells.length;
+      for (var i = 0; i < cells.length; i++) {
+        var c = cells[i];
+        var target = i < frontier ? 1 : 0;
+        c.bake += (target - c.bake) * 0.08;
+        var px = mx + c.x * cw, py = my + c.y * ch;
+        var k = c.bake;
+        // 안 구워진 텍셀은 어둡게, 구워지면 색이 차오름 + 살짝 글로우
+        var rr = (8 + c.r * k) | 0, gg = (12 + c.g * k) | 0, bb = (16 + c.b * k) | 0;
+        ctx.fillStyle = "rgb(" + rr + "," + gg + "," + bb + ")";
+        ctx.fillRect(px + 1, py + 1, cw - 2, ch - 2);
+        if (k > 0.15 && k < 0.9) {
+          ctx.fillStyle = "rgba(255,240,200," + (0.5 * (1 - k)).toFixed(3) + ")";
+          ctx.fillRect(px + 1, py + 1, cw - 2, ch - 2);
+        }
+      }
+      raf = requestAnimationFrame(draw);
+    }
+    function start() { if (!raf) raf = requestAnimationFrame(draw); }
+    function stop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+    document.addEventListener("visibilitychange", function () { document.hidden ? stop() : start(); });
+    start();
+  } catch (e) {
+    try { var c = cv.getContext("2d"); if (c) { c.fillStyle = "#0d2a1e"; c.fillRect(0, 0, cv.width, cv.height); } } catch (_) {}
+  }
+})();
+</script>
+
+<!-- ================================================================ -->
+<!-- 인터랙티브 데모: 2D 방 텍셀 라이트맵 베이킹(반구 몬테카를로). Canvas2D · rAF 누적. -->
+<!-- ================================================================ -->
+<script>
+(function () {
+  try {
+    var cv = document.getElementById("lm-demo");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+    var elN = document.getElementById("lm-n"), elRes = document.getElementById("lm-res"), elGI = document.getElementById("lm-gi");
+    var vN = document.getElementById("lm-nVal"), vRes = document.getElementById("lm-resVal"), vGI = document.getElementById("lm-giVal");
+    var hud = document.getElementById("lm-hud");
+    if (!elN || !elRes || !elGI || !hud) return;
+
+    var W = 0, H = 0, dpr = Math.min(2, window.devicePixelRatio || 1);
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // --- 방(사각형) 정의: 화면 좌측 영역 ---
+    function room() {
+      var pad = 26;
+      var maxW = Math.min(W * 0.60, 520);
+      var x0 = pad, y0 = pad, x1 = pad + maxW - pad, y1 = H - pad - 40; // 아래 40은 라이트맵 스트립 자리
+      return { x0: x0, y0: y0, x1: x1, y1: y1 };
+    }
+    // 벽 색(albedo) — 좌:빨강, 우:파랑, 상하:회색
+    var WALL = {
+      left:  [0.85, 0.22, 0.22],
+      right: [0.24, 0.42, 0.90],
+      top:   [0.60, 0.60, 0.62],
+      bottom:[0.55, 0.55, 0.58]
+    };
+    var light = { x: 0.5, y: 0.42, r: 10, I: 2.6, col: [1.0, 0.93, 0.78] };
+
+    // 씬 교차: 광선(ox,oy,dx,dy)이 먼저 만나는 벽/광원. {t, emis(방출), albedo, nx, ny}
+    function intersect(ox, oy, dx, dy, R, lx, ly) {
+      var best = { t: 1e9, kind: null };
+      function tryV(X, col, nx) { // 세로 벽 x=X
+        if (Math.abs(dx) < 1e-9) return;
+        var t = (X - ox) / dx; if (t <= 1e-3 || t >= best.t) return;
+        var hy = oy + t * dy; if (hy < R.y0 - 0.5 || hy > R.y1 + 0.5) return;
+        best = { t: t, kind: "wall", albedo: col, nx: nx, ny: 0 };
+      }
+      function tryH(Y, col, ny) { // 가로 벽 y=Y
+        if (Math.abs(dy) < 1e-9) return;
+        var t = (Y - oy) / dy; if (t <= 1e-3 || t >= best.t) return;
+        var hx = ox + t * dx; if (hx < R.x0 - 0.5 || hx > R.x1 + 0.5) return;
+        best = { t: t, kind: "wall", albedo: col, nx: 0, ny: ny };
+      }
+      tryV(R.x0, WALL.left, 1); tryV(R.x1, WALL.right, -1);
+      tryH(R.y0, WALL.top, 1);  tryH(R.y1, WALL.bottom, -1);
+      // 광원(원): 방출체
+      var ocx = ox - lx, ocy = oy - ly;
+      var b = ocx * dx + ocy * dy, c = ocx * ocx + ocy * ocy - light.r * light.r, h = b * b - c;
+      if (h >= 0) { var t = -b - Math.sqrt(h); if (t > 1e-3 && t < best.t) best = { t: t, kind: "light" }; }
+      return best.kind ? best : null;
+    }
+    // 벽 점의 직접광(광원에서 오는 1차 조명) — color bleeding의 '원천'
+    function directAt(px, py, nx, ny, R, lx, ly) {
+      var dx = lx - px, dy = ly - py, dist = Math.hypot(dx, dy) || 1;
+      dx /= dist; dy /= dist;
+      var cosT = Math.max(0, nx * dx + ny * dy);
+      var atten = light.I / (1 + (dist / 60) * (dist / 60));
+      return cosT * atten; // 스칼라 밝기
+    }
+    // 반구 한 방향의 radiance(1바운스): 벽이면 albedo*직접광, 광원이면 방출
+    function radiance(ox, oy, dx, dy, R, lx, ly) {
+      var hit = intersect(ox, oy, dx, dy, R, lx, ly);
+      if (!hit) return [0, 0, 0];
+      if (hit.kind === "light") return [light.col[0] * light.I, light.col[1] * light.I, light.col[2] * light.I];
+      var hx = ox + hit.t * dx, hy = oy + hit.t * dy;
+      var b = directAt(hx, hy, hit.nx, hit.ny, R, lx, ly);
+      return [hit.albedo[0] * b, hit.albedo[1] * b, hit.albedo[2] * b];
+    }
+
+    // --- 텍셀 배열 만들기 ---
+    var texels = [], R = null, lx = 0, ly = 0;
+    function buildTexels(res) {
+      R = room(); lx = R.x0 + (R.x1 - R.x0) * light.x; ly = R.y0 + (R.y1 - R.y0) * light.y;
+      texels = [];
+      var eps = 1.2;
+      function addWall(x0, y0, x1, y1, nx, ny, albedo) {
+        for (var i = 0; i < res; i++) {
+          var f = (i + 0.5) / res;
+          var px = x0 + (x1 - x0) * f, py = y0 + (y1 - y0) * f;
+          texels.push({ x: px + nx * eps, y: py + ny * eps, nx: nx, ny: ny, albedo: albedo,
+            sr: 0, sg: 0, sb: 0, sw: 0, n: 0 });
+        }
+      }
+      addWall(R.x0, R.y1, R.x0, R.y0, 1, 0, WALL.left);    // 좌벽(아래→위)
+      addWall(R.x1, R.y0, R.x1, R.y1, -1, 0, WALL.right);  // 우벽
+      addWall(R.x0, R.y0, R.x1, R.y0, 0, 1, WALL.top);     // 천장
+      addWall(R.x1, R.y1, R.x0, R.y1, 0, -1, WALL.bottom); // 바닥
+    }
+
+    var targetN = 64, res = 16, giOn = true, seed = 1;
+    function rand() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+    function resetBake() { for (var i = 0; i < texels.length; i++) { var t = texels[i]; t.sr = t.sg = t.sb = t.sw = t.n = 0; } }
+
+    function readControls() {
+      targetN = parseInt(elN.value, 10); res = parseInt(elRes.value, 10); giOn = elGI.value === "1";
+      vN.textContent = targetN; vRes.textContent = res; vGI.textContent = giOn ? "켬" : "끔";
+    }
+    function onParam() {
+      var prevRes = res, prevGI = giOn;
+      readControls();
+      if (res !== prevRes || texels.length === 0) buildTexels(res);
+      resetBake(); // 파라미터 바뀌면 처음부터 다시 굽는다
+    }
+    elN.addEventListener("input", onParam);
+    elRes.addEventListener("input", onParam);
+    elGI.addEventListener("input", onParam);
+    readControls(); buildTexels(res);
+
+    // 텍셀 최종색(현재까지 누적 평균 * albedo)
+    var GAIN = 2.4; // 표시 밝기 게인(개념 데모라 색 번짐이 잘 보이게)
+    function texelColor(t) {
+      if (giOn) {
+        if (t.sw < 1e-6) return [10, 12, 16];
+        var ir = [t.sr / t.sw, t.sg / t.sw, t.sb / t.sw];
+        return [Math.min(255, 12 + t.albedo[0] * ir[0] * 255 * GAIN), Math.min(255, 12 + t.albedo[1] * ir[1] * 255 * GAIN), Math.min(255, 16 + t.albedo[2] * ir[2] * 255 * GAIN)];
+      }
+      // GI off: 직접광만(색 번짐 없음)
+      var b = directAt(t.x, t.y, t.nx, t.ny, R, lx, ly);
+      return [Math.min(255, 12 + t.albedo[0] * b * 255 * GAIN), Math.min(255, 12 + t.albedo[1] * b * 255 * GAIN), Math.min(255, 16 + t.albedo[2] * b * 255 * GAIN)];
+    }
+
+    var raf = 0;
+    function frame() {
+      // 이번 프레임에 텍셀당 몇 샘플 추가(목표 N까지 점진 누적) — '노이즈가 걷히는' 애니메이션
+      if (giOn) {
+        var perFrame = Math.max(1, Math.ceil(targetN / 48));
+        for (var i = 0; i < texels.length; i++) {
+          var t = texels[i];
+          if (t.n >= targetN) continue;
+          var add = Math.min(perFrame, targetN - t.n);
+          var base = Math.atan2(t.ny, t.nx);
+          for (var s = 0; s < add; s++) {
+            var th = (rand() - 0.5) * Math.PI;          // [-π/2, π/2] 반구
+            var a = base + th, dx = Math.cos(a), dy = Math.sin(a);
+            var w = Math.cos(th);                        // 코사인 가중
+            var L = radiance(t.x, t.y, dx, dy, R, lx, ly);
+            t.sr += L[0] * w; t.sg += L[1] * w; t.sb += L[2] * w; t.sw += w;
+          }
+          t.n += add;
+        }
+      }
+
+      // --- 렌더 ---
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "#0c1420"; ctx.fillRect(0, 0, W, H);
+      // 방 배경(내부)
+      ctx.fillStyle = "#05070c"; ctx.fillRect(R.x0, R.y0, R.x1 - R.x0, R.y1 - R.y0);
+
+      // 텍셀 사각형(벽에 붙은 얇은 띠). 벽 방향에 따라 두께/길이를 맞춘다.
+      var th = 6;
+      for (var i = 0; i < texels.length; i++) {
+        var t = texels[i], col = texelColor(t);
+        ctx.fillStyle = "rgb(" + (col[0] | 0) + "," + (col[1] | 0) + "," + (col[2] | 0) + ")";
+        if (t.nx !== 0) {                          // 세로 벽(좌/우)
+          var segV = (R.y1 - R.y0) / res;
+          var wx = t.nx > 0 ? R.x0 : R.x1 - th;
+          ctx.fillRect(wx, t.y - segV / 2, th, segV);
+        } else {                                   // 가로 벽(천장/바닥)
+          var segH = (R.x1 - R.x0) / res;
+          var wy = t.ny > 0 ? R.y0 : R.y1 - th;
+          ctx.fillRect(t.x - segH / 2, wy, segH, th);
+        }
+      }
+
+      // 광원
+      ctx.beginPath(); ctx.arc(lx, ly, light.r, 0, Math.PI * 2);
+      var lg = ctx.createRadialGradient(lx, ly, 0, lx, ly, light.r * 3.5);
+      lg.addColorStop(0, "rgba(255,244,210,0.95)"); lg.addColorStop(0.4, "rgba(255,230,160,0.5)"); lg.addColorStop(1, "rgba(255,230,160,0)");
+      ctx.fillStyle = lg; ctx.beginPath(); ctx.arc(lx, ly, light.r * 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#fff6dc"; ctx.beginPath(); ctx.arc(lx, ly, light.r, 0, Math.PI * 2); ctx.fill();
+
+      // --- 1D 라이트맵 스트립(하단) ---
+      var stripY = R.y1 + 12, stripX = R.x0, stripW = R.x1 - R.x0, stripH = 20;
+      ctx.fillStyle = "#1a2230"; ctx.fillRect(stripX, stripY, stripW, stripH);
+      var n = texels.length, cwStrip = stripW / n;
+      for (var i = 0; i < n; i++) {
+        var col = texelColor(texels[i]);
+        ctx.fillStyle = "rgb(" + (col[0] | 0) + "," + (col[1] | 0) + "," + (col[2] | 0) + ")";
+        ctx.fillRect(stripX + i * cwStrip, stripY, Math.ceil(cwStrip), stripH);
+      }
+      ctx.fillStyle = "rgba(230,238,250,0.8)"; ctx.font = "11px sans-serif";
+      ctx.fillText("↑ 완성된 1D 라이트맵 (텍셀 " + n + "개)", stripX + 4, stripY + stripH + 14);
+
+      // --- 우측 설명 패널 ---
+      var px = R.x1 + 26, py = R.y0 + 18;
+      if (px < W - 120) {
+        ctx.fillStyle = "#e8eef8"; ctx.font = "bold 13px sans-serif";
+        ctx.fillText("반구 몬테카를로 베이킹", px, py); py += 22;
+        ctx.font = "12px sans-serif"; ctx.fillStyle = "#aab6c6";
+        ctx.fillText("좌벽=빨강, 우벽=파랑이", px, py); py += 17;
+        ctx.fillText("이웃 텍셀로 번집니다.", px, py); py += 22;
+        ctx.fillText(giOn ? "GI 켬: 색 번짐 O" : "GI 끔: 직접광만", px, py); py += 17;
+        ctx.fillText("표본↑ → 노이즈↓ (1/√N)", px, py);
+      }
+
+      // HUD
+      var doneMin = 1e9; for (var i = 0; i < texels.length; i++) doneMin = Math.min(doneMin, texels[i].n);
+      var noise = (1 / Math.sqrt(Math.max(1, targetN)) * 100);
+      hud.innerHTML = "텍셀 <b>" + texels.length + "</b> · 표본/텍셀 <b>" + targetN + "</b><br>" +
+        "상대 노이즈 <b>" + noise.toFixed(1) + "%</b> (∝ 1/√N)<br>" +
+        "<span style='opacity:.75'>" + (giOn ? "GI: color bleeding 켬" : "GI: 직접광만") + "</span>";
+
+      raf = requestAnimationFrame(frame);
+    }
+    function start() { if (!raf) raf = requestAnimationFrame(frame); }
+    function stop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+    document.addEventListener("visibilitychange", function () { document.hidden ? stop() : start(); });
+    start();
+  } catch (e) { /* 데모 격리 */ }
+})();
+</script>
+
+<script src="./highlight.js"></script>
+</body>
+</html>

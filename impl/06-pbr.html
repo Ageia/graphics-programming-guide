@@ -565,7 +565,7 @@ float3 fresnelSchlick(float cosTheta, float3 F0) {
     실제 재질감은 <strong>IBL(Image-Based Lighting)</strong>에서 나옵니다. HDR 환경맵을 미리 필터링해
     irradiance 큐브맵(확산)과 prefiltered 큐브맵 + BRDF LUT(스페큘러)을 만들어 앰비언트를 대체하면 추가
     조명 없이도 사실적인 결과가 나옵니다. 또한 위 루프의 D·G·F 계산은 픽셀·광원당 반복되므로, 광원이 많다면
-    <a href="./06-deferred.html">디퍼드 렌더링</a>으로 셰이딩 비용을 화면 픽셀 수로 고정하는 것이
+    <a class="btn-link" href="./06-deferred.html">디퍼드 렌더링</a>으로 셰이딩 비용을 화면 픽셀 수로 고정하는 것이
     유리합니다.
   </div>
 

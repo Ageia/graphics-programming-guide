@@ -17,7 +17,7 @@
   <span class="impl-badge">IMPLEMENTATION · CHAPTER 1</span>
   <h1>내적 · 외적의 실전 활용 — 한 줄 한 줄 직접 구현</h1>
   <p class="lead">
-    <a href="./01-vector.html">벡터 페이지</a>에서 <code>dot</code>과 <code>cross</code>가 무엇인지 성분까지 뜯어봤습니다.
+    <a class="btn-link" href="./01-vector.html">벡터 페이지</a>에서 <code>dot</code>과 <code>cross</code>가 무엇인지 성분까지 뜯어봤습니다.
     이제 그 두 연산이 <strong>실제 그래픽스 코드에서 어디에 쓰이는지</strong> 봅니다. 사잇각(빛과 표면의 각),
     투영(그림자·미끄러짐), 삼각형 법선(면이 향하는 방향), 2D 감김 부호(앞뒤 판정). 네 개의 작은 함수가
     전부지만, 그 안에 렌더링 파이프라인 절반의 직관이 들어 있습니다. 이 페이지는 그 <strong>기하학적 의미</strong>를
@@ -33,7 +33,7 @@
 
   <div class="callout">
     <span class="tag">전제</span>
-    아래 코드는 모두 <a href="./01-vector.html"><code>Vec3.h</code></a>에서 만든 <code>Vec3</code>와 그 연산
+    아래 코드는 모두 <a class="btn-link" href="./01-vector.html"><code>Vec3.h</code></a>에서 만든 <code>Vec3</code>와 그 연산
     (<code>operator+ - *</code>, <code>dot</code>, <code>cross</code>, <code>length</code>, <code>normalize</code>)을
     <code>#include</code>해서 씁니다. 이 페이지에서는 그 재료를 <em>조합</em>만 합니다.
   </div>
@@ -351,7 +351,7 @@ inline Vec3 triangleNormal(const Vec3&amp; p0, const Vec3&amp; p1, const Vec3&am
     "위치"라 그대로 외적하면 의미가 없습니다. 그래서 <strong>한 점을 기준으로 뺄셈</strong>해서
     <code>e1 = p1 - p0</code>, <code>e2 = p2 - p0</code>라는 두 <em>모서리 방향</em>을 만듭니다. 이 두 방향은
     삼각형 평면 안에 놓여 있으므로, 둘 모두에 수직인 외적은 곧 <strong>평면에 수직 = 법선</strong>이 됩니다.
-    (점 − 점 = 방향 벡터라는 규칙은 <a href="./01-vector.html">벡터 페이지</a>에서 다뤘습니다.)
+    (점 − 점 = 방향 벡터라는 규칙은 <a class="btn-link" href="./01-vector.html">벡터 페이지</a>에서 다뤘습니다.)
   </p>
 
   <h3>정점 순서(감김)와 법선 방향 — CCW / CW (수학 → 기하 → 규약)</h3>
@@ -508,7 +508,7 @@ inline float cross2D(float ax, float ay, float bx, float by)
     <tr><td>2D 좌/우, 감김, 점 안팎</td><td><code>cross2D</code></td><td>부호 = 방향, 크기 = 넓이×2</td></tr>
   </table>
   <p>
-    네 함수 모두 재료는 <a href="./01-vector.html"><code>dot</code>과 <code>cross</code></a> 둘뿐입니다.
+    네 함수 모두 재료는 <a class="btn-link" href="./01-vector.html"><code>dot</code>과 <code>cross</code></a> 둘뿐입니다.
     내적은 "방향 일치도(스칼라)", 외적은 "수직 방향과 넓이(벡터/부호)" — 이 두 직관만 확실히 잡으면
     조명·컬링·충돌·피킹의 코드가 전부 이 페이지의 조합으로 읽힙니다.
   </p>

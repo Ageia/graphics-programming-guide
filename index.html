@@ -453,7 +453,7 @@
         을 더한 것이 고전적인 <em>퐁(Phong) 조명 모델</em>입니다.</div>
 
       <div class="tip"><strong>심화 (RTR 4판):</strong> 퐁은 빠른 근사일 뿐, 현대 렌더링은
-        <a href="#pbr">물리 기반(PBR)</a>으로 갑니다. 알아두면 좋은 것: ① <strong>프레넬 효과</strong> —
+        <a class="btn-link" href="#pbr">물리 기반(PBR)</a>으로 갑니다. 알아두면 좋은 것: ① <strong>프레넬 효과</strong> —
         어떤 표면이든 <em>스치는 각도</em>에서 반사가 강해집니다(잔잔한 호수를 비스듬히 보면 거울이 되죠).
         ② <strong>면 광원(area light)</strong> — 점 광원과 달리 크기가 있어 부드러운 그림자와 넓은 하이라이트를
         만듭니다. ③ 빛의 세기는 거리 제곱에 반비례(<em>역제곱 감쇠</em>)합니다.</div>
@@ -481,8 +481,8 @@
 
       <div class="tip"><strong>심화 (RTR 4판):</strong> 색만 입히는 게 아니에요. <strong>노멀 맵</strong>은
         표면의 <em>법선</em>을 픽셀마다 흔들어 실제 굴곡 없이 울퉁불퉁해 보이게 하고, <strong>러프니스/메탈릭 맵</strong>은
-        <a href="#pbr">PBR</a> 재질 파라미터를 위치마다 다르게 줍니다. 또 멀어질 때 텍스처가 지글거리는 문제는
-        <a href="#mipmap">밉맵과 필터링</a>으로 해결하죠 — 아래 7장에서 다룹니다.</div>
+        <a class="btn-link" href="#pbr">PBR</a> 재질 파라미터를 위치마다 다르게 줍니다. 또 멀어질 때 텍스처가 지글거리는 문제는
+        <a class="btn-link" href="#mipmap">밉맵과 필터링</a>으로 해결하죠 — 아래 7장에서 다룹니다.</div>
     </section>
 
     <!-- ========================================================= -->
@@ -899,7 +899,7 @@ fn main(
       <a class="impl-link" href="impl/07-antialiasing.html">안티앨리어싱을 C++/DirectX 11로 직접 구현하기</a>
 
       <p>픽셀은 네모난데 도형의 경계는 매끈합니다. 그래서 경계가 <strong>계단(재기, jaggies)</strong>처럼
-        보이죠. 이건 앞서 본 <a href="#raster">래스터라이제이션</a>의 숙명입니다. 해법의 핵심은
+        보이죠. 이건 앞서 본 <a class="btn-link" href="#raster">래스터라이제이션</a>의 숙명입니다. 해법의 핵심은
         <strong>"픽셀 하나 안에서 여러 지점을 검사해 평균색을 내는 것"</strong>이에요. 경계에 걸친 픽셀은
         도형색과 배경색이 섞여 <em>중간톤</em>이 되고, 멀리서 보면 부드럽게 보입니다.</p>
       <ul>
@@ -940,7 +940,7 @@ fn main(
         <p class="hint">감마 슬라이더와 "선형 공간에서 계산" 토글을 바꿔보세요. 그라디언트 밝기와 색 혼합 결과가 달라집니다.</p>
       </div>
 
-      <div class="tip"><strong>심화 (RTR 4판):</strong> 물리 기반 렌더링(<a href="#pbr">PBR</a>)이 제대로 작동하려면
+      <div class="tip"><strong>심화 (RTR 4판):</strong> 물리 기반 렌더링(<a class="btn-link" href="#pbr">PBR</a>)이 제대로 작동하려면
         <em>텍스처를 읽을 때 sRGB→선형으로 디코딩</em>하고, 모든 조명을 선형에서 계산한 뒤, <em>마지막에
         선형→sRGB로 인코딩</em>해서 출력해야 합니다. 요즘 GPU는 sRGB 텍스처/프레임버퍼로 이 변환을 자동 처리해요.</div>
     </section>
@@ -971,10 +971,10 @@ fn main(
 
     <section id="transparency">
       <h2>투명과 렌더링 순서</h2>
-      <p class="lead">반투명은 순서가 생명. <a href="#zbuffer">Z-buffer</a>만으로는 유리를 제대로 못 그립니다.</p>
+      <p class="lead">반투명은 순서가 생명. <a class="btn-link" href="#zbuffer">Z-buffer</a>만으로는 유리를 제대로 못 그립니다.</p>
       <a class="impl-link" href="impl/07-transparency.html">투명과 렌더링 순서를 C++/DirectX 11로 직접 구현하기</a>
 
-      <p><a href="#blend">알파 블렌딩</a>은 "위색 × α + 아래색 × (1−α)"였죠. 문제는 <strong>여러 반투명 물체가
+      <p><a class="btn-link" href="#blend">알파 블렌딩</a>은 "위색 × α + 아래색 × (1−α)"였죠. 문제는 <strong>여러 반투명 물체가
         겹칠 때</strong>입니다. 블렌딩은 <em>이미 그려진 색 위에</em> 섞는 연산이라, <strong>뒤에서 앞으로
         (back-to-front) 순서대로</strong> 그려야 맞아요. 순서가 틀리면 뒤 유리가 앞 유리 위에 섞여 색이 어긋납니다.</p>
       <p>게다가 불투명 물체는 Z-buffer로 순서를 신경 안 써도 되지만, 반투명은 깊이 기록을 켜면 서로를 가려버려
@@ -1002,7 +1002,7 @@ fn main(
         주변 기하에 <strong>가려져(차폐, occlusion)</strong> 실제로 더 어둡습니다. 이걸 근사해 어둡게 깔아주면
         장면이 갑자기 <strong>땅에 붙어 있는 듯한 입체감</strong>을 얻어요.</p>
       <p>실시간에선 화면 깊이 정보만으로 근사하는 <strong>SSAO</strong>(Screen-Space AO)가 대표적입니다
-        (<a href="#screenspace">스크린 스페이스 효과</a>의 일종).</p>
+        (<a class="btn-link" href="#screenspace">스크린 스페이스 효과</a>의 일종).</p>
 
       <div class="demo">
         <div class="demo-title">AO 껐을 때 vs 켰을 때 (구석의 접촉 그늘)</div>

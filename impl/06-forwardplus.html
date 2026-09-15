@@ -100,7 +100,7 @@
     타일 절두체는 <strong>깊이(z) 방향으로는 나뉘지 않습니다.</strong> 근/원 평면을 타일 안 픽셀들의 최소·최대 깊이로
     좁히더라도, <em>z로 길쭉하게 늘어선 장면</em>(예: 긴 복도)에서는 한 타일의 near–far 사이가 넓어져, 실제로는 그 픽셀에
     안 닿는 광원이 <strong>false positive</strong>로 목록에 끼기 쉽습니다. 이 깊이 방향 낭비를 없애려고 화면을 <em>깊이까지</em>
-    3D 셀로 쪼갠 것이 <strong>Clustered Shading</strong>입니다 — 다음 페이지(<a href="./06-clustered.html">06-clustered</a>)에서
+    3D 셀로 쪼갠 것이 <strong>Clustered Shading</strong>입니다 — 다음 페이지(<a class="btn-link" href="./06-clustered.html">06-clustered</a>)에서
     이어집니다.
   </div>
 
@@ -367,7 +367,7 @@ float4 main(float4 posH : SV_Position, PSIn i) : SV_Target {
   </div>
   <p>
     깊이 방향 false positive가 문제가 될 만큼 z로 복잡한 장면이라면, 화면을 깊이까지 3D 셀로 쪼개는
-    <strong><a href="./06-clustered.html">Clustered Shading</a></strong>으로 넘어가는 것이 자연스러운 다음 수순입니다.
+    <strong><a class="btn-link" href="./06-clustered.html">Clustered Shading</a></strong>으로 넘어가는 것이 자연스러운 다음 수순입니다.
   </p>
 
   <!-- =========================================================
@@ -376,22 +376,22 @@ float4 main(float4 posH : SV_Position, PSIn i) : SV_Target {
   <h2 style="margin-top:44px;">6. 더 읽기</h2>
   <ul>
     <li>
-      <a href="https://takahiroharada.wordpress.com/wp-content/uploads/2015/04/forward_plus.pdf" target="_blank" rel="noopener">
+      <a class="btn-link external" href="https://takahiroharada.wordpress.com/wp-content/uploads/2015/04/forward_plus.pdf" target="_blank" rel="noopener">
         Takahiro Harada, Jay McKee, Jason C. Yang — "Forward+: Bringing Deferred Lighting to the Next Level" (Eurographics 2012)</a>
       — Forward+를 정립한 원 논문.
     </li>
     <li>
-      <a href="https://efficientshading.com/wp-content/uploads/tiled_shading_preprint.pdf" target="_blank" rel="noopener">
+      <a class="btn-link external" href="https://efficientshading.com/wp-content/uploads/tiled_shading_preprint.pdf" target="_blank" rel="noopener">
         Ola Olsson, Ulf Assarsson — "Tiled Shading" (Journal of Graphics Tools, 2011)</a>
       — 타일드 포워드/디퍼드의 이론적 토대.
     </li>
     <li>
-      <a href="https://www.aortiz.me/2018/12/21/CG.html" target="_blank" rel="noopener">
+      <a class="btn-link external" href="https://www.aortiz.me/2018/12/21/CG.html" target="_blank" rel="noopener">
         Ángel Ortiz — "A Primer On Efficient Rendering Algorithms &amp; Clustered Shading" (2018)</a>
       — 타일드→클러스터드로 이어지는 실전 정리.
     </li>
     <li>
-      <a href="https://www.gdcvault.com/play/1015493/A-Tiled-Deferred-Shading-Approach" target="_blank" rel="noopener">
+      <a class="btn-link external" href="https://www.gdcvault.com/play/1015493/A-Tiled-Deferred-Shading-Approach" target="_blank" rel="noopener">
         DICE / Frostbite — "Deferred / Tiled Shading" (SIGGRAPH·GDC 강연 자료)</a>
       — 프로덕션 엔진의 타일드 컬링 적용 사례.
     </li>

@@ -134,7 +134,7 @@ std::vector&lt;XMFLOAT2&gt; makeWindCells() {
   <!-- ─────────────────────────────────────────── -->
   <h2>3. 버텍스 셰이더 — 잔디를 바람 방향으로 눕히기</h2>
   <p>
-    잔디는 <a href="./08-geometry.html">지오메트리 잔디</a>의 인스턴싱을 그대로 쓰되, 흔드는 방식만
+    잔디는 <a class="btn-link" href="./08-geometry.html">지오메트리 잔디</a>의 인스턴싱을 그대로 쓰되, 흔드는 방식만
     바람장으로 바꿉니다. 각 blade가 자기 뿌리 위치 <code>p.xz</code>를 <code>windAt()</code>에 넣어
     <strong>발밑 바람 벡터 <code>wv</code></strong>를 얻고, 그 방향으로 <code>t²</code> 가중해 눕힙니다.
     바람이 셀수록 <strong>끝을 살짝 눌러</strong>(<code>p.y</code> 감소) 실제로 휘어 눕는 느낌을 냅니다.
@@ -221,7 +221,7 @@ float4 main(PSIn i) : SV_Target {
   <p>
     바람장을 눈으로 보려면 셀마다 <strong>바람 방향을 가리키는 화살표</strong>를 그립니다. 화살표 한 개는
     자루+머리를 <code>LINESTRIP</code> 5정점으로 만들고(밑→끝→머리왼쪽, 끝→머리오른쪽), 셀 좌표를
-    <strong>per-instance</strong>로 넘겨 <a href="./08-geometry.html">지오메트리 잔디</a>와 같은 인스턴싱으로
+    <strong>per-instance</strong>로 넘겨 <a class="btn-link" href="./08-geometry.html">지오메트리 잔디</a>와 같은 인스턴싱으로
     169개 셀을 <strong>한 번에</strong> 그립니다. 정점 데이터 <code>aP.x</code>는 자루를 따라 0(밑)~1(끝),
     <code>aP.y</code>는 머리의 좌우 벌어짐입니다.
   </p>

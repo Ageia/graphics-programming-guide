@@ -31,7 +31,7 @@
     <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>), 행렬 <strong>행 우선</strong> 저장,
     <strong>왼손 좌표계</strong>, 클립 z 범위 <strong>[0, 1]</strong>. 뷰-투영은 DirectXMath 관례대로
     <code>view * proj</code> 순서로 곱합니다. blade 메시·인스턴스 버퍼·입력 레이아웃은
-    <a href="./08-geometry.html">지오메트리 잔디</a>와 동일하다고 가정합니다.
+    <a class="btn-link" href="./08-geometry.html">지오메트리 잔디</a>와 동일하다고 가정합니다.
   </div>
 
     <h2>▶ 실시간 데모</h2>
@@ -107,7 +107,7 @@ XMFLOAT2 pickGround(XMFLOAT3 eye, XMFLOAT3 rayDir) {
     반경보다 작을수록 영향력이 커야 하므로 <code>smoothstep(radius, 0, d)</code>로 <strong>0~1 영향력</strong>을
     만듭니다(반경에서 0, 중심에서 1). 바깥 방향 <code>away = normalize(toB)</code>로 잎을 밀고, 동시에 높이를
     깎아 <strong>납작</strong>하게 만듭니다. 밟힌 부분은 색을 살짝 바래게 해 시각적으로도 구분합니다.
-    바람 <code>sway</code>는 <a href="./08-geometry.html">지오메트리 잔디</a>와 같은 <code>t²·sin</code> 공식입니다.
+    바람 <code>sway</code>는 <a class="btn-link" href="./08-geometry.html">지오메트리 잔디</a>와 같은 <code>t²·sin</code> 공식입니다.
   </p>
 
   <div class="code">

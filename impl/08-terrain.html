@@ -18,7 +18,7 @@
   <h1>지형 텍스처 — 원경 LOD, 사실상 공짜</h1>
   <p class="lead">
     카메라에서 아주 멀어지면 잔디 한 포기는 화면에서 한 픽셀도 채우지 못합니다. 그런 원경에까지
-    <a href="./08-geometry.html">지오메트리</a>나 <a href="./08-shell.html">셸</a>을 쓰는 건 낭비입니다.
+    <a class="btn-link" href="./08-geometry.html">지오메트리</a>나 <a class="btn-link" href="./08-shell.html">셸</a>을 쓰는 건 낭비입니다.
     지형 텍스처는 먼 거리를 <strong>평면에 잔디 텍스처 한 장</strong>으로 처리합니다. 정점도, 오버드로우도
     거의 0이라 <strong>LOD 스택의 가장 값싼 마지막 단계</strong>입니다. 입체감은 없지만 멀면 어차피 안 보입니다.
     이 페이지에서는 픽셀 셰이더에서 <strong>절차적 value noise</strong>로 잔디 색을 변주해 텍스처를 만들고,
@@ -188,7 +188,7 @@ float4 main(PSIn i) : SV_Target {
   <p>
     순수 텍스처 지형은 <strong>입체감이 없어</strong> 가까이서 보면 납작합니다. 그래서 실제 게임은 카메라 가까운
     영역에만 <strong>실제 지오메트리 blade를 소량 겹칩니다</strong>. 원경은 텍스처(공짜), 근경은 blade(품질) —
-    이 조합이 “근경에 blade 겹치기”의 정체입니다. blade는 <a href="./08-geometry.html">지오메트리 잔디</a>의
+    이 조합이 “근경에 blade 겹치기”의 정체입니다. blade는 <a class="btn-link" href="./08-geometry.html">지오메트리 잔디</a>의
     메시·인스턴싱을 그대로 재사용하되, 필드 반경을 작게(예: 9) 잡아 <strong>가까운 곳에만 소량</strong> 뿌립니다.
   </p>
 
@@ -290,11 +290,11 @@ VSOut main(VSIn i) {
 
   <div class="callout perf">
     <span class="tag">LOD 스택의 마지막 단계</span>
-    실제 게임은 거리에 따라 기법을 갈아 끼웁니다. 가장 가까운 곳은 <a href="./08-geometry.html">지오메트리 blade</a>
-    (최고 품질), 중거리는 <a href="./08-billboard.html">빌보드</a>나 <a href="./08-shell.html">셸</a>, 그리고 원경은
+    실제 게임은 거리에 따라 기법을 갈아 끼웁니다. 가장 가까운 곳은 <a class="btn-link" href="./08-geometry.html">지오메트리 blade</a>
+    (최고 품질), 중거리는 <a class="btn-link" href="./08-billboard.html">빌보드</a>나 <a class="btn-link" href="./08-shell.html">셸</a>, 그리고 원경은
     <strong>이 지형 텍스처</strong>(최저 비용)입니다. 화면 면적의 대부분을 차지하는 원경을 가장 싼 기법으로 덮고,
     비싼 지오메트리는 눈앞의 좁은 영역에만 쓰는 것 — 이것이 잔디 LOD 스택의 핵심 아이디어입니다.
-    거리 밴드 전환과 페이드는 <a href="./07-lod.html">7장 LOD·컬링</a>의 원리를 그대로 적용합니다.
+    거리 밴드 전환과 페이드는 <a class="btn-link" href="./07-lod.html">7장 LOD·컬링</a>의 원리를 그대로 적용합니다.
   </div>
 
   <h2>정리</h2>

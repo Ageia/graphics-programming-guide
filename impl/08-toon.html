@@ -21,7 +21,7 @@
     <strong>2~3단계로 밴딩</strong>(<code>floor(x*bands)/bands</code>)해 만화 같은 계단 톤을 만들고,
     뿌리는 어둡게(AO 그라디언트), 끝은 밝게 하이라이트를 줍니다. blade는 사실적 잔디보다
     <strong>넓적한 잎</strong>으로 만들어 실루엣을 강조하고, 바람은 여전히 버텍스에서 <code>sin</code>으로 흔듭니다.
-    앞서 만든 <a href="./08-geometry.html">지오메트리 잔디</a>의 인스턴싱 파이프라인을 그대로 재사용하고,
+    앞서 만든 <a class="btn-link" href="./08-geometry.html">지오메트리 잔디</a>의 인스턴싱 파이프라인을 그대로 재사용하고,
     <strong>blade 폭과 픽셀 셰이더의 밴딩</strong>만 갈아끼우면 되는 게 이 기법의 매력입니다.
   </p>
 
@@ -60,7 +60,7 @@
   <!-- ─────────────────────────────────────────── -->
   <h2>1. 넓적한 잎 — 폭만 키운 blade</h2>
   <p>
-    툰 스타일의 실루엣은 <strong>넓적한 잎</strong>에서 나옵니다. 메시 자체는 <a href="./08-geometry.html">지오메트리
+    툰 스타일의 실루엣은 <strong>넓적한 잎</strong>에서 나옵니다. 메시 자체는 <a class="btn-link" href="./08-geometry.html">지오메트리
     잔디</a>에서 만든 삼각형 스트립 blade를 <strong>그대로 재사용</strong>합니다. 정점당 데이터는 여전히
     <code>(side, t)</code> 두 값뿐이고, 인스턴스 버퍼도 동일합니다. 달라지는 건 버텍스 셰이더에서 폭을 계산하는
     수식 하나입니다. 사실적 blade는 <code>(1-t)*0.06</code>으로 위로 갈수록 급히 좁아졌지만, 툰은
@@ -113,7 +113,7 @@ std::vector&lt;BladeVertex&gt; makeBlade(int SEG) {
   <!-- ─────────────────────────────────────────── -->
   <h2>2. 필드 흩뿌리기 (지오메트리와 동일)</h2>
   <p>
-    포기의 위치·방향·키·위상은 <a href="./08-geometry.html">지오메트리 잔디</a>와 같은 방식으로
+    포기의 위치·방향·키·위상은 <a class="btn-link" href="./08-geometry.html">지오메트리 잔디</a>와 같은 방식으로
     <strong>결정론적 해시 난수</strong>로 원판 안에 흩뿌립니다. 반지름을 <code>sqrt(rand)</code>로 뽑아
     중심 쏠림을 막는 것도 동일합니다. 재사용이므로 짧게만 싣습니다.
   </p>
@@ -294,7 +294,7 @@ float4 main(PSIn i) : SV_Target {
   <!-- ─────────────────────────────────────────── -->
   <h2>6. 드로우 — 지오메트리와 동일한 단일 콜</h2>
   <p>
-    렌더 경로는 <a href="./08-geometry.html">지오메트리 잔디</a>와 완전히 같습니다. 두 정점 버퍼(blade·인스턴스)를
+    렌더 경로는 <a class="btn-link" href="./08-geometry.html">지오메트리 잔디</a>와 완전히 같습니다. 두 정점 버퍼(blade·인스턴스)를
     슬롯 0·1에 함께 바인딩하고, <code>TRIANGLESTRIP</code>으로 <code>DrawInstanced</code> 한 번.
     셰이더만 툰 버전으로 바꾸고, 매 프레임 밴드 수를 cbuffer로 갱신하면 됩니다.
   </p>

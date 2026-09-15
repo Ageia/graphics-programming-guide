@@ -311,3 +311,31 @@ button.ghost { background: transparent; color: var(--text-dim); border: 1px soli
   border-top: 1px solid var(--border);
   margin-top: 60px;
 }
+
+/* ---------- 버튼형 링크(.btn-link): 참고·참조·페이지 이동 링크를 파란 텍스트 대신 깔끔한 버튼(칩)으로 ---------- */
+.btn-link {
+  display: inline-flex;
+  align-items: center;
+  gap: .3em;
+  vertical-align: baseline;
+  padding: .1em .62em;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--accent2);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: .9em;
+  line-height: 1.5;
+  transition: border-color .15s ease, background .15s ease, color .15s ease;
+}
+.btn-link:hover {
+  border-color: var(--accent2);
+  color: var(--accent);
+  background: rgba(255, 255, 255, .06);
+}
+.btn-link.external::after {
+  content: "\2197"; /* ↗ */
+  font-size: .82em;
+  opacity: .65;
+}

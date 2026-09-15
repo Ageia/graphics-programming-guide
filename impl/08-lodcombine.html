@@ -18,9 +18,9 @@
   <h1>LOD 통합 씬 — 근:지오메트리 · 중:빌보드 · 원:텍스처</h1>
   <p class="lead">
     8장의 마지막이자, 실제 게임이 실제로 하는 방식입니다. 앞서 따로 만든 세 기법을 <strong>한 씬에서
-    거리별로 동시에</strong> 씁니다. 카메라에서 <strong>가까우면 진짜 blade</strong>(<a href="./08-geometry.html">지오메트리</a>),
-    <strong>중간이면 빌보드 카드</strong>(<a href="./08-billboard.html">빌보드</a>),
-    <strong>멀면 지형 텍스처</strong>(<a href="./08-terrain.html">지형 텍스처</a>)로 자동 전환합니다.
+    거리별로 동시에</strong> 씁니다. 카메라에서 <strong>가까우면 진짜 blade</strong>(<a class="btn-link" href="./08-geometry.html">지오메트리</a>),
+    <strong>중간이면 빌보드 카드</strong>(<a class="btn-link" href="./08-billboard.html">빌보드</a>),
+    <strong>멀면 지형 텍스처</strong>(<a class="btn-link" href="./08-terrain.html">지형 텍스처</a>)로 자동 전환합니다.
     핵심은 <strong>경계에서의 페이드</strong>입니다. 거리 구간별로 알파를 <code>smoothstep</code>으로 넘겨
     지오→빌보드→텍스처가 겹치는 구간에서 부드럽게 교대해 <strong>팝핑(툭 튀는 전환)</strong>을 없앱니다.
     이 페이지가 8장의 마지막이므로 끝에 <strong>10가지 기법 전체를 총정리</strong>합니다.
@@ -92,13 +92,13 @@ static_assert(sizeof(LodFrameCB) % 16 == 0, "cbuffer는 16바이트 배수");</c
     학습 예제는 세 패스가 <strong>같은 필드를 전부 그리되</strong> 셰이더에서 페이드로 걸러냅니다(간단함).
     실전에서는 CPU/컴퓨트가 프레임마다 <strong>거리 링별로 인스턴스를 분류</strong>해, 근거리 인스턴스만
     지오메트리 버퍼에, 중거리만 빌보드 버퍼에 <code>Append</code>합니다. 그러면 멀리 있는 blade의
-    버텍스를 아예 실행하지 않아 낭비가 사라집니다(<a href="./07-lod.html">7장 LOD·컬링</a> 참고).
+    버텍스를 아예 실행하지 않아 낭비가 사라집니다(<a class="btn-link" href="./07-lod.html">7장 LOD·컬링</a> 참고).
   </div>
 
   <!-- ─────────────────────────────────────────── -->
   <h2>2. 원거리 — 노이즈 텍스처 지면</h2>
   <p>
-    가장 멀리는 <a href="./08-terrain.html">지형 텍스처</a>입니다. 커다란 쿼드 하나에 절차적 노이즈로
+    가장 멀리는 <a class="btn-link" href="./08-terrain.html">지형 텍스처</a>입니다. 커다란 쿼드 하나에 절차적 노이즈로
     잔디색을 칠해, 개별 blade 없이도 <strong>멀리서 초원처럼</strong> 보이게 합니다. 여러 옥타브의 값 노이즈를
     섞어 얼룩덜룩한 톤을 만듭니다. 디버그 토글(<code>uRings</code>)이 켜지면 <code>FAR</code> 바깥 영역에
     파랑끼를 더해 "여기는 원경 텍스처 구역"임을 보여줍니다.
@@ -145,7 +145,7 @@ float4 ps_main(GVSOut i) : SV_Target {
   <!-- ─────────────────────────────────────────── -->
   <h2>3. 중거리 — 빌보드 카드 (페이드 인/아웃)</h2>
   <p>
-    <a href="./08-billboard.html">빌보드</a>는 카메라를 향하는 알파 카드입니다. 여기서는 <strong>두 개의
+    <a class="btn-link" href="./08-billboard.html">빌보드</a>는 카메라를 향하는 알파 카드입니다. 여기서는 <strong>두 개의
     <code>smoothstep</code></strong>으로 가시성을 만듭니다. <code>fin</code>은 <code>NEAR</code> 근처에서
     0→1로 켜지고(근경에선 지오메트리에 양보해 숨음), <code>fout</code>은 <code>FAR</code> 근처에서 1→0으로
     꺼집니다(원경에선 텍스처에 양보). 둘을 곱한 <code>vis = fin*fout</code>이 곧 알파이고, 너무 작으면
@@ -232,7 +232,7 @@ float4 main(PSIn i) : SV_Target {
   <!-- ─────────────────────────────────────────── -->
   <h2>4. 근거리 — 지오메트리 blade (페이드 아웃)</h2>
   <p>
-    가장 가까이는 <a href="./08-geometry.html">진짜 blade</a>입니다. 각 blade가 카메라까지 거리를 재고
+    가장 가까이는 <a class="btn-link" href="./08-geometry.html">진짜 blade</a>입니다. 각 blade가 카메라까지 거리를 재고
     <code>fade = 1 - smoothstep(NEAR*0.7, NEAR, dist)</code>로 <strong><code>NEAR</code>를 넘어가면
     사라지게</strong> 합니다. 페이드가 0에 가까워지면 <strong>키를 줄여</strong>(<code>p.y += t*h*fade</code>)
     지면으로 <strong>가라앉히고</strong>, 완전히 0이면 픽셀에서 <code>discard</code>합니다. 이렇게 하면
@@ -387,15 +387,15 @@ float4 main(PSIn i) : SV_Target {
       <tr><th>#</th><th>기법</th><th>한 줄 요약</th><th>적합한 거리 / 상황</th></tr>
     </thead>
     <tbody>
-      <tr><td>1</td><td><a href="./08-geometry.html">지오메트리 인스턴싱</a></td><td>진짜 blade 메시를 수만 개 인스턴싱, 버텍스 <code>sin</code> 바람</td><td>근거리 · 최고 품질</td></tr>
-      <tr><td>2</td><td><a href="./08-billboard.html">빌보드 / 크로스쿼드</a></td><td>카메라 향하는 알파 카드, 알파 테스트로 오버드로우 억제</td><td>중거리 · 밀도 확보</td></tr>
-      <tr><td>3</td><td><a href="./08-shell.html">셸 텍스처링</a></td><td>여러 층을 쌓아 털처럼, 층마다 알파 컷</td><td>짧은 잔디 · 카펫</td></tr>
-      <tr><td>4</td><td><a href="./08-terrain.html">지형 텍스처</a></td><td>지면에 잔디색을 직접 칠해 blade 없이 초원</td><td>원거리 · 배경</td></tr>
-      <tr><td>5</td><td><a href="./08-raymarch.html">레이마칭 잔디</a></td><td>픽셀에서 볼륨을 행진해 잔디 밀도를 적분</td><td>스타일 · 셰이더 아트</td></tr>
-      <tr><td>6</td><td><a href="./08-trample.html">밟힘 / 인터랙션</a></td><td>플레이어 접촉으로 잔디를 눕히는 상호작용 맵</td><td>게임플레이 피드백</td></tr>
-      <tr><td>7</td><td><a href="./08-bezier.html">베지어 곡선 blade</a></td><td>제어점 곡선으로 자연스러운 휘어짐</td><td>근거리 · 고급 실루엣</td></tr>
-      <tr><td>8</td><td><a href="./08-toon.html">툰 / 스타일라이즈드</a></td><td>밝기를 밴딩해 만화 톤, 넓은 잎</td><td>스타일 게임 · 모바일</td></tr>
-      <tr><td>9</td><td><a href="./08-wind.html">통합 바람 그리드</a></td><td>바람장 + 이동 vorticle로 밭 전체가 함께 눕음</td><td>대규모 야외 · 분위기</td></tr>
+      <tr><td>1</td><td><a class="btn-link" href="./08-geometry.html">지오메트리 인스턴싱</a></td><td>진짜 blade 메시를 수만 개 인스턴싱, 버텍스 <code>sin</code> 바람</td><td>근거리 · 최고 품질</td></tr>
+      <tr><td>2</td><td><a class="btn-link" href="./08-billboard.html">빌보드 / 크로스쿼드</a></td><td>카메라 향하는 알파 카드, 알파 테스트로 오버드로우 억제</td><td>중거리 · 밀도 확보</td></tr>
+      <tr><td>3</td><td><a class="btn-link" href="./08-shell.html">셸 텍스처링</a></td><td>여러 층을 쌓아 털처럼, 층마다 알파 컷</td><td>짧은 잔디 · 카펫</td></tr>
+      <tr><td>4</td><td><a class="btn-link" href="./08-terrain.html">지형 텍스처</a></td><td>지면에 잔디색을 직접 칠해 blade 없이 초원</td><td>원거리 · 배경</td></tr>
+      <tr><td>5</td><td><a class="btn-link" href="./08-raymarch.html">레이마칭 잔디</a></td><td>픽셀에서 볼륨을 행진해 잔디 밀도를 적분</td><td>스타일 · 셰이더 아트</td></tr>
+      <tr><td>6</td><td><a class="btn-link" href="./08-trample.html">밟힘 / 인터랙션</a></td><td>플레이어 접촉으로 잔디를 눕히는 상호작용 맵</td><td>게임플레이 피드백</td></tr>
+      <tr><td>7</td><td><a class="btn-link" href="./08-bezier.html">베지어 곡선 blade</a></td><td>제어점 곡선으로 자연스러운 휘어짐</td><td>근거리 · 고급 실루엣</td></tr>
+      <tr><td>8</td><td><a class="btn-link" href="./08-toon.html">툰 / 스타일라이즈드</a></td><td>밝기를 밴딩해 만화 톤, 넓은 잎</td><td>스타일 게임 · 모바일</td></tr>
+      <tr><td>9</td><td><a class="btn-link" href="./08-wind.html">통합 바람 그리드</a></td><td>바람장 + 이동 vorticle로 밭 전체가 함께 눕음</td><td>대규모 야외 · 분위기</td></tr>
       <tr><td>10</td><td>LOD 통합 씬 <em>(이 페이지)</em></td><td>근:지오 · 중:빌보드 · 원:텍스처를 거리 페이드로 결합</td><td>실전 프로덕션</td></tr>
     </tbody>
   </table>

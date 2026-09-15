@@ -339,7 +339,7 @@ float4 main(PSIn i) : SV_Target {
     위 예제는 “앞에서부터 n개만” 그리는 근사입니다. 실전에서는 <strong>컴퓨트 셰이더</strong>가 프러스텀·거리
     테스트를 돌려 살아남은 인스턴스만 <code>AppendStructuredBuffer</code>에 모으고, 그 개수를
     <code>DrawInstancedIndirect</code>로 넘깁니다(CPU가 개수를 몰라도 됨). 프러스텀 평면 추출은
-    <a href="./07-lod.html">7장 LOD·컬링</a>에서 다뤘습니다. 저사양 기기는 버텍스 SSBO가 불안정하니
+    <a class="btn-link" href="./07-lod.html">7장 LOD·컬링</a>에서 다뤘습니다. 저사양 기기는 버텍스 SSBO가 불안정하니
     RenderTexture(UAV) 우회를 씁니다.
   </div>
 

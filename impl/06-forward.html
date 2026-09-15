@@ -228,7 +228,7 @@ float4 main(PSIn i) : SV_Target {
     <strong>라이트 컬링(light culling)</strong>을 넣는 것: 화면을 타일(또는 클러스터)로 쪼개 각 타일이 <em>실제로 닿는
     광원 목록만</em> 만든 뒤, 픽셀은 그 짧은 목록만 돕니다. 이렇게 발전한 경로가 <strong>Forward+ (Tiled Forward)</strong>로,
     포워드의 장점(투명·MSAA·재질 자유)을 지키면서 광원 확장성 문제만 해결합니다. 자세한 구현은
-    <a href="./06-forwardplus.html">Forward+ (Tiled Forward)</a> 페이지에서 이어집니다.
+    <a class="btn-link" href="./06-forwardplus.html">Forward+ (Tiled Forward)</a> 페이지에서 이어집니다.
   </div>
 
   <!-- =========================================================
@@ -273,16 +273,16 @@ float4 main(PSIn i) : SV_Target {
   <h2 style="margin-top:44px;">6. 더 읽기</h2>
   <ul>
     <li>
-      Takahiro Harada, Jay McKee, Jason C. Yang, <a href="https://takahiroharada.wordpress.com/wp-content/uploads/2015/04/forward_plus.pdf" target="_blank" rel="noopener">"Forward+: Bringing Deferred Lighting to the Next Level"</a> (Eurographics 2012) — 타일드 라이트 컬링으로 포워드를 확장한 기법의 원전.
+      Takahiro Harada, Jay McKee, Jason C. Yang, <a class="btn-link external" href="https://takahiroharada.wordpress.com/wp-content/uploads/2015/04/forward_plus.pdf" target="_blank" rel="noopener">"Forward+: Bringing Deferred Lighting to the Next Level"</a> (Eurographics 2012) — 타일드 라이트 컬링으로 포워드를 확장한 기법의 원전.
     </li>
     <li>
-      Epic Games, <a href="https://dev.epicgames.com/documentation/en-us/unreal-engine/forward-shading-renderer-in-unreal-engine" target="_blank" rel="noopener">"Forward Shading Renderer" (Unreal Engine 공식 문서)</a> — VR·MSAA 위주로 포워드를 쓰는 실무 근거와 설정.
+      Epic Games, <a class="btn-link external" href="https://dev.epicgames.com/documentation/en-us/unreal-engine/forward-shading-renderer-in-unreal-engine" target="_blank" rel="noopener">"Forward Shading Renderer" (Unreal Engine 공식 문서)</a> — VR·MSAA 위주로 포워드를 쓰는 실무 근거와 설정.
     </li>
     <li>
-      Joey de Vries, <a href="https://learnopengl.com/Advanced-Lighting/Deferred-Shading" target="_blank" rel="noopener">"Deferred Shading" (LearnOpenGL)</a> — 포워드와 디퍼드의 비용을 나란히 비교하며 <code>픽셀 × 광원</code> 폭증을 설명(이 페이지 셰이더의 원형).
+      Joey de Vries, <a class="btn-link external" href="https://learnopengl.com/Advanced-Lighting/Deferred-Shading" target="_blank" rel="noopener">"Deferred Shading" (LearnOpenGL)</a> — 포워드와 디퍼드의 비용을 나란히 비교하며 <code>픽셀 × 광원</code> 폭증을 설명(이 페이지 셰이더의 원형).
     </li>
     <li>
-      Ola Olsson, Markus Billeter, Ulf Assarsson, <a href="https://efficientshading.com/wp-content/uploads/clustered_shading_preprint.pdf" target="_blank" rel="noopener">"Clustered Deferred and Forward Shading"</a> (HPG 2012) — 포워드/디퍼드 경로를 클러스터드로 통합·비교한 후속 연구.
+      Ola Olsson, Markus Billeter, Ulf Assarsson, <a class="btn-link external" href="https://efficientshading.com/wp-content/uploads/clustered_shading_preprint.pdf" target="_blank" rel="noopener">"Clustered Deferred and Forward Shading"</a> (HPG 2012) — 포워드/디퍼드 경로를 클러스터드로 통합·비교한 후속 연구.
     </li>
   </ul>
 

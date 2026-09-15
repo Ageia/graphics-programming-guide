@@ -27,7 +27,7 @@
 
   <h1>Visibility Buffer — 삼각형 ID를 그리고 재질은 미룬다</h1>
   <p class="lead">
-    <a href="./06-deferred.html">디퍼드 렌더링</a>은 조명을 미뤘습니다. Visibility Buffer는 한 걸음 더 나아가
+    <a class="btn-link" href="./06-deferred.html">디퍼드 렌더링</a>은 조명을 미뤘습니다. Visibility Buffer는 한 걸음 더 나아가
     <strong>재질(텍스처·셰이딩)까지 미룹니다.</strong> 지오메트리 패스는 픽셀마다 두꺼운 재질 데이터를 쓰는 대신
     <strong>"이 픽셀에 어느 삼각형이 보이나"</strong>라는 아주 작은 정보 — <code>(instanceID, triangleID)</code> —
     한 조각만 <strong>정수 텍스처 한 장</strong>에 기록합니다. 그리고 나중에 풀스크린 셰이딩 패스에서 그 ID로
@@ -51,7 +51,7 @@
   <h2 style="margin-top:44px;">1. 원리 — G-buffer의 대역폭을 어떻게 줄이나</h2>
   <p>
     직관부터. <strong>디퍼드의 G-buffer는 "재료를 미리 다 인화해 둔 사진 여러 장"</strong>입니다. 픽셀마다 위치·법선·알베도·
-    스페큘러 같은 <em>두꺼운 재질 데이터</em>를 씁니다. <a href="./06-deferred.html">디퍼드 페이지</a>에서 손으로 세어 봤듯,
+    스페큘러 같은 <em>두꺼운 재질 데이터</em>를 씁니다. <a class="btn-link" href="./06-deferred.html">디퍼드 페이지</a>에서 손으로 세어 봤듯,
     위치 8B + 법선 8B + 알베도스펙 4B = <strong>픽셀당 약 20바이트</strong>. 지오메트리 패스에서 이걸 쓰고, 라이팅 패스에서
     또 읽습니다. 화면이 클수록(4K = 830만 픽셀) 이 <strong>메모리 대역폭</strong>이 프레임의 발목을 잡습니다.
   </p>
@@ -347,7 +347,7 @@ float4 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     채택은 <strong>Nanite(UE5)</strong>로, 소프트웨어 래스터라이즈로 만든 <em>visibility buffer</em> 위에서 별도의
     <em>material pass</em>가 재질을 리졸브합니다. The Filmic Games, Activision 계열 엔진에서도 비슷한 구조가 보고됩니다.
     <strong>고해상도(4K)·수백만 인스턴스·GPU-driven</strong> 파이프라인이라면 강력한 후보입니다. 반대로 재질 종류가 적고
-    해상도가 중간이라면 평범한 <a href="./06-deferred.html">디퍼드</a>가 더 단순하고 충분합니다.
+    해상도가 중간이라면 평범한 <a class="btn-link" href="./06-deferred.html">디퍼드</a>가 더 단순하고 충분합니다.
   </div>
 
   <!-- =========================================================
@@ -356,13 +356,13 @@ float4 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target
   <h2 style="margin-top:44px;">6. 더 읽기</h2>
   <ul>
     <li>
-      <a href="https://jcgt.org/published/0002/02/04/" target="_blank" rel="noopener">Christoph Schied &amp; Carsten Dachsbacher — "The Visibility Buffer: A Cache-Friendly Approach to Deferred Shading" (JCGT, 2013)</a>
+      <a class="btn-link external" href="https://jcgt.org/published/0002/02/04/" target="_blank" rel="noopener">Christoph Schied &amp; Carsten Dachsbacher — "The Visibility Buffer: A Cache-Friendly Approach to Deferred Shading" (JCGT, 2013)</a>
     </li>
     <li>
-      <a href="https://www.gdcvault.com/play/1023307/Deferred-Texturing-and-Software-Vertex" target="_blank" rel="noopener">Sebastian Aaltonen — "Deferred Texturing" / GPU-driven rendering (2015)</a>
+      <a class="btn-link external" href="https://www.gdcvault.com/play/1023307/Deferred-Texturing-and-Software-Vertex" target="_blank" rel="noopener">Sebastian Aaltonen — "Deferred Texturing" / GPU-driven rendering (2015)</a>
     </li>
     <li>
-      <a href="https://advances.realtimerendering.com/s2021/index.html" target="_blank" rel="noopener">Brian Karis, Rune Stachowiak et al. — "Nanite: A Deep Dive" (SIGGRAPH 2021, Advances in Real-Time Rendering)</a>
+      <a class="btn-link external" href="https://advances.realtimerendering.com/s2021/index.html" target="_blank" rel="noopener">Brian Karis, Rune Stachowiak et al. — "Nanite: A Deep Dive" (SIGGRAPH 2021, Advances in Real-Time Rendering)</a>
     </li>
   </ul>
 

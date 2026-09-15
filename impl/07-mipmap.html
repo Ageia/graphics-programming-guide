@@ -38,7 +38,7 @@
 
   <div class="callout">
     <span class="tag">전제</span>
-    이 페이지는 3장의 <strong>텍스처 매핑</strong>(<a href="./03-texmap.html" style="color:var(--accent)">03-texmap</a>)이
+    이 페이지는 3장의 <strong>텍스처 매핑</strong>(<a class="btn-link" href="./03-texmap.html">03-texmap</a>)이
     이미 돌아간다는 가정 위에서, 거기에 <strong>밉맵과 고급 필터링을 더하는</strong> 부분만 다룹니다.
     즉 이미지 → <code>ID3D11Texture2D</code> → SRV → 샘플러 → 픽셀 셰이더 UV 샘플링의 큰 줄기는 이미 안다고 보고,
     <strong>“어떻게 하면 흔들리지 않고 선명하게 샘플링하느냐”</strong>에 집중합니다.
@@ -244,7 +244,7 @@ context->PSSetSamplers(0, 1, samp.GetAddressOf());</code></pre>
     <strong>선형 공간으로 자동 디코딩</strong>해 주고, 렌더타깃이 <code>_SRGB</code>이면 출력 때
     다시 감마 인코딩해 줍니다. 조명·블렌딩·<strong>밉 다운샘플(평균)</strong>은 반드시
     <strong>선형 공간</strong>에서 해야 물리적으로 옳습니다. 감마 공간에서 평균을 내면 색이 어두워집니다.
-    자세한 배경은 <a href="./07-gamma.html" style="color:var(--accent)">감마 · 선형 색공간</a> 페이지를 보세요.
+    자세한 배경은 <a class="btn-link" href="./07-gamma.html">감마 · 선형 색공간</a> 페이지를 보세요.
   </p>
   <div class="callout gotcha">
     <span class="tag">함정</span>

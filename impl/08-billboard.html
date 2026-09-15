@@ -17,7 +17,7 @@
   <span class="impl-badge">IMPLEMENTATION · CHAPTER 8 · 2/10</span>
   <h1>빌보드 / 크로스쿼드 — 카메라를 향하는 텍스처 카드</h1>
   <p class="lead">
-    잔디 한 포기를 삼각형 스트립 메시로 만들었던 <a href="./08-geometry.html">지오메트리 방식</a>은 정점이 곧 비용이었습니다.
+    잔디 한 포기를 삼각형 스트립 메시로 만들었던 <a class="btn-link" href="./08-geometry.html">지오메트리 방식</a>은 정점이 곧 비용이었습니다.
     빌보드는 반대로 갑니다. 잔디 다발을 <strong>쿼드 한 장(4정점)</strong>에 텍스처로 압축해 정점을 극단적으로 줄이고,
     대신 <strong>카메라를 향해 회전(빌보드)</strong>시켜 언제나 정면으로 보이게 합니다.
     정점은 적지만 <strong>알파 카드가 서로 겹치는 오버드로우</strong>가 모바일에서 진짜 비용이 됩니다.
@@ -439,7 +439,7 @@ void createBlendStates(ID3D11Device* dev) {
 
   <div class="callout gotcha">
     <span class="tag">함정</span>
-    빌보드는 <a href="./08-geometry.html">지오메트리 잔디</a>와 달리 <strong>알파 카드</strong>라 “불투명이니 Z버퍼만 켜면
+    빌보드는 <a class="btn-link" href="./08-geometry.html">지오메트리 잔디</a>와 달리 <strong>알파 카드</strong>라 “불투명이니 Z버퍼만 켜면
     된다”가 그대로 통하지 않습니다. 알파 테스트로 폐기하면 통과 픽셀만 깊이에 기록되므로 대체로 깨끗하지만,
     카드끼리 반쯤 겹쳐 알파 경계가 만나는 곳에서 정렬 아티팩트가 남을 수 있습니다. 부드러운 경계를 원하면
     알파-투-커버리지(MSAA 필요)를 검토하세요.

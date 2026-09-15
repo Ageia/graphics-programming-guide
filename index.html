@@ -80,8 +80,8 @@
       <a href="#lod">LOD · 컬링</a>
     </div>
     <div class="nav-group">
-      <div class="nav-title">8. 캡스톤 · 잔디 렌더링</div>
-      <a href="impl/08-grass.html">잔디 렌더링 10기법 (C++/D3D11)</a>
+      <div class="nav-title">8. 실전 렌더링 기법</div>
+      <a href="#grass">잔디 렌더링 10기법</a>
     </div>
   </nav>
 
@@ -1037,6 +1037,15 @@ fn main(
         "볼 필요 없는 큰 덩어리"를 통째로 빠르게 걸러냅니다. LOD 전환 시 모델이 <em>툭 바뀌는(popping)</em> 걸 막으려
         두 단계를 잠깐 섞는 기법도 씁니다.</div>
     </section>
+
+    <section id="grass">
+      <!-- 구현 사례연구 페이지를 오른쪽 화면에 그대로 병합해 보여준다.
+           임베드 시 impl 페이지가 자기 상단바/네비를 숨기고(embedded), 높이를
+           postMessage로 알려와 iframe이 내용 높이에 맞춰져 내부 스크롤 없이 한 페이지처럼 보인다. -->
+      <div class="embed-frame">
+        <iframe id="grass-embed" src="impl/08-grass.html" title="잔디 렌더링 10기법 (구현)"></iframe>
+      </div>
+    </section>
   </main>
 </div>
 
@@ -1052,17 +1061,23 @@ fn main(
 <script src="js/demos-adv4.js"></script>
 <script src="js/main.js"></script>
 <script>
-/* 임베드된 구현 사례연구(#paths iframe) 제어:
+/* 임베드된 구현 사례연구 iframe 제어(오른쪽 화면 병합용, 여러 개 지원):
+   - 메시지를 보낸 iframe을 e.source(contentWindow)로 찾아 그 iframe만 제어한다.
    - embedHeight: 내용 높이에 맞춰 iframe 높이 조절 → 내부 스크롤 없이 병합돼 보임.
    - embedLoaded: 지금 로드된 게 랜딩(iframe 초기 src)이면 뒤로가기 숨김, 임베드 안에서
      다른 세부 페이지로 이동해 온 것이면 뒤로가기 표시(hideBack/showBack 응답). */
 window.addEventListener("message", function (e) {
   if (!e.data) return;
-  var f = document.getElementById("paths-embed");
+  var frames = document.querySelectorAll(".embed-frame iframe");
+  var f = null;
+  for (var i = 0; i < frames.length; i++) {
+    if (frames[i].contentWindow === e.source) { f = frames[i]; break; }
+  }
+  if (!f) return;
   if (e.data.t === "embedHeight") {
-    if (f && e.data.h > 0) f.style.height = e.data.h + "px";
+    if (e.data.h > 0) f.style.height = e.data.h + "px";
   } else if (e.data.t === "embedLoaded") {
-    var landing = f ? (f.getAttribute("src") || "").split("/").pop() : "";
+    var landing = (f.getAttribute("src") || "").split("/").pop();
     var isLanding = e.data.page === landing;
     if (e.source) e.source.postMessage({ t: isLanding ? "hideBack" : "showBack" }, "*");
   }

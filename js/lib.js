@@ -245,7 +245,14 @@
     wrap.appendChild(lab); wrap.appendChild(input);
     container.appendChild(wrap);
     update();
-    return { input, set: (v) => { input.value = v; update(); }, get: () => parseFloat(input.value) };
+    // set은 "조용히" 값·라벨만 갱신하고 onInput은 발화하지 않는다.
+    // (set 안에서 onInput을 부르면, onInput이 다시 set을 호출하는 데모에서
+    //  무한 재귀가 생긴다 — 예: sprite의 UV 클램프.)
+    function setSilent(v) {
+      input.value = v;
+      val.textContent = fmt(input.value);
+    }
+    return { input, set: setSilent, get: () => parseFloat(input.value) };
   }
 
   function button(container, label, onClick, ghost) {

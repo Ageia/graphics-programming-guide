@@ -156,7 +156,9 @@
       sc = G.slider(ctl, { label: "c (î.y)", min: -2, max: 2, step: 0.1, value: 0, onInput: (v) => { c = v; draw(); } });
       sd = G.slider(ctl, { label: "d (ĵ.y)", min: -2, max: 2, step: 0.1, value: 1, onInput: (v) => { d = v; draw(); } });
       G.button(ctl, "초기화", () => {
+        a = 1; b = 0; c = 0; d = 1;
         sa.set(1); sb.set(0); sc.set(0); sd.set(1);
+        draw();
       });
     }
 

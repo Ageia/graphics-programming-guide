@@ -579,10 +579,12 @@
         Math.round(top[2] * alpha + bottom[2] * (1 - alpha)),
       ];
 
+      // 반지름 기준으로 중심 간격을 잡아 캔버스 비율과 무관하게 항상 겹치게 한다.
+      // 중심 간격 = 1.2r < 2r 이므로 두 원이 확실히 겹쳐 렌즈(알파 결과) 영역이 생긴다.
       const cy = h * 0.46;
-      const r = h * 0.24;
-      const cxA = w * 0.38;
-      const cxB = w * 0.62;
+      const r = Math.min(h * 0.30, w * 0.24);
+      const cxA = w / 2 - r * 0.6;
+      const cxB = w / 2 + r * 0.6;
 
       // 아래 원 (불투명)
       ctx.fillStyle = `rgb(${bottom[0]},${bottom[1]},${bottom[2]})`;

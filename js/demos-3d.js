@@ -642,19 +642,41 @@
       faces.sort((a, b) => a.az - b.az);
       faces.forEach((f) => {
         if (textured) {
-          drawTexQuad(ctx, texs[f.fi], f.sp);
+          const c = CUBE_F[f.fi].idx.map((i) => CUBE_V[i]); // 면의 3D 코너 4개
+          drawTexQuadPersp(ctx, texs[f.fi], c[0], c[1], c[2], c[3], mvp, w, h);
         } else {
           fillPoly(ctx, f.sp, f.col, "rgba(0,0,0,0.4)");
         }
       });
     }
 
-    // 정사각 텍스처를 투영된 사각형에 매핑. 두 삼각형으로 affine.
-    // sp 순서: 면 정점 [0,1,2,3] -> UV (0,0)(1,0)(1,1)(0,1)
-    function drawTexQuad(ctx, tex, sp) {
-      // 삼각형 1: 정점 0,1,2 / 삼각형 2: 정점 0,2,3
-      drawTexTri(ctx, tex, sp[0], sp[1], sp[2], [0,0],[1,0],[1,1]);
-      drawTexTri(ctx, tex, sp[0], sp[2], sp[3], [0,0],[1,1],[0,1]);
+    // 원근 보정 텍스처 매핑: 면을 3D에서 격자로 세분화 → 각 소셀을 project 후 affine.
+    // 소셀이 작을수록 아핀 오차(원근 왜곡)가 사라져 체크무늬가 똑바르게 보인다.
+    // 코너 UV: c0=(0,0) c1=(1,0) c2=(1,1) c3=(0,1)
+    function drawTexQuadPersp(ctx, tex, c0, c1, c2, c3, mvp, w, h) {
+      const GRID = 8;
+      // 면 위 (s,t) → 3D 위치 (평면이므로 이중선형 보간이 정확)
+      function pos3(s, t) {
+        const ax = c0[0] + (c1[0]-c0[0])*s, ay = c0[1] + (c1[1]-c0[1])*s, az = c0[2] + (c1[2]-c0[2])*s;
+        const bx = c3[0] + (c2[0]-c3[0])*s, by = c3[1] + (c2[1]-c3[1])*s, bz = c3[2] + (c2[2]-c3[2])*s;
+        return [ax + (bx-ax)*t, ay + (by-ay)*t, az + (bz-az)*t];
+      }
+      const pts = [];
+      for (let j = 0; j <= GRID; j++) {
+        pts[j] = [];
+        for (let i = 0; i <= GRID; i++) {
+          const s = i / GRID, t = j / GRID;
+          pts[j][i] = { p: project(mvp, pos3(s, t), w, h), u: s, v: t };
+        }
+      }
+      for (let j = 0; j < GRID; j++) {
+        for (let i = 0; i < GRID; i++) {
+          const A = pts[j][i], B = pts[j][i+1], C = pts[j+1][i+1], D = pts[j+1][i];
+          if (!A.p.vis || !B.p.vis || !C.p.vis || !D.p.vis) continue;
+          drawTexTri(ctx, tex, A.p, B.p, C.p, [A.u, A.v], [B.u, B.v], [C.u, C.v]);
+          drawTexTri(ctx, tex, A.p, C.p, D.p, [A.u, A.v], [C.u, C.v], [D.u, D.v]);
+        }
+      }
     }
     // affine 텍스처 삼각형: setTransform 으로 텍스처공간->화면 매핑, 클립 후 drawImage.
     function drawTexTri(ctx, tex, s0, s1, s2, t0, t1, t2) {
@@ -671,9 +693,17 @@
       const d = ((s2.y - s0.y) * (u1 - u0) - (s1.y - s0.y) * (u2 - u0)) / den;
       const e = s0.x - a * u0 - c * v0;
       const f = s0.y - b * u0 - d * v0;
+      // 클립 삼각형을 무게중심 기준으로 살짝 확장(세분화 소셀 사이 이음새 방지)
+      const gx = (s0.x + s1.x + s2.x) / 3, gy = (s0.y + s1.y + s2.y) / 3;
+      const grow = 0.75;
+      const ex = (p) => {
+        const dx = p.x - gx, dy = p.y - gy, l = Math.hypot(dx, dy) || 1;
+        return { x: p.x + dx / l * grow, y: p.y + dy / l * grow };
+      };
+      const e0 = ex(s0), e1 = ex(s1), e2 = ex(s2);
       ctx.save();
       ctx.beginPath();
-      ctx.moveTo(s0.x, s0.y); ctx.lineTo(s1.x, s1.y); ctx.lineTo(s2.x, s2.y); ctx.closePath();
+      ctx.moveTo(e0.x, e0.y); ctx.lineTo(e1.x, e1.y); ctx.lineTo(e2.x, e2.y); ctx.closePath();
       ctx.clip();
       ctx.setTransform(ctx.getTransform().multiply(new DOMMatrix([a, b, c, d, e, f])));
       ctx.drawImage(tex, 0, 0);

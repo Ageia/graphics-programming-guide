@@ -72,15 +72,20 @@
           if (k < filled) {
             ctx.fillStyle = cells[k];
           } else {
-            ctx.fillStyle = "#161a25"; // 아직 안 채워진 칸
+            ctx.fillStyle = "#2a2d3a"; // 아직 안 채워진 칸(배경과 구분되게 밝게)
           }
           ctx.fillRect(px, py, cw + 0.6, ch + 0.6);
         }
+        // 셀 격자선(빈 상태에서도 그리드가 보이도록)
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.lineWidth = 1;
+        for (let i = 1; i < COLS; i++) { ctx.beginPath(); ctx.moveTo(x0 + i * cw, y0); ctx.lineTo(x0 + i * cw, y0 + ph); ctx.stroke(); }
+        for (let j = 1; j < ROWS; j++) { ctx.beginPath(); ctx.moveTo(x0, y0 + j * ch); ctx.lineTo(x0 + pw, y0 + j * ch); ctx.stroke(); }
         // 테두리 + 라벨
         ctx.strokeStyle = G.COL.gridAxis;
         ctx.lineWidth = 1.5;
         ctx.strokeRect(x0, y0, pw, ph);
-        G.text(ctx, label, x0, y0 - 10, labelCol, "bold 14px sans-serif");
+        G.text(ctx, label, x0, y0 - 12, labelCol, "bold 14px sans-serif");
       }
 
       G.loop(function () {
@@ -103,7 +108,7 @@
         }
 
         // 레이아웃: 좌 CPU, 우 GPU
-        const pad = 24, gap = 40, topPad = 34, botPad = 46;
+        const pad = 24, gap = 40, topPad = 58, botPad = 46;
         const pw = (w - pad * 2 - gap) / 2;
         const ph = h - topPad - botPad;
         drawPanel(pad, topPad, pw, ph, cpuFilled, "CPU (직렬) — 한 번에 1칸", G.COL.accent);

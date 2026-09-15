@@ -46,6 +46,7 @@ impl/
 - **impl 페이지 상단 내비 표준(통일).** 모든 `impl/*.html`은 **좌상단 뒤로가기 링크만** 둔다(브레드크럼 바 금지):
   `<main>` 첫 줄에 `<a class="back-link" href="./index.html" onclick="if(history.length>1){history.back();return false}">← 뒤로가기</a>`.
   히스토리가 있으면 이전 화면, 없으면 구현 허브로 폴백. **`.impl-topbar`(개념·데모 가이드/구현 허브/장 breadcrumb) 바는 넣지 않는다** — 페이지 제목은 히어로·`<h1>`이 대신한다.
+  또한 **`.impl-badge`(예: `IMPLEMENTATION · CHAPTER 6 · CASE STUDY`, `... · RENDERING PATH` 같은 장·분류 라벨)를 페이지마다 일일이 붙이지 않는다.** 어느 장·어떤 유형인지는 히어로·`<h1>`과 허브 구조가 이미 알려주므로 이런 라벨은 군더더기다. 새 페이지에도 넣지 말 것.
 - **impl 임베드 표준.** 모든 `impl/*.html`은 `<head>`에서 `<script src="./embed.js"></script>`를 로드한다.
   부모(index.html)의 iframe에 임베드되면 `html.embedded`가 붙어 크롬(뒤로가기·page-nav)을 숨기고, 내용 높이를 `postMessage`로 보고해 **iframe이 내용에 맞춰져 내부 스크롤이 생기지 않는다**(임베드 안에서 다른 세부 페이지로 이동해도 동일). 상세는 `docs/CONTENT-GUIDE.md` §2(0).
 - **히어로 배너 필수.** 새 문서(허브/세부 페이지 등)를 작성할 때는 **항상 페이지 최상단에 히어로 타이틀 배너를 추가한다.** 그 문서가 무슨 내용인지 한눈에 보이는 비주얼 + 제목 텍스트를 넣어 시각적으로 보기 좋게 만든다. 가능하면 주제에 맞는 캔버스 애니메이션/그래픽을 쓰고, 배너 스크립트는 try/catch로 격리하며 캔버스 크기 피드백 루프를 피한다(논리 크기는 표시 크기에서 얻고 `height` 속성을 재대입하지 않는다). 참고 구현: `impl/08-grass.html`의 `.grass-hero` 배너와 `impl.css`의 관련 스타일.

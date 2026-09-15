@@ -108,11 +108,14 @@ body {
   -webkit-column-break-inside: avoid;
   margin-bottom: 10px;
 }
-.layout .demo,
 .layout table,
 .layout .grid2,
 .layout .grid3,
 .layout .feature-grid { width: 100%; max-width: none; }
+/* 데모 캔버스는 원래 설계 비율(폭≈높이×2)을 유지하도록 폭 상한을 둔다.
+   전폭(1200)으로 늘리면 캔버스가 1200×360처럼 납작해져 내부 그림이 늘어나 보임.
+   텍스트·리스트·표·카드는 전폭을 쓰되, 데모만 보기 좋은 비율로 좌측 정렬. */
+.layout .demo { max-width: 880px; }
 
 /* 다열 유틸: 폭 기반 동적 열(미디어쿼리 없이 가로 폭에 맞춰 열 수 자동 조절) */
 .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }

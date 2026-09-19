@@ -121,7 +121,7 @@
 
       <div class="demo">
         <div class="demo-title">벡터 덧셈을 눈으로: 화살표를 이어붙이기</div>
-        <canvas id="c-vector" height="360"></canvas>
+        <canvas id="c-vector" height="480"></canvas>
         <p class="hint">파란 점 <b>A</b>, 초록 점 <b>B</b>를 드래그해보세요. 노란 벡터가 A+B입니다.</p>
         <div class="readout" id="r-vector"></div>
       </div>
@@ -137,7 +137,7 @@
 
       <div class="demo">
         <div class="demo-title">길이와 정규화</div>
-        <canvas id="c-normalize" height="340"></canvas>
+        <canvas id="c-normalize" height="470"></canvas>
         <p class="hint">화살표 끝을 드래그하세요. 회색은 원본, 노란색은 길이 1로 정규화한 벡터입니다.</p>
         <div class="readout" id="r-normalize"></div>
       </div>
@@ -157,7 +157,7 @@
 
       <div class="demo">
         <div class="demo-title">행렬 = 공간의 변형</div>
-        <canvas id="c-matrix" height="380"></canvas>
+        <canvas id="c-matrix" height="490"></canvas>
         <div class="controls" id="ctl-matrix"></div>
         <div class="readout" id="r-matrix"></div>
       </div>
@@ -177,7 +177,7 @@
 
       <div class="demo">
         <div class="demo-title">변환 순서 실험실</div>
-        <canvas id="c-transform" height="380"></canvas>
+        <canvas id="c-transform" height="490"></canvas>
         <div class="controls" id="ctl-transform"></div>
         <p class="hint">회전 각도와 이동량을 바꾸고, 순서 버튼을 눌러 차이를 확인하세요.</p>
       </div>
@@ -199,7 +199,7 @@
 
       <div class="demo">
         <div class="demo-title">내적: 방향이 얼마나 일치하는가</div>
-        <canvas id="c-dot" height="340"></canvas>
+        <canvas id="c-dot" height="470"></canvas>
         <p class="hint">두 화살표 끝을 드래그하세요. 사이각과 내적 부호를 보세요.</p>
         <div class="readout" id="r-dot"></div>
       </div>
@@ -212,7 +212,7 @@
 
       <div class="demo">
         <div class="demo-title">외적: 넓이와 방향(2D)</div>
-        <canvas id="c-cross" height="340"></canvas>
+        <canvas id="c-cross" height="470"></canvas>
         <p class="hint">외적 값의 크기 = 평행사변형 넓이, 부호 = B가 A의 왼쪽인지 오른쪽인지.</p>
         <div class="readout" id="r-cross"></div>
       </div>
@@ -223,7 +223,7 @@
 
       <div class="demo">
         <div class="demo-title">외적: 수직 벡터와 넓이(3D)</div>
-        <canvas id="c-cross3d" height="380"></canvas>
+        <canvas id="c-cross3d" height="490"></canvas>
         <p class="hint">캔버스를 드래그하면 시점이 돌아갑니다. 슬라이더로 A·B 성분을 바꾸면 노란 A×B가 항상 두 벡터의 평면에 수직으로 유지됩니다.</p>
         <div class="controls" id="ctl-cross3d"></div>
         <div class="readout" id="r-cross3d"></div>
@@ -241,7 +241,7 @@
 
       <div class="demo">
         <div class="demo-title">단위원과 sin/cos 파형</div>
-        <canvas id="c-trig" height="320"></canvas>
+        <canvas id="c-trig" height="460"></canvas>
         <p class="hint">각도 슬라이더를 돌리면 원 위의 점과 오른쪽 파형이 함께 움직입니다.</p>
         <div class="controls" id="ctl-trig"></div>
       </div>
@@ -260,7 +260,7 @@
 
       <div class="demo">
         <div class="demo-title">점이 삼각형 안에 있는가? (외적 부호 이용)</div>
-        <canvas id="c-inside" height="360"></canvas>
+        <canvas id="c-inside" height="480"></canvas>
         <p class="hint">삼각형 꼭짓점과 빨간 점을 드래그하세요. 안에 있으면 삼각형이 초록으로 채워집니다.</p>
         <div class="readout" id="r-inside"></div>
       </div>
@@ -281,7 +281,7 @@
 
       <div class="demo">
         <div class="demo-title">RGB 색 섞기</div>
-        <canvas id="c-rgb" height="200"></canvas>
+        <canvas id="c-rgb" height="320"></canvas>
         <div class="controls" id="ctl-rgb"></div>
         <div class="readout" id="r-rgb"></div>
       </div>
@@ -291,7 +291,7 @@
 
       <div class="demo">
         <div class="demo-title">픽셀 줌: 그림의 정체</div>
-        <canvas id="c-pixelzoom" height="300"></canvas>
+        <canvas id="c-pixelzoom" height="420"></canvas>
         <div class="controls" id="ctl-pixelzoom"></div>
       </div>
     </section>
@@ -306,13 +306,13 @@
 
       <div class="demo">
         <div class="demo-title">선 긋기: 어느 픽셀을 켤까 (Bresenham)</div>
-        <canvas id="c-line" height="360"></canvas>
+        <canvas id="c-line" height="480"></canvas>
         <p class="hint">두 끝점을 드래그하세요. 실제로 켜지는 픽셀이 격자에 표시됩니다.</p>
       </div>
 
       <div class="demo">
         <div class="demo-title">삼각형 채우기: 픽셀마다 "안/밖" 판정</div>
-        <canvas id="c-fill" height="360"></canvas>
+        <canvas id="c-fill" height="480"></canvas>
         <p class="hint">꼭짓점을 드래그하세요. 각 픽셀 중심이 삼각형 안이면 칠합니다.
           이게 모든 3D 렌더링의 심장입니다.</p>
       </div>
@@ -329,7 +329,7 @@
 
       <div class="demo">
         <div class="demo-title">실시간 이미지 필터</div>
-        <canvas id="c-filter" height="260"></canvas>
+        <canvas id="c-filter" height="400"></canvas>
         <div class="controls" id="ctl-filter"></div>
       </div>
     </section>
@@ -346,7 +346,7 @@
 
       <div class="demo">
         <div class="demo-title">두 원을 알파로 섞기</div>
-        <canvas id="c-blend" height="300"></canvas>
+        <canvas id="c-blend" height="420"></canvas>
         <div class="controls" id="ctl-blend"></div>
         <div class="readout" id="r-blend"></div>
       </div>
@@ -363,7 +363,7 @@
 
       <div class="demo">
         <div class="demo-title">UV 좌표로 텍스처 잘라 붙이기</div>
-        <canvas id="c-sprite" height="320"></canvas>
+        <canvas id="c-sprite" height="460"></canvas>
         <div class="controls" id="ctl-sprite"></div>
         <p class="hint">UV 슬라이더로 원본 텍스처(왼쪽)의 어느 영역을 오른쪽 사각형에 매핑할지 조절합니다.</p>
       </div>
@@ -388,7 +388,7 @@
 
       <div class="demo">
         <div class="demo-title">회전하는 3D 큐브: 파이프라인이 실제로 도는 모습</div>
-        <canvas id="c-mvp" height="380"></canvas>
+        <canvas id="c-mvp" height="490"></canvas>
         <div class="controls" id="ctl-mvp"></div>
         <p class="hint">각 슬라이더는 파이프라인의 한 단계를 조절합니다. 큐브를 마우스로 드래그해도 됩니다.</p>
       </div>
@@ -409,7 +409,7 @@
 
       <div class="demo">
         <div class="demo-title">탑뷰로 보는 카메라 (위치·방향·시야각)</div>
-        <canvas id="c-camera" height="380"></canvas>
+        <canvas id="c-camera" height="490"></canvas>
         <div class="controls" id="ctl-camera"></div>
         <p class="hint">위: 세계를 위에서 본 모습(카메라 위치·시야각 조절 가능). 아래: 그 카메라가 보는 화면.</p>
       </div>
@@ -426,7 +426,7 @@
 
       <div class="demo">
         <div class="demo-title">삼각형으로 도형 만들기 (와이어프레임 ↔ 솔리드)</div>
-        <canvas id="c-mesh" height="380"></canvas>
+        <canvas id="c-mesh" height="490"></canvas>
         <div class="controls" id="ctl-mesh"></div>
         <p class="hint">세분화 슬라이더를 올리면 삼각형이 많아지며 구가 매끄러워집니다.</p>
       </div>
@@ -443,7 +443,7 @@
 
       <div class="demo">
         <div class="demo-title">Z-buffer 없이 vs 있이</div>
-        <canvas id="c-zbuffer" height="340"></canvas>
+        <canvas id="c-zbuffer" height="470"></canvas>
         <div class="controls" id="ctl-zbuffer"></div>
         <p class="hint">깊이 테스트를 껐다 켜보세요. 끄면 나중에 그린 도형이 무조건 위로 와서 어색해집니다.</p>
       </div>
@@ -460,7 +460,7 @@
 
       <div class="demo">
         <div class="demo-title">빛의 방향과 밝기 (디퓨즈 + 스페큘러)</div>
-        <canvas id="c-light" height="360"></canvas>
+        <canvas id="c-light" height="480"></canvas>
         <div class="controls" id="ctl-light"></div>
         <p class="hint">빛 방향 슬라이더를 돌려보세요. 구의 밝은 면이 따라 움직이고, 반짝이는 하이라이트도 생깁니다.</p>
       </div>
@@ -488,7 +488,7 @@
 
       <div class="demo">
         <div class="demo-title">회전하는 텍스처 큐브</div>
-        <canvas id="c-texcube" height="380"></canvas>
+        <canvas id="c-texcube" height="490"></canvas>
         <div class="controls" id="ctl-texcube"></div>
         <p class="hint">각 면에 텍스처가 UV 좌표를 따라 입혀진 채 회전합니다. 원근 보정도 확인해보세요.</p>
       </div>
@@ -518,7 +518,7 @@
 
       <div class="demo">
         <div class="demo-title">CPU(직렬) vs GPU(병렬) 픽셀 처리 경주</div>
-        <canvas id="c-parallel" height="320"></canvas>
+        <canvas id="c-parallel" height="460"></canvas>
         <div class="controls" id="ctl-parallel"></div>
         <p class="hint">"출발" 버튼을 누르면 같은 이미지를 CPU 방식(한 칸씩)과 GPU 방식(여러 칸 동시)으로 채웁니다.</p>
       </div>
@@ -542,7 +542,7 @@
 
       <div class="demo">
         <div class="demo-title">Vertex Shader로 평면을 출렁이게 하기</div>
-        <canvas id="c-vertexshader" height="360"></canvas>
+        <canvas id="c-vertexshader" height="480"></canvas>
         <div class="controls" id="ctl-vertexshader"></div>
         <p class="hint">진폭·주파수·시간 슬라이더가 정점의 높이를 <code>y += sin(x*f + t)*a</code> 로 바꿉니다.
           정점만 움직였는데 표면 전체가 물결쳐요.</p>
@@ -560,7 +560,7 @@
 
       <div class="demo">
         <div class="demo-title">실제 GPU에서 도는 프래그먼트 셰이더 (WebGL)</div>
-        <canvas id="c-fragshader" height="340"></canvas>
+        <canvas id="c-fragshader" height="470"></canvas>
         <div class="controls" id="ctl-fragshader"></div>
         <p class="hint">효과 버튼을 눌러보세요. 각 픽셀이 자기 좌표만으로 색을 계산합니다 — 도형 데이터 없이 그림이 나와요.
           WebGL 미지원 시 소프트웨어로 대체됩니다.</p>
@@ -583,7 +583,7 @@
 
       <div class="demo">
         <div class="demo-title">수천 개 파티클을 병렬로 갱신 (컴퓨트 개념 시뮬레이션)</div>
-        <canvas id="c-compute" height="340"></canvas>
+        <canvas id="c-compute" height="470"></canvas>
         <div class="controls" id="ctl-compute"></div>
         <p class="hint">각 파티클은 "같은 규칙"을 자기 데이터로 실행합니다 — 컴퓨트 셰이더가 하는 일과 동일한 구조예요.
           파티클 수를 늘려보세요.</p>
@@ -663,7 +663,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">추상화 수준 ↔ 제어권, 그리고 코드 복잡도</div>
-        <canvas id="c-apichart" height="380"></canvas>
+        <canvas id="c-apichart" height="490"></canvas>
         <div class="controls" id="ctl-apichart"></div>
         <p class="hint">점 위에 마우스를 올리면 설명이 뜹니다. 아래 막대는 "삼각형 하나 띄우기"에 필요한 대략적 코드 라인 수예요.</p>
       </div>
@@ -743,7 +743,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">Roughness · Metallic 로 재질 바꾸기</div>
-        <canvas id="c-pbr" height="360"></canvas>
+        <canvas id="c-pbr" height="480"></canvas>
         <div class="controls" id="ctl-pbr"></div>
         <p class="hint">거칠기를 낮추면 하이라이트가 좁고 날카로워지고, 금속성을 올리면 반사가 재질색을 띱니다.</p>
       </div>
@@ -774,7 +774,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">환경이 곧 광원: 거칠기 = 반사 흐림(프리필터 밉)</div>
-        <canvas id="c-ibl" height="360"></canvas>
+        <canvas id="c-ibl" height="480"></canvas>
         <div class="controls" id="ctl-ibl"></div>
         <p class="hint">구는 절차적 환경(하늘·태양·바닥) 속에 있습니다. 거칠기를 올리면 반사가 뭉개지고,
           금속성을 내리면 확산 간접광이 드러납니다. 환경을 회전시켜 반사가 함께 흐르는지 보세요.</p>
@@ -798,7 +798,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">노출(Exposure)과 톤 매핑 커브</div>
-        <canvas id="c-hdr" height="340"></canvas>
+        <canvas id="c-hdr" height="470"></canvas>
         <div class="controls" id="ctl-hdr"></div>
         <p class="hint">노출을 올리며 "그냥 자르기(clip)"와 "톤 매핑(Reinhard/ACES)"을 비교하세요.
           오른쪽 그래프가 밝기 압축 곡선입니다.</p>
@@ -820,7 +820,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">빛의 시점 → 섀도우 맵 → 그림자 (2D 단면)</div>
-        <canvas id="c-shadowmap" height="360"></canvas>
+        <canvas id="c-shadowmap" height="480"></canvas>
         <div class="controls" id="ctl-shadowmap"></div>
         <p class="hint">빛과 가림막을 움직여보세요. 빛에서 각 방향으로 쏜 광선이 가림막에 막히면 그 뒤가 그림자가 됩니다.</p>
       </div>
@@ -851,7 +851,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">G-buffer 들여다보기 (Albedo · Normal · Depth · 최종)</div>
-        <canvas id="c-deferred" height="360"></canvas>
+        <canvas id="c-deferred" height="480"></canvas>
         <div class="controls" id="ctl-deferred"></div>
         <p class="hint">버튼으로 각 G-buffer 채널을 보고, 조명 수를 늘려보세요. 조명이 많아도 라이팅 패스는 화면 크기만큼만 돕니다.</p>
       </div>
@@ -872,7 +872,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">후처리 효과 토글 (Vignette · Bloom · 색수차 · 그레인)</div>
-        <canvas id="c-screenspace" height="320"></canvas>
+        <canvas id="c-screenspace" height="460"></canvas>
         <div class="controls" id="ctl-screenspace"></div>
         <p class="hint">효과를 켜고 강도를 조절하세요. 원본 3D는 그대로, 화면 이미지에만 필터를 얹습니다.</p>
       </div>
@@ -890,7 +890,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">실시간 소프트웨어 레이 트레이서 (반사 · 그림자)</div>
-        <canvas id="c-raytracing" height="360"></canvas>
+        <canvas id="c-raytracing" height="480"></canvas>
         <div class="controls" id="ctl-raytracing"></div>
         <p class="hint">반사 횟수(bounce)를 올리면 거울에 비친 상 안에 또 상이 비칩니다. 조명·구를 움직여보세요.</p>
       </div>
@@ -908,7 +908,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">누적 패스 트레이서: 노이즈가 걷히는 과정</div>
-        <canvas id="c-pathtracing" height="360"></canvas>
+        <canvas id="c-pathtracing" height="480"></canvas>
         <div class="controls" id="ctl-pathtracing"></div>
         <p class="hint">"누적 시작"을 누르면 샘플이 쌓이며 노이즈가 서서히 사라집니다. 샘플 수를 보세요.</p>
       </div>
@@ -944,7 +944,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">계단 현상 vs 슈퍼샘플링: 픽셀당 샘플 수 늘리기</div>
-        <canvas id="c-aa" height="360"></canvas>
+        <canvas id="c-aa" height="480"></canvas>
         <div class="controls" id="ctl-aa"></div>
         <p class="hint">픽셀당 샘플 수를 1 → 16으로 올려보세요. 확대된 경계에서 계단이 중간톤으로 부드러워집니다.</p>
       </div>
@@ -969,7 +969,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">감마의 함정: 잘못된 블렌딩 vs 올바른(선형) 블렌딩</div>
-        <canvas id="c-gamma" height="320"></canvas>
+        <canvas id="c-gamma" height="460"></canvas>
         <div class="controls" id="ctl-gamma"></div>
         <p class="hint">감마 슬라이더와 "선형 공간에서 계산" 토글을 바꿔보세요. 그라디언트 밝기와 색 혼합 결과가 달라집니다.</p>
       </div>
@@ -997,7 +997,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">지글거리는 바닥 vs 밉맵 + 필터링</div>
-        <canvas id="c-mipmap" height="360"></canvas>
+        <canvas id="c-mipmap" height="480"></canvas>
         <div class="controls" id="ctl-mipmap"></div>
         <p class="hint">밉맵/필터를 껐다 켜보세요. 끄면 먼 곳이 지글거리고, 켜면 부드럽게 정리됩니다. 밉맵 사다리도 함께 보여줘요.</p>
       </div>
@@ -1017,7 +1017,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">반투명 카드 겹치기: 잘못된 순서 vs 정렬된 순서</div>
-        <canvas id="c-transparency" height="340"></canvas>
+        <canvas id="c-transparency" height="470"></canvas>
         <div class="controls" id="ctl-transparency"></div>
         <p class="hint">정렬을 껐다 켜보세요. 카드 깊이를 바꾸며 순서가 틀렸을 때 색이 어떻게 어긋나는지 확인하세요.</p>
       </div>
@@ -1040,7 +1040,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">AO 껐을 때 vs 켰을 때 (구석의 접촉 그늘)</div>
-        <canvas id="c-ao" height="340"></canvas>
+        <canvas id="c-ao" height="470"></canvas>
         <div class="controls" id="ctl-ao"></div>
         <p class="hint">AO를 켜면 물체가 맞닿는 구석과 틈에 부드러운 그늘이 생겨 훨씬 사실적으로 앉아 보입니다.</p>
       </div>
@@ -1062,7 +1062,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">거리에 따른 LOD 전환 + 절두체 컬링</div>
-        <canvas id="c-lod" height="360"></canvas>
+        <canvas id="c-lod" height="480"></canvas>
         <div class="controls" id="ctl-lod"></div>
         <p class="hint">카메라 거리/시야를 바꿔보세요. 멀어지면 모델이 단순해지고, 시야 밖 물체는 그리기에서 빠지며 삼각형 수가 확 줄어요.</p>
       </div>
@@ -1098,7 +1098,7 @@ fn main(
 
       <div class="demo">
         <div class="demo-title">인터랙티브 렌더 파이프라인 (DCC 타임라인 스크러버)</div>
-        <canvas id="c-pipeline" height="480"></canvas>
+        <canvas id="c-pipeline" height="560"></canvas>
         <div class="controls" id="ctl-pipeline"></div>
         <p class="hint">DCC 툴처럼 하단 타임라인의 재생헤드를 드래그하세요. 한 프레임이 <strong>수십 개의 마이크로 단계</strong>로
           쪼개져 있습니다 — 라이트 배치 → 방향 설정 → 뷰/투영 행렬 → 프랍별 깊이 캡처 → G-buffer 프랍별 래스터 →

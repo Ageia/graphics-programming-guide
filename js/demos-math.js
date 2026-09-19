@@ -520,19 +520,6 @@
       axis([3.2, 0, 0], "x"); axis([0, 3.2, 0], "y"); axis([0, 0, 3.2], "z");
 
       const C = V.cross3(A, B); // A × B
-      const S2 = V.add(A, B);   // 평행사변형 반대 꼭짓점
-
-      // ---- 평행사변형 O-A-(A+B)-B (넓이 = |A×B|) ----
-      const pO = P([0, 0, 0]), pA = P(A), pB = P(B), pS = P(S2);
-      if (pO.vis && pA.vis && pB.vis && pS.vis) {
-        ctx.fillStyle = "rgba(86,212,221,0.20)";
-        ctx.strokeStyle = "rgba(86,212,221,0.6)";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.moveTo(pO.x, pO.y); ctx.lineTo(pA.x, pA.y);
-        ctx.lineTo(pS.x, pS.y); ctx.lineTo(pB.x, pB.y);
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-      }
 
       // ---- 벡터 화살표: A(파랑), B(초록), A×B(노랑) ----
       const drawVec = (vec, color, label) => {

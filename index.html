@@ -1097,11 +1097,13 @@ fn main(
         보여줍니다. 하단 썸네일은 각 패스가 만든 중간 리소스(그림자맵 · G-buffer · 라이팅 · 블룸)입니다.</p>
 
       <div class="demo">
-        <div class="demo-title">인터랙티브 렌더 파이프라인 (타임라인 스크러버)</div>
+        <div class="demo-title">인터랙티브 렌더 파이프라인 (DCC 타임라인 스크러버)</div>
         <canvas id="c-pipeline" height="480"></canvas>
         <div class="controls" id="ctl-pipeline"></div>
-        <p class="hint">▶ 재생을 누르거나 타임라인을 드래그하세요. 각 패스가 무엇을 만드는지 하단 썸네일과 설명으로 확인할 수 있습니다.
-          캔버스를 드래그하면 카메라 시점이 돌아갑니다.</p>
+        <p class="hint">DCC 툴처럼 하단 타임라인의 재생헤드를 드래그하세요. 한 프레임이 <strong>수십 개의 마이크로 단계</strong>로
+          쪼개져 있습니다 — 라이트 배치 → 방향 설정 → 뷰/투영 행렬 → 프랍별 깊이 캡처 → G-buffer 프랍별 래스터 →
+          라이팅 항목별 누적(앰비언트·디퓨즈·그림자·스페큘러) → 블룸 → 톤맵까지 생략 없이 볼 수 있습니다.
+          상단 뷰포트는 "지금 바인딩된 렌더 타겟", 하단 썸네일은 각 패스의 중간 리소스입니다. 뷰포트를 드래그하면 카메라가 돌아갑니다.</p>
         <div class="readout" id="r-pipeline"></div>
       </div>
 

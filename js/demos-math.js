@@ -443,6 +443,124 @@
   }
 
   // ==========================================================
+  // 6b. 외적 3D (Cross Product in 3D)
+  //   두 3D 벡터 A, B와 그에 동시에 수직인 A×B를 회전 가능한
+  //   3D 공간에서 보여준다. 평행사변형 넓이 = |A×B|, 방향은
+  //   오른손 법칙. 카메라는 드래그(궤도)로 돌린다.
+  // ==========================================================
+  function initCross3D() {
+    if (!document.getElementById("c-cross3d")) return;
+    const S = G.setup("c-cross3d");
+    const ctl = document.getElementById("ctl-cross3d");
+    const readout = document.getElementById("r-cross3d");
+    const M4 = G.M4, V = G.V;
+
+    // 벡터 A, B의 성분(사용자 조절). 기본값은 서로 비스듬한 두 벡터.
+    const A = [2.2, 0.4, 0.6];
+    const B = [0.3, 2.0, -0.5];
+
+    const orbit = { rx: -0.35, ry: 0.7 };
+    let dragging = false, auto = 0, autoRot = true;
+
+    if (ctl) {
+      const mk = (vec, i, label) =>
+        G.slider(ctl, {
+          label, min: -3, max: 3, step: 0.1, value: vec[i],
+          onInput: (v) => { vec[i] = v; },
+        });
+      mk(A, 0, "A.x"); mk(A, 1, "A.y"); mk(A, 2, "A.z");
+      mk(B, 0, "B.x"); mk(B, 1, "B.y"); mk(B, 2, "B.z");
+      G.checkbox(ctl, "카메라 자동 회전", true, (on) => { autoRot = on; });
+    }
+
+    G.orbitControl(S.canvas, orbit);
+    S.canvas.addEventListener("mousedown", () => { dragging = true; });
+    window.addEventListener("mouseup", () => { dragging = false; });
+
+    // 3D 점 -> 화면 픽셀. 반환 {x,y,vis}
+    function project(mvp, p, w, h) {
+      const c = M4.apply(mvp, p);
+      if (c.w <= 1e-6) return { x: 0, y: 0, vis: false };
+      return {
+        x: (c.x / c.w * 0.5 + 0.5) * w,
+        y: (1 - (c.y / c.w * 0.5 + 0.5)) * h,
+        vis: true,
+      };
+    }
+
+    function draw(dt) {
+      if (autoRot && !dragging) auto += (dt || 0) * 0.35;
+      const w = S.w, h = S.h, ctx = S.ctx;
+      G.clear(ctx, w, h);
+      if (!w) return;
+
+      const model = M4.mul(M4.rotX(orbit.rx), M4.rotY(orbit.ry + auto));
+      const view = M4.lookAt([0, 0, 7.5], [0, 0, 0], [0, 1, 0]);
+      const proj = M4.perspective(G.rad(42), w / h, 0.1, 100);
+      const mvp = M4.mul(M4.mul(proj, view), model);
+      const P = (v) => project(mvp, v, w, h);
+
+      // ---- 바닥 격자(XZ 평면, y=0) ----
+      ctx.strokeStyle = COL.grid; ctx.lineWidth = 1;
+      for (let i = -3; i <= 3; i++) {
+        const a = P([i, 0, -3]), b = P([i, 0, 3]);
+        const c = P([-3, 0, i]), d = P([3, 0, i]);
+        if (a.vis && b.vis) { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+        if (c.vis && d.vis) { ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(d.x, d.y); ctx.stroke(); }
+      }
+
+      // ---- 좌표축(원점 기준, 흐리게) ----
+      const O = P([0, 0, 0]);
+      const axis = (v, lbl) => {
+        const t = P(v);
+        if (!O.vis || !t.vis) return;
+        G.line(ctx, O.x, O.y, t.x, t.y, COL.gridAxis, 1.5);
+        G.text(ctx, lbl, t.x + 4, t.y - 2, COL.dim, "11px sans-serif");
+      };
+      axis([3.2, 0, 0], "x"); axis([0, 3.2, 0], "y"); axis([0, 0, 3.2], "z");
+
+      const C = V.cross3(A, B); // A × B
+      const S2 = V.add(A, B);   // 평행사변형 반대 꼭짓점
+
+      // ---- 평행사변형 O-A-(A+B)-B (넓이 = |A×B|) ----
+      const pO = P([0, 0, 0]), pA = P(A), pB = P(B), pS = P(S2);
+      if (pO.vis && pA.vis && pB.vis && pS.vis) {
+        ctx.fillStyle = "rgba(86,212,221,0.20)";
+        ctx.strokeStyle = "rgba(86,212,221,0.6)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(pO.x, pO.y); ctx.lineTo(pA.x, pA.y);
+        ctx.lineTo(pS.x, pS.y); ctx.lineTo(pB.x, pB.y);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      }
+
+      // ---- 벡터 화살표: A(파랑), B(초록), A×B(노랑) ----
+      const drawVec = (vec, color, label) => {
+        const t = P(vec);
+        if (!O.vis || !t.vis) return;
+        G.arrow(ctx, O.x, O.y, t.x, t.y, color, 3);
+        G.text(ctx, label, t.x + 6, t.y - 6, color, "bold 13px sans-serif");
+      };
+      // C는 길이가 클 수 있으므로 표시용으로 축소(방향 유지).
+      const cLen = V.len(C);
+      const cShow = cLen > 1e-4 ? V.scale(C, Math.min(1, 2.6 / cLen)) : C;
+      drawVec(A, COL.accent, "A");
+      drawVec(B, COL.green, "B");
+      drawVec(cShow, COL.yellow, "A×B");
+
+      if (readout) {
+        const f = (v) => v.map(r1).join(", ");
+        readout.innerHTML =
+          `A × B = (${f(C)})   ` +
+          `<span style="color:${COL.yellow};font-weight:bold">|A×B| = ${r1(cLen)} = 평행사변형 넓이</span><br>` +
+          `<span style="color:${COL.dim}">A×B는 A와 B가 이루는 평면에 수직 — 방향은 오른손 법칙(A→B로 감아쥘 때 엄지). ` +
+          `노란 화살표는 방향만 보이도록 길이를 줄였습니다.</span>`;
+      }
+    }
+    G.loop(draw, S.canvas);
+  }
+
+  // ==========================================================
   // 7. 삼각함수 (단위원 + 파형)
   // ==========================================================
   function initTrig() {
@@ -627,6 +745,7 @@
   G.deferInit("c-transform", initTransform);
   G.deferInit("c-dot", initDot);
   G.deferInit("c-cross", initCross);
+  G.deferInit("c-cross3d", initCross3D);
   G.deferInit("c-trig", initTrig);
   G.deferInit("c-inside", initInside);
 })();

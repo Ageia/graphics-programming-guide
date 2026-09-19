@@ -212,6 +212,18 @@
         <p class="hint">외적 값의 크기 = 평행사변형 넓이, 부호 = B가 A의 왼쪽인지 오른쪽인지.</p>
         <div class="readout" id="r-cross"></div>
       </div>
+
+      <p>진짜 외적은 <strong>3D</strong>에서 벡터입니다. <code>A × B</code>는 <strong>A와 B가 이루는 평면에 수직인 벡터</strong>이고,
+        그 길이는 두 벡터가 만드는 <strong>평행사변형의 넓이</strong>와 같아요. 방향은 <strong>오른손 법칙</strong>으로 정해집니다
+        (A에서 B로 손가락을 감아쥘 때 엄지가 가리키는 쪽). 삼각형·면의 <strong>법선(normal)</strong>이 바로 이렇게 나옵니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">외적: 수직 벡터와 넓이(3D)</div>
+        <canvas id="c-cross3d" height="380"></canvas>
+        <p class="hint">캔버스를 드래그하면 시점이 돌아갑니다. 슬라이더로 A·B 성분을 바꾸면 노란 A×B가 항상 두 벡터의 평면에 수직으로 유지됩니다.</p>
+        <div class="controls" id="ctl-cross3d"></div>
+        <div class="readout" id="r-cross3d"></div>
+      </div>
     </section>
 
     <section id="trig">

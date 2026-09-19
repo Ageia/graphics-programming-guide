@@ -39,3 +39,16 @@
 - [x] 06-ibl `#probe` 링크 → `06-gi-probe.html` 갱신, 허브 카드·CURRICULUM 6-D 갱신.
 - [x] 5페이지 헤드리스 렌더 검증(히어로·데모·본문·JS문법·nav) 후 일괄 커밋·푸시.
 - [x] 개념 트랙 `#gi`를 허브(06-gi.html) iframe 임베드로 전환(paths 패턴). 개념 트랙 GI 데모는 허브 안 "먼저 감 잡기" 직관 데모로 이관(전체 씬 GI 슬라이더: 0=직접광만 → 색번짐·그림자 채움).
+
+---
+
+## 캡스톤: 렌더 파이프라인 (완료)
+
+RenderDoc 스타일 타임라인 스크러버 — 한 프레임이 패스 순서대로 지어지는 과정을 통째로 보여주는 종합 데모.
+
+- [x] `js/demos-pipeline.js` — WebGL1 다중 패스(FBO) 지연 셰이딩 렌더러 + 타임라인 스크러버(Clear→Shadow→G-buffer(Albedo/Normal/Position)→Lighting→Bloom→Tonemap). 하단 썸네일 리소스 뷰 + 2D 오버레이 라벨, Canvas2D 폴백, FBO 완성도 검사→실패 시 폴백.
+- [x] 개념 트랙: `index.html` nav 그룹 9 + `#pipeline` 섹션(리드·6단계 설명·tip) + 스크립트 로드. nav 8 제목 중복 버그("실전 렌더링 기법"→"실전 사례") 수정. `css/style.css`에 `.pipe-chips`/`.pipe-chip`/`.pipe-badge`/`.pipe-overlay`.
+- [x] 구현 트랙: `impl/09-pipeline.html` 신설(히어로 배너 + D3D11/HLSL 6패스 walkthrough + 병목·디퍼드 장단점), `impl/index.html` CHAPTER 9 허브 카드, 개념↔구현 상호 링크.
+- [x] `docs/CURRICULUM.md` PART 9 캡스톤 상태 추가.
+
+> 후속(선택): 데모를 실제 브라우저에서 열어 육안 확인(현재 헤드리스 환경이라 문법·구조·규칙만 검증). WebGL 실패 시 Canvas2D 폴백으로 안전.

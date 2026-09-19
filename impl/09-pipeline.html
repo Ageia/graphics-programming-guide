@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 렌더 파이프라인 — C++/DirectX 11</title>
+<meta name="description" content="Clear·Shadow·G-buffer·Lighting·Bloom·Tonemap 여섯 패스를 한 프레임에 엮는 지연 셰이딩 파이프라인을 C++/Direct3D 11/HLSL로 처음부터 끝까지 구현하는 캡스톤." />
+<link rel="stylesheet" href="../css/theme.css" />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+<script src="./embed.js"></script>
+<style>
+/* 9장 렌더 파이프라인 히어로 배너 — 좌→우로 흐르는 패스 단계 블록 애니메이션 */
+.pipe-hero {
+  position: relative;
+  width: 100%;
+  height: 300px;
+  margin: 18px 0 26px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: linear-gradient(180deg, #0a0f1e 0%, #12173a 46%, #241a44 78%, #140f28 100%);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(126, 160, 255, 0.20);
+}
+.pipe-hero canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* 위쪽 광채 */
+.pipe-hero .ph-glow {
+  position: absolute;
+  top: -80px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 420px;
+  height: 300px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(150, 190, 255, 0.30) 0%, rgba(120, 130, 255, 0.14) 34%, rgba(120, 130, 255, 0) 70%);
+  pointer-events: none;
+}
+/* 가독성 그라디언트 */
+.pipe-hero .ph-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(6, 8, 18, 0.30) 0%, rgba(6, 8, 18, 0) 38%, rgba(6, 8, 18, 0) 60%, rgba(6, 8, 18, 0.42) 100%);
+  pointer-events: none;
+}
+.pipe-hero .ph-caption {
+  position: absolute;
+  left: 34px;
+  bottom: 28px;
+  z-index: 2;
+  pointer-events: none;
+}
+.pipe-hero .ph-title {
+  margin: 0;
+  font-size: clamp(32px, 5.6vw, 58px);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  color: #f1f5ff;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.55), 0 0 40px rgba(126, 160, 255, 0.40);
+}
+.pipe-hero .ph-title .accent { color: var(--accent, #7ea0ff); }
+.pipe-hero .ph-sub {
+  margin: 10px 0 0;
+  font-size: clamp(12px, 2vw, 15px);
+  font-weight: 600;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: rgba(220, 228, 255, 0.82);
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.6);
+}
+@media (max-width: 640px) {
+  .pipe-hero { height: 220px; }
+  .pipe-hero .ph-caption { left: 20px; bottom: 18px; }
+}
+</style>
+</head>
+<body>
+<main class="content" style="max-width:1200px;">
+  <a class="back-link" href="./index.html" onclick="if(history.length>1){history.back();return false}">← 뒤로가기</a>
+
+  <!-- 타이틀 히어로 배너: 좌→우로 흐르는 파이프라인 패스 단계 -->
+  <div class="pipe-hero" id="pipeHero">
+    <canvas id="pipeHeroCanvas" width="940" height="300"></canvas>
+    <div class="ph-glow"></div>
+    <div class="ph-shade"></div>
+    <div class="ph-caption">
+      <h2 class="ph-title">Rendering <span class="accent">Pipeline</span></h2>
+      <p class="ph-sub">Clear · Shadow · G-buffer · Lighting · Bloom · Tonemap</p>
+    </div>
+  </div>
+
+  <h1>렌더 파이프라인 통합</h1>
+  <p class="lead">
+    이 장은 지금까지 배운 조각들이 <strong>한 프레임 안에서 어떻게 하나로 엮이는가</strong>를 보여주는 캡스톤입니다.
+    깊이 버퍼(3장)·조명(3장)·섀도우 맵(6장)·디퍼드 G-buffer(6장)·HDR 톤매핑(6장)·감마(7장)가
+    전부 <strong>정해진 순서의 패스(pass)</strong>로 이어져 최종 화면 한 장을 만듭니다. 개념 트랙 데모와
+    <strong>패스 순서·이름을 정확히 맞춰</strong>, 지연 셰이딩(deferred) 파이프라인을
+    <strong>Clear → Shadow → G-buffer → Deferred Lighting → Bloom → Tonemap+Gamma</strong> 여섯 단계로
+    C++/Direct3D 11/HLSL로 <strong>바인딩 한 줄, 리소스 상태 하나까지</strong> 구현합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    이 페이지는 D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>v' = v * M</code>(HLSL <code>mul(v, M)</code>),
+    행렬 <strong>행 우선</strong> 저장, <strong>왼손 좌표계</strong>, 클립 <code>z ∈ [0,1]</code>, 텍스처 V축 위→아래.
+    파이프라인은 <strong>개념 트랙 데모와 동일한 6패스 순서</strong>를 그대로 코드로 옮깁니다.
+    G-buffer 구성·라이팅 셰이더의 성분별 해부는 <a class="btn-link" href="./06-deferred.html">디퍼드 렌더링(6장) 세부 페이지</a>에서
+    이미 다뤘으니, 이 장은 <strong>패스들을 하나의 프레임으로 오케스트레이션하는 뼈대</strong>에 집중합니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">가장 중요한 한 문장</span>
+    파이프라인의 본질은 셰이더가 아니라 <strong>"무엇을 무엇에 그리고, 그 결과를 다음 패스가 어떻게 읽는가"</strong>라는
+    <strong>렌더 타깃(RTV)↔셰이더 리소스(SRV)의 릴레이</strong>입니다. 각 패스는 앞 패스의 출력 텍스처를 입력으로 받아
+    다음 텍스처를 채우고, 마지막 톤맵 패스만 백버퍼(화면)에 씁니다.
+  </div>
+
+  <!-- =========================================================
+       0. 전체 프레임 한눈에
+       ========================================================= -->
+  <h2 style="margin-top:40px;">0. 한 프레임의 여섯 패스</h2>
+  <p>
+    매 프레임 아래 여섯 패스가 <strong>순서대로</strong> 실행됩니다. 각 패스가 어떤 텍스처를 <em>쓰고(RTV)</em>
+    어떤 텍스처를 <em>읽는지(SRV)</em>가 파이프라인의 전부입니다. 개념 트랙 데모의 타임라인과 정확히 같은 순서입니다.
+  </p>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead><tr><th>#</th><th>패스</th><th>출력(RTV)</th><th>입력(SRV)</th><th>핵심</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><strong>Clear</strong></td><td>G-buffer 3장 + 깊이 + HDR</td><td>—</td><td>지난 프레임 흔적 제거</td></tr>
+      <tr><td>2</td><td><strong>Shadow Map</strong></td><td>shadowDepth</td><td>—</td><td>빛 시점 깊이 렌더</td></tr>
+      <tr><td>3</td><td><strong>G-buffer</strong></td><td>Albedo·Normal·Position (MRT)</td><td>재질 텍스처</td><td>표면 속성 기록</td></tr>
+      <tr><td>4</td><td><strong>Deferred Lighting</strong></td><td>HDR (sceneHDR)</td><td>G-buffer 3장 + shadowDepth</td><td>조명·그림자 합산</td></tr>
+      <tr><td>5</td><td><strong>Bloom</strong></td><td>bloomTex (ping-pong)</td><td>sceneHDR → 블러 결과</td><td>밝은 부분 번짐</td></tr>
+      <tr><td>6</td><td><strong>Tonemap + Gamma</strong></td><td>Backbuffer</td><td>sceneHDR + bloomTex</td><td>ACES + 감마 → 화면</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <ol class="steps">
+    <li><strong>준비(1회)</strong>: G-buffer 3장·HDR·Bloom ping-pong·섀도우 깊이 텍스처와 각각의 RTV/SRV/DSV, 풀스크린 삼각형·상태 객체를 미리 만든다.</li>
+    <li><strong>Clear</strong>: 이번 프레임에 쓸 모든 렌더 타깃과 깊이 버퍼를 지운다.</li>
+    <li><strong>Shadow → G-buffer → Lighting → Bloom → Tonemap</strong>: 패스마다 RTV를 세팅해 그리고, 그 출력을 SRV로 다음 패스에 넘긴다.</li>
+    <li><strong>Present</strong>: 톤맵 결과가 담긴 백버퍼를 스왑체인으로 표시한다.</li>
+  </ol>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    같은 텍스처를 <strong>RTV로 바인딩한 채 SRV로도 읽을 수 없습니다</strong>. D3D11 디버그 레이어가
+    "resource is bound as both input and output"으로 경고하고 한쪽을 자동 언바인드합니다. 그래서 각 패스는
+    <strong>다음 패스로 넘어가기 직전 자신의 RTV를 반드시 풀어</strong>(다음 <code>OMSetRenderTargets</code>로
+    교체) 그 텍스처를 SRV로 읽을 수 있게 만듭니다. <strong>순서가 곧 규칙입니다.</strong>
+  </div>
+
+  <h3 style="margin-top:30px;">0-1. 프레임 함수 뼈대 (C++)</h3>
+  <p>
+    아래가 이 장 전체의 척추입니다. 여섯 함수 호출이 곧 여섯 패스이고, 나머지 절에서 하나씩 채웁니다.
+    각 헬퍼는 "RTV 세팅 → 뷰포트 → 셰이더/리소스 바인딩 → 드로우"라는 같은 리듬을 따릅니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>renderer.cpp — RenderFrame()</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">void Renderer::RenderFrame() {
+    ClearPass();          // 1) 모든 RTV/DSV 클리어
+    ShadowPass();         // 2) 빛 시점 깊이 → shadowDepth
+    GeometryPass();       // 3) 씬 → G-buffer(Albedo/Normal/Position) MRT
+    LightingPass();       // 4) G-buffer + shadow → sceneHDR (풀스크린)
+    BloomPass();          // 5) sceneHDR → bright → 분리형 가우시안 → bloomTex
+    TonemapPass();        // 6) sceneHDR + bloomTex → ACES/감마 → 백버퍼
+    swapChain-&gt;Present(1, 0);   // V-Sync
+}
+
+// 어떤 패스든 RTV를 바꿀 때 이전 SRV 바인딩을 먼저 푼다(위 함정 방지용 헬퍼)
+void Renderer::UnbindPSSRVs(UINT count) {
+    ID3D11ShaderResourceView* nulls[8] = {};   // 최대 8슬롯을 null로
+    ctx-&gt;PSSetShaderResources(0, count, nulls);
+}</code></pre>
+  </div>
+
+  <!-- =========================================================
+       1. Clear
+       ========================================================= -->
+  <h2 style="margin-top:44px;">1. Clear 패스</h2>
+  <p>
+    프레임의 첫 삽질입니다. 이번 프레임에 그릴 <strong>모든 렌더 타깃과 깊이 버퍼를 초기화</strong>해
+    지난 프레임의 잔상을 지웁니다. D3D11에서는 OpenGL의 <code>glClear</code>처럼 한 번에 다 지우는 함수가 없고,
+    <strong>RTV마다 <code>ClearRenderTargetView</code>, 깊이는 <code>ClearDepthStencilView</code></strong>를 각각 호출합니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>ClearPass()</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">void Renderer::ClearPass() {
+    const float black[4] = { 0, 0, 0, 0 };
+
+    // G-buffer 3장 + HDR 씬 타깃을 각각 클리어
+    ctx-&gt;ClearRenderTargetView(gAlbedo.rtv.Get(),   black);
+    ctx-&gt;ClearRenderTargetView(gNormal.rtv.Get(),   black);
+    ctx-&gt;ClearRenderTargetView(gPosition.rtv.Get(), black);
+    ctx-&gt;ClearRenderTargetView(sceneHDR.rtv.Get(),  black);
+    ctx-&gt;ClearRenderTargetView(bloomA.rtv.Get(),    black);
+    ctx-&gt;ClearRenderTargetView(bloomB.rtv.Get(),    black);
+
+    // 깊이 버퍼: 가장 먼 값 1.0으로 (왼손·z[0,1] 규약에서 0=최근접, 1=최원거리)
+    ctx-&gt;ClearDepthStencilView(sceneDSV.Get(),  D3D11_CLEAR_DEPTH, 1.0f, 0);
+    ctx-&gt;ClearDepthStencilView(shadowDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+
+    // 백버퍼(최종 화면)도 클리어
+    ctx-&gt;ClearRenderTargetView(backbufferRTV.Get(), black);
+}</code></pre>
+  </div>
+  <p>
+    깊이를 <strong>1.0</strong>으로 지우는 이유는 3장(깊이 버퍼)에서 본 그대로입니다. 왼손 좌표계 + 클립 <code>z∈[0,1]</code>
+    규약에서 0이 카메라 최근접, 1이 최원거리이므로, 처음엔 "무한히 멀다"로 채워 두고 더 가까운 픽셀이 오면 갱신합니다.
+    이 패스에서는 아직 <code>OMSetRenderTargets</code>로 <em>묶을</em> 필요가 없습니다 — 클리어는 뷰만 있으면 됩니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    타일드/모바일 GPU에서는 <strong>클리어가 공짜에 가깝습니다</strong>(타일 시작 시 fast-clear). 반대로 클리어를
+    빼먹고 부분만 다시 그리는 "누적" 최적화는 타일 GPU에서 오히려 <em>load</em> 비용을 유발할 수 있습니다.
+    특별한 이유가 없으면 매 프레임 명시적으로 클리어하는 편이 안전합니다.
+  </div>
+
+  <!-- =========================================================
+       2. Shadow Map
+       ========================================================= -->
+  <h2 style="margin-top:44px;">2. Shadow Map 패스</h2>
+  <p>
+    빛의 시점에서 씬을 렌더해 <strong>각 지점까지의 깊이</strong>를 텍스처에 기록합니다. 나중에 라이팅 패스가
+    "이 표면점이 빛에서 봤을 때 가려졌는가"를 이 텍스처와 비교해 판정합니다(6장 섀도우 맵과 동일 원리).
+    핵심은 <strong>카메라가 아니라 빛의 뷰·투영 행렬</strong>을 쓰고, <strong>깊이 전용 렌더 타깃</strong>에
+    그린다는 점입니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>ShadowPass()</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">void Renderer::ShadowPass() {
+    // 색 출력 없이 깊이만 그린다: RTV는 nullptr, DSV만 바인딩
+    ctx-&gt;OMSetRenderTargets(0, nullptr, shadowDSV.Get());
+
+    // 섀도우 맵 해상도에 맞춘 뷰포트 (보통 백버퍼보다 큼: 2048²)
+    D3D11_VIEWPORT vp = { 0, 0, (float)SHADOW_SIZE, (float)SHADOW_SIZE, 0.0f, 1.0f };
+    ctx-&gt;RSSetViewports(1, &amp;vp);
+
+    // 빛 시점 view*proj를 cbuffer로 (행벡터 규약 → 전치해 업로드)
+    XMMATRIX lightVP = lightView * lightProj;
+    UploadCB(cbShadow, XMMatrixTranspose(lightVP));
+
+    ctx-&gt;VSSetShader(shadowVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(nullptr, 0, 0);       // 깊이만 → 픽셀 셰이더 불필요
+    ctx-&gt;RSSetState(shadowRS.Get());       // 슬로프 스케일 깊이 바이어스 적용
+    DrawSceneMeshes();                     // 그림자를 드리우는 모든 메시
+
+    ctx-&gt;RSSetState(nullptr);              // 컬/바이어스 상태 원복
+}</code></pre>
+  </div>
+  <p>
+    깊이만 필요하므로 <strong>픽셀 셰이더를 아예 붙이지 않습니다</strong>(<code>PSSetShader(nullptr,...)</code>).
+    래스터라이저가 깊이만 <code>shadowDSV</code>에 써 주기 때문입니다. 이렇게 하면 그림자 패스가 매우 가볍습니다.
+    빛 시점 view·proj 행렬은 방향광이면 <code>XMMatrixOrthographicLH</code>(직교), 점/스팟광이면
+    <code>XMMatrixPerspectiveFovLH</code>로 만듭니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    섀도우 깊이 텍스처는 <strong>깊이 포맷과 SRV 포맷을 분리</strong>해야 합니다. 텍스처는
+    <code>DXGI_FORMAT_R24G8_TYPELESS</code>로 만들고, DSV는 <code>D24_UNORM_S8_UINT</code>, SRV는
+    <code>R24_UNORM_X8_TYPELESS</code>로 각각 <em>다른 뷰 포맷</em>을 지정합니다. <code>BindFlags</code>에는
+    <code>DEPTH_STENCIL | SHADER_RESOURCE</code>를 함께 켜야 라이팅 패스에서 SRV로 읽을 수 있습니다.
+  </div>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <strong>슬로프 스케일 깊이 바이어스</strong>(<code>D3D11_RASTERIZER_DESC::SlopeScaledDepthBias</code>)를 켜서
+    표면과 그림자가 스스로 그림자를 드리우는 <em>섀도우 애크니(shadow acne)</em>를 줄입니다. 너무 크게 주면
+    반대로 그림자가 물체에서 떨어져 뜨는 <em>피터 패닝(peter panning)</em>이 생기니 절충이 필요합니다.
+  </div>
+
+  <!-- =========================================================
+       3. G-buffer
+       ========================================================= -->
+  <h2 style="margin-top:44px;">3. G-buffer 패스 (MRT)</h2>
+  <p>
+    씬의 모든 메시를 카메라 시점으로 한 번 그리되, 색을 화면에 바로 내보내는 대신 각 픽셀의
+    <strong>Albedo·Normal·Position</strong>을 세 장의 렌더 타깃에 <em>동시에</em> 기록합니다
+    (MRT, Multiple Render Targets). 개념 트랙 데모의 <code>G-buffer · Albedo/Normal/Position</code> 세 채널과
+    정확히 대응합니다. 텍스처·RTV·SRV 생성과 HLSL <code>SV_Target0..2</code> 출력의 성분별 해부는
+    <a class="btn-link" href="./06-deferred.html">6장 디퍼드 렌더링</a>에 있으니, 여기서는 <strong>패스로서의 바인딩</strong>만 봅니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>GeometryPass()</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">void Renderer::GeometryPass() {
+    // 세 RTV를 하나의 배열로 묶어 MRT 활성화 (순서 = SV_Target0/1/2)
+    ID3D11RenderTargetView* rtvs[3] = {
+        gAlbedo.rtv.Get(), gNormal.rtv.Get(), gPosition.rtv.Get()
+    };
+    ctx-&gt;OMSetRenderTargets(3, rtvs, sceneDSV.Get());
+
+    // 카메라 해상도 뷰포트로 복귀 (섀도우 패스에서 2048²로 바꿨으므로)
+    D3D11_VIEWPORT vp = { 0, 0, (float)W, (float)H, 0.0f, 1.0f };
+    ctx-&gt;RSSetViewports(1, &amp;vp);
+
+    ctx-&gt;OMSetDepthStencilState(depthWriteOn.Get(), 0);  // 깊이 쓰기 ON
+    ctx-&gt;VSSetShader(gbufferVS.Get(), nullptr, 0);
+    ctx-&gt;PSSetShader(gbufferPS.Get(), nullptr, 0);
+    DrawSceneMeshes();       // 각 픽셀 속성이 세 타깃에 기록됨
+
+    // 다음(라이팅) 패스가 이 셋을 SRV로 읽으려면 RTV를 먼저 풀어야 한다
+    ID3D11RenderTargetView* none[3] = { nullptr, nullptr, nullptr };
+    ctx-&gt;OMSetRenderTargets(3, none, nullptr);
+}</code></pre>
+  </div>
+  <p>
+    <code>rtvs[]</code> 배열의 <strong>순서(0=Albedo, 1=Normal, 2=Position)</strong>가 곧 HLSL 픽셀 셰이더의
+    <code>SV_Target0/1/2</code>와 짝입니다. 순서를 뒤섞으면 위치 텍스처에 색이 들어가는 대참사가 납니다.
+    패스 끝에서 <strong>RTV를 <code>nullptr</code>로 다시 세팅해 언바인드</strong>하는 마지막 두 줄이
+    이 장의 핵심 습관입니다 — 이게 없으면 라이팅 패스에서 같은 텍스처를 SRV로 못 읽습니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    MRT로 묶는 세 타깃과 깊이 버퍼는 <strong>같은 해상도·같은 샘플 수(MSAA)</strong>여야 합니다. 하나라도
+    다르면 D3D가 바인딩을 거부합니다. 또한 섀도우 패스에서 <code>RSSetViewports</code>를 2048²로 바꿨으므로
+    여기서 <strong>카메라 해상도로 다시 세팅</strong>하지 않으면 G-buffer가 화면 일부에만 그려집니다(자주 하는 실수).
+  </div>
+
+  <!-- =========================================================
+       4. Deferred Lighting
+       ========================================================= -->
+  <h2 style="margin-top:44px;">4. Deferred Lighting 패스</h2>
+  <p>
+    화면을 덮는 <strong>풀스크린 삼각형 하나</strong>를 그리면서, G-buffer 세 장과 섀도우 맵을 SRV로 읽어
+    픽셀마다 조명을 계산합니다. 결과는 화면(백버퍼)이 아니라 <strong>HDR 렌더 타깃(sceneHDR)</strong>에 씁니다 —
+    블룸과 톤매핑이 뒤에 남아 있으므로 아직 0~1로 눌러선 안 되기 때문입니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>LightingPass()</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">void Renderer::LightingPass() {
+    // 출력 = HDR 타깃 (백버퍼가 아니다). 깊이 테스트 불필요 → DSV 없음
+    ctx-&gt;OMSetRenderTargets(1, sceneHDR.rtv.GetAddressOf(), nullptr);
+
+    // 입력 = G-buffer 3장(t0,t1,t2) + 섀도우 깊이(t3)를 순서대로 바인딩
+    ID3D11ShaderResourceView* srvs[4] = {
+        gAlbedo.srv.Get(), gNormal.srv.Get(), gPosition.srv.Get(), shadowSRV.Get()
+    };
+    ctx-&gt;PSSetShaderResources(0, 4, srvs);
+    ctx-&gt;PSSetSamplers(0, 1, pointClamp.GetAddressOf());
+    ctx-&gt;PSSetSamplers(1, 1, shadowCmp.GetAddressOf());   // 비교 샘플러(PCF)
+
+    UploadCB(cbLighting, lightData, lightVP_forShadow);
+    DrawFullscreenTriangle(lightingVS, lightingPS);
+
+    UnbindPSSRVs(4);   // 다음 패스가 sceneHDR을 읽으려면 여기 SRV들도 풀기
+}</code></pre>
+  </div>
+  <div class="code">
+    <div class="code-head"><span>lighting_pass.hlsl (픽셀 셰이더 발췌)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D gAlbedo   : register(t0);
+Texture2D gNormal   : register(t1);
+Texture2D gPosition : register(t2);
+Texture2D gShadow   : register(t3);
+SamplerState samp         : register(s0);
+SamplerComparisonState sCmp : register(s1);
+
+float3 main(float4 posH : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float3 albedo = gAlbedo.Sample(samp, uv).rgb;
+    float3 N      = normalize(gNormal.Sample(samp, uv).xyz);
+    float3 P      = gPosition.Sample(samp, uv).xyz;     // 월드 위치
+
+    // --- 그림자 판정: 표면점을 빛 클립공간으로 투영해 깊이 비교 ---
+    float4 lp = mul(float4(P, 1.0), gLightVP);
+    float2 suv = lp.xy / lp.w * float2(0.5, -0.5) + 0.5; // 클립→UV, V 뒤집기
+    float  curDepth = lp.z / lp.w;
+    float  shadow = gShadow.SampleCmpLevelZero(sCmp, suv, curDepth - 0.001); // PCF
+
+    // --- 확산 + 스페큘러 (Blinn-Phong) ---
+    float3 L = normalize(gLightPos - P);
+    float  diff = max(dot(N, L), 0.0);
+    float3 V = normalize(gCamPos - P);
+    float3 H = normalize(L + V);
+    float  spec = pow(max(dot(N, H), 0.0), 32.0);
+
+    float3 lit = albedo * 0.05                         // 앰비언트
+               + (diff * albedo + spec) * gLightColor * shadow;
+    return lit;   // HDR: 1.0을 넘을 수 있음 (다음 패스에서 톤맵)
+}</code></pre>
+  </div>
+  <p>
+    조명 결과가 <strong>1.0을 넘어도 그대로 둡니다</strong>. HDR 타깃(<code>R16G16B16A16_FLOAT</code>)이라 밝은 값을
+    잘리지 않고 보존하고, 이 초과분이 다음 블룸 패스의 재료가 됩니다. G-buffer/조명 공식의 성분별 유도는
+    <a class="btn-link" href="./06-deferred.html">6장 디퍼드</a>에, 섀도우 비교 샘플러(PCF)는
+    <a class="btn-link" href="./06-shadowmap.html">6장 섀도우 맵</a>에 상세합니다.
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    라이팅 패스는 G-buffer를 <strong>SRV로 읽는</strong> 패스이므로, 3절 끝에서 G-buffer의 RTV를 반드시
+    풀어 둬야 합니다(안 풀면 자동 언바인드 + 경고). 반대로 이 패스가 끝나면 <code>sceneHDR</code>이 다음
+    블룸 패스의 <em>입력</em>이 되므로, 여기서도 <code>UnbindPSSRVs</code>로 입력 SRV들을 풀고
+    <code>OMSetRenderTargets</code>로 sceneHDR의 RTV를 교체합니다. 릴레이의 매 구간에서 이 스왑이 반복됩니다.
+  </div>
+
+  <!-- =========================================================
+       5. Bloom
+       ========================================================= -->
+  <h2 style="margin-top:44px;">5. Bloom 패스</h2>
+  <p>
+    밝은 부분이 렌즈에서 번져 보이는 광채를 흉내 냅니다. 세 단계입니다:
+    (1) <strong>bright pass</strong>로 임계값 이상의 밝은 픽셀만 추출하고, (2) 가로·세로로 나눈
+    <strong>분리형 가우시안 블러</strong>를 두 텍스처(<code>bloomA</code>↔<code>bloomB</code>) 사이를
+    오가며(ping-pong) 여러 번 적용해 부드럽게 번지게 합니다. 결과 <code>bloomTex</code>는 톤맵 패스에서 더해집니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>BloomPass()</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">void Renderer::BloomPass() {
+    // (1) bright pass: sceneHDR에서 임계값 이상만 bloomA로 추출
+    ctx-&gt;OMSetRenderTargets(1, bloomA.rtv.GetAddressOf(), nullptr);
+    ctx-&gt;PSSetShaderResources(0, 1, sceneHDR.srv.GetAddressOf());
+    DrawFullscreenTriangle(fsVS, brightPS);      // 밝은 부분만 통과
+    UnbindPSSRVs(1);
+
+    // (2) 분리형 가우시안 블러: 가로→세로를 N회 ping-pong
+    bool horizontal = true;
+    for (int i = 0; i &lt; BLOOM_ITER * 2; ++i) {
+        GTarget&amp; dst = horizontal ? bloomB : bloomA;
+        GTarget&amp; src = horizontal ? bloomA : bloomB;
+        ctx-&gt;OMSetRenderTargets(1, dst.rtv.GetAddressOf(), nullptr);
+        ctx-&gt;PSSetShaderResources(0, 1, src.srv.GetAddressOf());
+        UploadCB(cbBlur, horizontal ? 1 : 0);    // 블러 방향
+        DrawFullscreenTriangle(fsVS, blurPS);
+        UnbindPSSRVs(1);
+        horizontal = !horizontal;
+    }
+    // 마지막 dst(= bloomA 또는 bloomB)가 최종 bloomTex가 된다
+}</code></pre>
+  </div>
+  <div class="code">
+    <div class="code-head"><span>blur.hlsl (1D 가우시안, 분리형)</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D src : register(t0);
+SamplerState samp : register(s0);
+cbuffer BlurCB : register(b0) { float2 texel; float horizontal; float _pad; };
+
+static const float w[5] = { 0.2270, 0.1946, 0.1216, 0.0540, 0.0162 };
+
+float3 main(float4 p : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float3 sum = src.Sample(samp, uv).rgb * w[0];
+    float2 dir = horizontal &gt; 0.5 ? float2(texel.x, 0) : float2(0, texel.y);
+    [unroll] for (int i = 1; i &lt; 5; ++i) {
+        sum += src.Sample(samp, uv + dir * i).rgb * w[i];
+        sum += src.Sample(samp, uv - dir * i).rgb * w[i];
+    }
+    return sum;
+}</code></pre>
+  </div>
+  <p>
+    <strong>왜 분리형(separable)인가?</strong> 2D 가우시안 하나(예: 9×9=81탭)를 가로 9탭 + 세로 9탭 = 18탭
+    <em>두 번</em>으로 나누면 수학적으로 같은 결과를 <strong>훨씬 적은 샘플</strong>로 얻습니다. 이것이
+    <code>ping-pong</code>으로 방향을 번갈아 적용하는 이유입니다. 흔히 다운샘플한 절반/1/4 해상도 버퍼에서
+    블러해 비용을 더 줄입니다.
+  </p>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    블룸은 <strong>대역폭 바운드</strong> 패스라, 풀 해상도로 여러 번 돌리면 금세 무거워집니다. 실무에서는
+    (1) <strong>1/2·1/4 다운샘플</strong> 체인에서 블러하고, (2) <strong>양선형 샘플링으로 2탭을 1탭으로 합치는</strong>
+    (linear-sampling Gaussian) 최적화를 씁니다. 위 코드는 이해를 위한 풀 해상도·정탭 버전입니다.
+  </div>
+
+  <!-- =========================================================
+       6. Tonemap + Gamma
+       ========================================================= -->
+  <h2 style="margin-top:44px;">6. Tonemap + Gamma 패스</h2>
+  <p>
+    마지막 패스입니다. <strong>sceneHDR + bloomTex</strong>를 더한 HDR 색을 <strong>ACES 톤맵 곡선</strong>으로
+    눌러 0~1 범위로 매핑하고, <strong>감마 2.2</strong>를 적용해 <strong>백버퍼(화면)</strong>에 씁니다.
+    이 패스만 유일하게 최종 출력이 백버퍼입니다. HDR·톤매핑의 원리는 <a class="btn-link" href="./06-hdr.html">6장 HDR·톤매핑</a>,
+    감마·선형 워크플로는 <a class="btn-link" href="./07-gamma.html">7장 감마</a>에 상세합니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>TonemapPass()</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">void Renderer::TonemapPass() {
+    ctx-&gt;OMSetRenderTargets(1, backbufferRTV.GetAddressOf(), nullptr);
+
+    ID3D11ShaderResourceView* srvs[2] = { sceneHDR.srv.Get(), bloomTex.srv.Get() };
+    ctx-&gt;PSSetShaderResources(0, 2, srvs);
+    DrawFullscreenTriangle(fsVS, tonemapPS);
+    UnbindPSSRVs(2);           // 다음 프레임 클리어 전에 정리
+}</code></pre>
+  </div>
+  <div class="code">
+    <div class="code-head"><span>tonemap.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D sceneHDR : register(t0);
+Texture2D bloomTex : register(t1);
+SamplerState samp  : register(s0);
+cbuffer PostCB : register(b0) { float exposure; float bloomStrength; float2 _pad; };
+
+// Narkowicz 2015 ACES 근사 (필름 룩)
+float3 ACES(float3 x) {
+    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
+
+float4 main(float4 p : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float3 hdr = sceneHDR.Sample(samp, uv).rgb
+               + bloomTex.Sample(samp, uv).rgb * bloomStrength;
+    hdr *= exposure;                    // 노출
+    float3 mapped = ACES(hdr);          // HDR → [0,1]
+    mapped = pow(mapped, 1.0 / 2.2);    // 선형 → sRGB(감마)
+    return float4(mapped, 1.0);
+}</code></pre>
+  </div>
+  <p>
+    순서가 중요합니다: <strong>블룸 합성 → 노출 → 톤맵 → 감마</strong>. 톤맵은 반드시 <em>선형 공간</em>의 HDR 값에
+    적용해야 하고, 감마 보정은 <strong>맨 마지막</strong>에 딱 한 번만 해야 합니다. 감마를 두 번 걸면(예: sRGB 백버퍼
+    포맷 + 셰이더 <code>pow</code>) 색이 씻겨 보이는 <em>이중 보정</em> 버그가 납니다(7장 참고).
+  </p>
+
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    백버퍼 포맷이 <code>_SRGB</code>(예: <code>R8G8B8A8_UNORM_SRGB</code>)면 하드웨어가 자동으로 감마를 적용하므로
+    셰이더에서 <code>pow(1/2.2)</code>를 <strong>또 하면 안 됩니다</strong>. 둘 중 하나만 선택하세요. 위 코드는
+    비-sRGB 백버퍼를 가정해 셰이더에서 수동 감마를 겁니다.
+  </div>
+
+  <!-- =========================================================
+       7. 최적화·병목 노트
+       ========================================================= -->
+  <h2 style="margin-top:44px;">7. 최적화 · 병목 노트</h2>
+  <p>
+    파이프라인을 다 엮고 나면, 어느 패스가 프레임을 잡아먹는지 프로파일러(RenderDoc·PIX·Nsight의 타임라인)로
+    보는 것이 다음 단계입니다. 병목은 대개 셋 중 하나입니다.
+  </p>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead><tr><th>병목</th><th>징후</th><th>대표 원인 패스</th><th>대응</th></tr></thead>
+    <tbody>
+      <tr><td><strong>정점(vertex)</strong></td><td>메시·인스턴스 수↑에 민감</td><td>Shadow · G-buffer</td><td>LOD·컬링(7장)·인스턴싱, 섀도우는 저폴리 프록시</td></tr>
+      <tr><td><strong>픽셀(pixel)</strong></td><td>해상도·광원 수↑에 민감</td><td>Lighting</td><td>타일드/클러스터드로 픽셀당 광원 수 줄이기(6장 경로 비교)</td></tr>
+      <tr><td><strong>대역폭(bandwidth)</strong></td><td>G-buffer·블룸 폭↑에 민감</td><td>G-buffer · Bloom</td><td>채널 패킹·깊이에서 위치 재구성·블룸 다운샘플</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3 style="margin-top:30px;">디퍼드 파이프라인의 장단점</h3>
+  <ul>
+    <li>
+      <strong>장점 — 조명 비용이 광원 수에 대해 확장</strong>: 조명이 <em>보이는 화면 픽셀 × 광원</em>에만 비례해,
+      오버드로우가 심하고 광원이 많은 씬에서 포워드보다 압도적으로 유리합니다.
+    </li>
+    <li>
+      <strong>단점 — MSAA가 까다롭다</strong>: 에지 안티앨리어싱을 G-buffer 단계에서 처리하기 어려워, 보통
+      <strong>FXAA/TAA 같은 후처리 AA</strong>로 대체합니다(7장 안티앨리어싱).
+    </li>
+    <li>
+      <strong>단점 — 반투명 처리 불가</strong>: G-buffer는 픽셀당 표면 하나만 담으므로, 반투명 물체는
+      라이팅 이후 <strong>별도 포워드 패스</strong>로 덧그립니다(7장 투명·정렬).
+    </li>
+    <li>
+      <strong>단점 — 재질 다양성이 G-buffer 크기에 제한</strong>: 재질 파라미터가 늘면 타깃이 늘고 대역폭도
+      늡니다. 그래서 채널 패킹과 위치 재구성으로 G-buffer를 줄이는 것이 최적화의 절반입니다(6장 디퍼드).
+    </li>
+  </ul>
+
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    <strong>패스 간 배리어/전환 자체도 비용</strong>입니다. D3D11은 드라이버가 자동 동기화하지만, RTV↔SRV 전환마다
+    캐시 플러시가 일어날 수 있습니다. D3D12/Vulkan으로 가면 이 전환이 <strong>명시적 리소스 배리어</strong>가 되어
+    (5장 명시적 API) 직접 관리해야 하는데, 원리는 이 페이지의 "RTV 풀고 SRV로 바인딩"과 정확히 같습니다.
+  </div>
+
+  <div class="callout">
+    <span class="tag warn">개념 트랙과의 대응</span>
+    개념 트랙의 <a class="btn-link" href="../index.html#pipeline">렌더 파이프라인 데모</a>는 이 여섯 패스를
+    WebGL 오프스크린 FBO로 실제 렌더하며 타임라인을 드래그해 <em>패스가 하나씩 쌓이는</em> 과정을 보여줍니다.
+    이 페이지는 그 데모의 각 패스를 <strong>D3D11 바인딩과 HLSL 셰이더</strong>로 1:1 옮긴 것입니다. 데모의
+    썸네일 라벨(Shadow·Albedo·Normal·Position·Lit·Bloom)이 여기 각 절과 정확히 짝을 이룹니다.
+  </div>
+
+  <h2 style="margin-top:40px;">참고 링크</h2>
+  <ul>
+    <li><a class="btn-link external" href="https://learnopengl.com/Advanced-Lighting/Deferred-Shading" target="_blank" rel="noopener">LearnOpenGL — Deferred Shading</a></li>
+    <li><a class="btn-link external" href="https://learnopengl.com/Advanced-Lighting/Bloom" target="_blank" rel="noopener">LearnOpenGL — Bloom (분리형 블러)</a></li>
+    <li><a class="btn-link external" href="https://www.realtimerendering.com/" target="_blank" rel="noopener">Real-Time Rendering (RTR) — 파이프라인·경로</a></li>
+    <li><a class="btn-link external" href="https://renderdoc.org/docs/index.html" target="_blank" rel="noopener">RenderDoc 문서 — 패스별 프레임 캡처</a></li>
+    <li><a class="btn-link external" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/" target="_blank" rel="noopener">Narkowicz — ACES Filmic Tone Mapping</a></li>
+  </ul>
+
+  <nav class="page-nav">
+    <a href="./index.html">← 구현 허브</a>
+    <a href="../index.html#pipeline">개념·데모로 보기 →</a>
+  </nav>
+
+</main>
+<script src="./highlight.js"></script>
+<script>
+/* 렌더 파이프라인 히어로 배너 — 이 페이지 주제(여섯 패스가 좌→우로 흐르며 한 프레임을 조립)를 시연한다.
+   · Canvas 2D로 6개 패스 블록이 좌→우로 흐르고, 각 블록 안에 그 패스 결과를 연상시키는 미니 프리뷰를 그린다.
+   · 흐르는 데이터 입자(패스→패스 릴레이)를 얹어 파이프라인 감각을 강조.
+   · 격리 실행(try/catch), 캔버스 크기 피드백 루프 방지(논리 크기는 표시 크기에서만 읽음).
+   · 탭 숨김/화면 밖이면 rAF 루프 정지(자원 절약). */
+(function () {
+  var cv = document.getElementById("pipeHeroCanvas");
+  if (!cv) return;
+
+  // ---------- 표시 크기 → 픽셀 버퍼(피드백 루프 없음) ----------
+  var W = 1, H = 1, dpr = 1;
+  function measure() {
+    var r = cv.getBoundingClientRect();
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.round(r.width * dpr));
+    H = Math.max(1, Math.round(r.height * dpr));
+    if (cv.width !== W) cv.width = W;
+    if (cv.height !== H) cv.height = H;
+  }
+
+  // ---------- 루프 수명 관리 ----------
+  var onScreen = true, rafId = 0, tick = null;
+  function running() { return onScreen && !document.hidden; }
+  function start() { if (tick && running() && !rafId) rafId = requestAnimationFrame(tick); }
+  function stop() { if (rafId) { cancelAnimationFrame(rafId); rafId = 0; } }
+  document.addEventListener("visibilitychange", function () { running() ? start() : stop(); });
+  if ("IntersectionObserver" in window) {
+    new IntersectionObserver(function (es) {
+      onScreen = es[0].isIntersecting;
+      running() ? start() : stop();
+    }, { threshold: 0.01 }).observe(cv);
+  }
+
+  try {
+    init2D();
+  } catch (e) { /* 히어로 실패해도 페이지는 계속 */ }
+
+  function init2D() {
+    var ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    // 6패스 정의: 이름 + 대표색 (개념 트랙 데모와 동일 순서)
+    var passes = [
+      { name: "Clear",    c: "#3a4256" },
+      { name: "Shadow",   c: "#6a5acd" },
+      { name: "G-buffer", c: "#4aa3ff" },
+      { name: "Lighting", c: "#ffca4a" },
+      { name: "Bloom",    c: "#ff7bd0" },
+      { name: "Tonemap",  c: "#7ee787" }
+    ];
+
+    // 릴레이 입자: 블록 사이를 좌→우로 흐른다
+    var N = 46, dots = [];
+    for (var i = 0; i < N; i++) {
+      dots.push({ x: Math.random(), y: 0.30 + Math.random() * 0.40, v: 0.06 + Math.random() * 0.10, s: 1 + Math.random() * 2.2 });
+    }
+
+    var cw = 1, ch = 1;
+    function resize() {
+      measure(); cw = W / dpr; ch = H / dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function roundRect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    var t0 = null;
+    tick = function (ts) {
+      rafId = 0;
+      if (!running()) return;
+      if (t0 === null) t0 = ts;
+      var t = (ts - t0) / 1000;
+      ctx.clearRect(0, 0, cw, ch);
+
+      // 레이아웃: 좌우 여백 두고 6블록 배치
+      var padL = cw * 0.05, padR = cw * 0.05;
+      var totalW = cw - padL - padR;
+      var gap = totalW * 0.028;
+      var bw = (totalW - gap * (passes.length - 1)) / passes.length;
+      var bh = Math.min(ch * 0.42, bw * 0.78);
+      var by = ch * 0.20;
+
+      // 블록 사이 연결선
+      for (var k = 0; k < passes.length - 1; k++) {
+        var x1 = padL + bw * (k + 1) + gap * k;
+        var ym = by + bh * 0.5;
+        ctx.strokeStyle = "rgba(150,180,255,0.28)";
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x1, ym); ctx.lineTo(x1 + gap, ym); ctx.stroke();
+      }
+
+      // 각 패스 블록 + 미니 프리뷰
+      for (var p = 0; p < passes.length; p++) {
+        var bx = padL + (bw + gap) * p;
+        // "활성" 스윕: 시간에 따라 왼쪽부터 강조되며 순환
+        var phase = (t * 0.5) % passes.length;
+        var active = Math.max(0, 1 - Math.abs(phase - p));
+        var glow = 0.5 + 0.5 * active;
+
+        // 블록 배경
+        ctx.save();
+        roundRect(bx, by, bw, bh, 10);
+        var g = ctx.createLinearGradient(bx, by, bx, by + bh);
+        g.addColorStop(0, shade(passes[p].c, 0.55 + 0.35 * glow));
+        g.addColorStop(1, shade(passes[p].c, 0.22 + 0.18 * glow));
+        ctx.fillStyle = g;
+        ctx.shadowColor = passes[p].c;
+        ctx.shadowBlur = 8 + 22 * active;
+        ctx.fill();
+        ctx.restore();
+
+        // 미니 프리뷰(패스별 상징)
+        drawPreview(ctx, passes[p].name, bx + bw * 0.12, by + bh * 0.14, bw * 0.76, bh * 0.5, t, active);
+
+        // 라벨
+        ctx.fillStyle = "rgba(240,244,255," + (0.6 + 0.4 * glow) + ")";
+        ctx.font = "600 " + Math.max(9, Math.min(13, bw * 0.16)) + "px 'JetBrains Mono', Consolas, monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(passes[p].name, bx + bw * 0.5, by + bh - 6);
+      }
+
+      // 릴레이 입자
+      for (var d = 0; d < dots.length; d++) {
+        var dd = dots[d];
+        dd.x += dd.v * (1 / 60);
+        if (dd.x > 1.03) dd.x = -0.03;
+        var px = padL + dd.x * totalW;
+        var py = by + bh * dd.y;
+        ctx.fillStyle = "rgba(180,210,255,0.55)";
+        ctx.beginPath(); ctx.arc(px, py, dd.s, 0, Math.PI * 2); ctx.fill();
+      }
+
+      start();
+    };
+    start();
+
+    // 색을 밝기 계수로 조절
+    function shade(hex, f) {
+      var n = parseInt(hex.slice(1), 16);
+      var r = (n >> 16) & 255, g2 = (n >> 8) & 255, b = n & 255;
+      r = Math.round(r * f); g2 = Math.round(g2 * f); b = Math.round(b * f);
+      return "rgb(" + r + "," + g2 + "," + b + ")";
+    }
+
+    // 패스별 상징 미니 프리뷰
+    function drawPreview(ctx, name, x, y, w, h, t, active) {
+      ctx.save();
+      roundRect(x, y, w, h, 6); ctx.clip();
+      ctx.fillStyle = "rgba(8,10,20,0.55)"; ctx.fillRect(x, y, w, h);
+      var cx = x + w / 2, cy = y + h / 2, r = Math.min(w, h) * 0.32;
+      if (name === "Clear") {
+        // 빈 그리드
+        ctx.strokeStyle = "rgba(120,140,180,0.35)"; ctx.lineWidth = 1;
+        for (var gx = 1; gx < 4; gx++) { ctx.beginPath(); ctx.moveTo(x + w * gx / 4, y); ctx.lineTo(x + w * gx / 4, y + h); ctx.stroke(); }
+      } else if (name === "Shadow") {
+        // 빛과 그림자
+        ctx.fillStyle = "rgba(255,240,180,0.9)"; ctx.beginPath(); ctx.arc(x + w * 0.25, y + h * 0.28, r * 0.5, 0, 7); ctx.fill();
+        ctx.fillStyle = "rgba(30,20,60,0.85)"; ctx.beginPath(); ctx.ellipse(cx + w * 0.12, cy + h * 0.22, r * 0.9, r * 0.35, 0, 0, 7); ctx.fill();
+      } else if (name === "G-buffer") {
+        // 3채널 스택
+        var cols = ["#4aa3ff", "#7ee787", "#ffca4a"];
+        for (var s = 0; s < 3; s++) { ctx.fillStyle = cols[s]; roundRect(x + w * (0.12 + s * 0.12), y + h * (0.18 + s * 0.14), w * 0.55, h * 0.32, 3); ctx.globalAlpha = 0.85; ctx.fill(); ctx.globalAlpha = 1; }
+      } else if (name === "Lighting") {
+        // 구에 하이라이트
+        var lg = ctx.createRadialGradient(cx - r * 0.4, cy - r * 0.4, r * 0.1, cx, cy, r);
+        lg.addColorStop(0, "#fff6d0"); lg.addColorStop(0.5, "#e0a94a"); lg.addColorStop(1, "#5a3a10");
+        ctx.fillStyle = lg; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.fill();
+      } else if (name === "Bloom") {
+        // 번지는 광점
+        var bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 1.6);
+        bg.addColorStop(0, "rgba(255,200,240,0.95)"); bg.addColorStop(0.4, "rgba(255,123,208,0.5)"); bg.addColorStop(1, "rgba(255,123,208,0)");
+        ctx.fillStyle = bg; ctx.fillRect(x, y, w, h);
+      } else { // Tonemap
+        // 좌(HDR 튄값)→우(눌린값) 그라디언트
+        var tg = ctx.createLinearGradient(x, y, x + w, y);
+        tg.addColorStop(0, "#ffffff"); tg.addColorStop(0.5, "#9ad48f"); tg.addColorStop(1, "#2a5a2a");
+        ctx.fillStyle = tg; ctx.fillRect(x, y, w, h);
+      }
+      ctx.restore();
+    }
+  }
+})();
+</script>
+</body>
+</html>

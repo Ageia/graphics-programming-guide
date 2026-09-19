@@ -81,8 +81,12 @@
       <a href="#lod">LOD · 컬링</a>
     </div>
     <div class="nav-group">
-      <div class="nav-title">8. 실전 렌더링 기법</div>
+      <div class="nav-title">8. 실전 사례</div>
       <a href="#grass">잔디 렌더링</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-title">9. 캡스톤 · 렌더 파이프라인</div>
+      <a href="#pipeline">렌더 파이프라인 통합</a>
     </div>
   </nav>
 
@@ -1076,6 +1080,46 @@ fn main(
         <iframe id="grass-embed" src="impl/08-grass.html" title="잔디 렌더링 10기법 (구현)"></iframe>
       </div>
     </section>
+
+    <!-- ========================================================= -->
+    <!-- 9. 캡스톤 · 렌더 파이프라인 -->
+    <!-- ========================================================= -->
+
+    <section id="pipeline">
+      <h2>렌더 파이프라인 (Rendering Pipeline)</h2>
+      <p class="lead">지금까지 배운 조각들 — MVP 변환 · 셰이더 · 텍스처 · 조명 · 그림자 · 톤맵 — 은
+        사실 <strong>하나의 렌더 파이프라인의 서로 다른 단계</strong>입니다. 한 프레임이 어떻게 지어지는지 통째로 봅니다.</p>
+      <a class="impl-link" href="impl/09-pipeline.html">렌더 파이프라인을 C++/DirectX 11로 직접 구현하기</a>
+
+      <p>GPU가 3D 씬을 화면 픽셀로 바꾸는 과정은 <strong>여러 패스(pass)가 정해진 순서로 이어지는 흐름</strong>입니다.
+        각 패스는 이전 패스의 결과(텍스처·버퍼)를 입력으로 받아 다음 결과를 만들고, 마지막에 최종 색이 완성됩니다.
+        아래 데모는 그래픽스 디버거(RenderDoc)처럼 <strong>타임라인을 드래그하면 프레임이 패스 순서대로 쌓이는 과정</strong>을
+        보여줍니다. 하단 썸네일은 각 패스가 만든 중간 리소스(그림자맵 · G-buffer · 라이팅 · 블룸)입니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">인터랙티브 렌더 파이프라인 (타임라인 스크러버)</div>
+        <canvas id="c-pipeline" height="480"></canvas>
+        <div class="controls" id="ctl-pipeline"></div>
+        <p class="hint">▶ 재생을 누르거나 타임라인을 드래그하세요. 각 패스가 무엇을 만드는지 하단 썸네일과 설명으로 확인할 수 있습니다.
+          캔버스를 드래그하면 카메라 시점이 돌아갑니다.</p>
+        <div class="readout" id="r-pipeline"></div>
+      </div>
+
+      <h3>파이프라인의 단계</h3>
+      <p>이 데모가 재현하는 <strong>지연 셰이딩(deferred shading)</strong> 파이프라인의 순서는 다음과 같습니다:</p>
+      <ol>
+        <li><strong>Clear</strong> — 컬러·깊이 버퍼를 지워 빈 캔버스에서 시작합니다.</li>
+        <li><strong>Shadow Map</strong> — 빛의 시점에서 씬을 렌더해 각 지점까지의 거리를 기록합니다(그림자 판정용).</li>
+        <li><strong>G-buffer</strong> — 화면의 픽셀마다 재질색(Albedo) · 법선(Normal) · 월드 좌표(Position)를 각각 저장합니다.</li>
+        <li><strong>Deferred Lighting</strong> — G-buffer와 그림자맵을 읽어 픽셀 단위로 조명을 계산합니다. 물체 수와 무관하게 조명당 한 번이라 조명이 많을수록 유리합니다.</li>
+        <li><strong>Bloom</strong> — 밝은 부분만 추출해 블러한 뒤 더해 빛의 광채를 얹습니다(포스트프로세스).</li>
+        <li><strong>Tonemap + Gamma</strong> — 넓은 밝기 범위(HDR)를 ACES 곡선으로 눌러 화면 범위로 매핑하고 감마 보정해 최종 색을 냅니다.</li>
+      </ol>
+
+      <div class="tip"><strong>핵심:</strong> 각 단계는 독립적이지 않고 <em>이전 단계의 출력이 다음 단계의 입력</em>이 되는 사슬입니다.
+        어느 단계가 병목인지에 따라 최적화 전략이 달라집니다 — 정점이 많으면 인스턴싱·LOD로, 픽셀 셰이더가 무거우면 오버드로우를 줄이고,
+        메모리 대역폭이 문제면 G-buffer 채널 수·정밀도를 줄입니다.</div>
+    </section>
   </main>
 </div>
 
@@ -1089,6 +1133,7 @@ fn main(
 <script src="js/demos-adv2.js"></script>
 <script src="js/demos-adv3.js"></script>
 <script src="js/demos-adv4.js"></script>
+<script src="js/demos-pipeline.js"></script>
 <script src="js/main.js"></script>
 <script>
 /* 임베드된 구현 사례연구 iframe 제어(오른쪽 화면 병합용, 여러 개 지원):

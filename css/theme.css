@@ -4,13 +4,16 @@
    테마를 바꾸려면 아래 :root 토큰만 수정하면 전 페이지에 반영된다.
    (개념 트랙 css/style.css, 구현 트랙 impl/impl.css 는 이 토큰만 참조)
 
-   현재 테마: "Tactical HUD" — 거의 흑색 배경 · 라운드 고딕 UI(코드는 모노스페이스) · 하이라인 보더
+   현재 테마: "Tactical HUD" — 거의 흑색 배경 · 라운드 고딕 UI(주아, 코드는 모노스페이스) · 하이라인 보더
    · 코너 브래킷 프레임 · 상태 pill · 바 미터. 감시/전술 대시보드 무드.
    ※ 캔버스 데모 색과 코드 하이라이트 색은 "콘텐츠"라 흑백화하지 않는다
      (레퍼런스도 검은 HUD 안에 컬러 렌더가 들어간다).
    ============================================================ */
 
-/* ── UI 폰트: 나눔스퀘어라운드(동글동글한 라운드 고딕). 굵기별 파일을 한 패밀리로 묶는다 ── */
+/* ── UI 폰트: 주아(Jua, 동글동글·두꺼운 라운드 고딕). 로드 실패 시 나눔스퀘어라운드로 폴백 ── */
+@import url("https://fonts.googleapis.com/css2?family=Jua&display=swap");
+
+/* 폴백: 나눔스퀘어라운드. 굵기별 파일을 한 패밀리로 묶는다 */
 @font-face {
   font-family: "NanumSquareRound"; font-weight: 300; font-style: normal; font-display: swap;
   src: url(https://hangeul.pstatic.net/hangeul_static/webfont/NanumSquareRound/NanumSquareRoundL.woff2) format("woff2"), url(https://hangeul.pstatic.net/hangeul_static/webfont/NanumSquareRound/NanumSquareRoundL.woff) format("woff");
@@ -68,7 +71,7 @@
 
   /* ── 폰트 ───────────────────────────────────── */
   --font-mono: "JetBrains Mono","Consolas","D2Coding",ui-monospace,SFMono-Regular,Menlo,monospace;
-  --font-ui:   "NanumSquareRound","Nunito","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif; /* 본문·UI: 라운드 고딕 (코드는 --font-mono 유지) */
+  --font-ui:   "Jua","NanumSquareRound","Nunito","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif; /* 본문·UI: 라운드 고딕 (코드는 --font-mono 유지) */
 
   /* ── 코너 브래킷 유틸 파라미터 ─────────────── */
   --bkt-size:  14px;   /* 코너 길이 */

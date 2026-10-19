@@ -296,40 +296,46 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
   <h2 style="margin-top:40px;">CHAPTER 4 · GPU · 셰이더</h2>
   <div class="hub-grid">
     <a class="hub-card" href="./04-gpu-intro.html">
-      <div class="num">1 / 6</div>
+      <div class="num">1 / 7</div>
       <h3>GPU 병렬 처리</h3>
       <p>셰이더가 스레드 그룹으로 도는 원리, SIMT, 워프/웨이브프론트 직관.</p>
       <div class="topics">병렬 실행 · 스레드 그룹 · 파이프라인 스테이지</div>
     </a>
     <a class="hub-card" href="./04-shaderprogram.html">
-      <div class="num">2 / 6</div>
+      <div class="num">2 / 7</div>
       <h3>셰이더 만들기 (재사용 헬퍼)</h3>
       <p>D3DCompile로 HLSL 컴파일, 에러 blob 처리, ComPtr 기반 셰이더 클래스.</p>
       <div class="topics">D3DCompile · ID3DBlob · Create*Shader · cbuffer 헬퍼</div>
     </a>
     <a class="hub-card" href="./04-vertexshader.html">
-      <div class="num">3 / 6</div>
+      <div class="num">3 / 7</div>
       <h3>Vertex Shader</h3>
       <p>입출력 구조체와 시맨틱(POSITION/SV_Position), cbuffer, mul() 행렬곱.</p>
       <div class="topics">SV_Position · 시맨틱 · cbuffer · mul</div>
     </a>
     <a class="hub-card" href="./04-fragshader.html">
-      <div class="num">4 / 6</div>
+      <div class="num">4 / 7</div>
       <h3>Pixel Shader</h3>
       <p>SV_Target 반환, SV_Position으로 화면 좌표, 보간된 입력 다루기.</p>
       <div class="topics">SV_Target · 보간 · 픽셀 단위 연산</div>
     </a>
     <a class="hub-card" href="./04-computeshader.html">
-      <div class="num">5 / 6</div>
+      <div class="num">5 / 7</div>
       <h3>Compute Shader</h3>
       <p>[numthreads], RWStructuredBuffer(UAV), Dispatch로 범용 GPU 연산.</p>
       <div class="topics">numthreads · UAV · SV_DispatchThreadID · Dispatch</div>
     </a>
     <a class="hub-card" href="./04-shaderlang.html">
-      <div class="num">6 / 6</div>
+      <div class="num">6 / 7</div>
       <h3>HLSL 요점</h3>
       <p>타입·한정자·내장함수(lerp/frac), 셰이더 모델 프로파일, 타 언어 매핑.</p>
       <div class="topics">float3/float4x4 · lerp/frac · vs_5_0 · GLSL/WGSL 대응</div>
+    </a>
+    <a class="hub-card" href="./04-texsample.html">
+      <div class="num">7 / 7</div>
+      <h3>텍스처 읽기 함수</h3>
+      <p>Load·Sample·SampleLevel·SampleGrad·Gather·SampleCmp 비교, 샘플러 상태, 데이터 텍스처·그림자 실전.</p>
+      <div class="topics">Load · SampleGrad · GatherRed · SampleCmpLevelZero · sRGB 뷰</div>
     </a>
   </div>
 

@@ -75,6 +75,7 @@
 | 프래그먼트/픽셀 셰이더 | 🟡 | ✅ | ✅ | 04-fragshader |
 | 컴퓨트 셰이더 | 🟡 | ✅ | ✅ | 04-computeshader |
 | HLSL/셰이더 언어·상수버퍼 | 🟡 | ✅ | ✅ | 04-shaderlang |
+| 텍스처 읽기 함수(Load·Sample·SampleLevel·SampleGrad·Gather·SampleCmp) | ✅ | ✅ | ✅ | 04-texsample · 개념 #texsample(2D 해부 4 + WebGL2 A/B 2) |
 | 지오메트리·테셀레이션·메시 셰이더 | ⬜ | ⬜ | ⬜ | 신규 |
 
 ## PART 5 — 그래픽스 API (현 5장)

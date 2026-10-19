@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구현: 텍스처 읽기 함수 (Load · Sample · Gather · SampleCmp) — C++/DirectX 11 · HLSL</title>
+<meta name="description" content="HLSL의 Load·Sample·SampleBias·SampleLevel·SampleGrad·Gather·SampleCmp를 D3D11 리소스·뷰·샘플러 생성부터 셰이더 한 줄, 데이터 텍스처·그림자·업샘플 실전 코드까지 비교 구현합니다." />
+<link rel="stylesheet" href="../css/theme.css" />
+<link rel="stylesheet" href="../css/style.css" />
+<link rel="stylesheet" href="./impl.css" />
+<script src="./embed.js"></script>
+<style>
+/* 텍스처 읽기 함수 히어로 — 원근 바닥 위를 Load(블록)↔Sample(보간) 경계가 오가는 셰이더 */
+.ts-hero {
+  position: relative;
+  width: 100%;
+  height: 300px;
+  margin: 18px 0 26px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: linear-gradient(180deg, #0b1022 0%, #151a3c 50%, #1d1636 100%);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(126, 160, 255, 0.20);
+}
+.ts-hero canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.ts-hero .th-shade {
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(180deg, rgba(6, 8, 18, 0.10) 0%, rgba(6, 8, 18, 0) 45%, rgba(6, 8, 18, 0.55) 100%);
+}
+.ts-hero .th-caption { position: absolute; left: 34px; bottom: 26px; z-index: 2; pointer-events: none; }
+.ts-hero .th-title {
+  margin: 0;
+  font-size: clamp(30px, 5.4vw, 56px);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  color: #f1f5ff;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.6), 0 0 40px rgba(126, 200, 255, 0.35);
+}
+.ts-hero .th-title .accent { color: #ffb454; }
+.ts-hero .th-title .accent2 { color: #56d4dd; }
+.ts-hero .th-sub {
+  margin: 10px 0 0;
+  font-size: clamp(11px, 1.9vw, 14px);
+  font-weight: 600;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: rgba(220, 228, 255, 0.85);
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.6);
+}
+.ts-hero .th-tag {
+  position: absolute; top: 18px; z-index: 2; pointer-events: none;
+  font: 700 12px "JetBrains Mono", Consolas, monospace; letter-spacing: 0.08em;
+  padding: 4px 9px; border-radius: 6px; background: rgba(8, 10, 20, 0.6);
+}
+.ts-hero .th-tag.l { left: 18px; color: #56d4dd; border: 1px solid rgba(86, 212, 221, 0.4); }
+.ts-hero .th-tag.r { right: 18px; color: #ffb454; border: 1px solid rgba(255, 180, 84, 0.4); }
+@media (max-width: 640px) {
+  .ts-hero { height: 220px; }
+  .ts-hero .th-caption { left: 20px; bottom: 18px; }
+}
+</style>
+</head>
+<body>
+<main class="content" style="max-width:1200px;">
+  <a class="back-link" href="./index.html" onclick="if(history.length>1){history.back();return false}">← 뒤로가기</a>
+
+  <!-- 타이틀 히어로: 왼쪽 = Load(텍셀 블록), 오른쪽 = Sample(bilinear 보간), 경계가 오간다 -->
+  <div class="ts-hero" id="tsHero">
+    <canvas id="tsHeroCanvas" width="940" height="300"></canvas>
+    <div class="th-shade"></div>
+    <span class="th-tag l">Load · texel</span>
+    <span class="th-tag r">Sample · filtered</span>
+    <div class="th-caption">
+      <h2 class="th-title"><span class="accent2">Load</span> vs <span class="accent">Sample</span></h2>
+      <p class="th-sub">Load · Sample · SampleBias · SampleLevel · SampleGrad · Gather · SampleCmp</p>
+    </div>
+  </div>
+
+  <h1>텍스처 읽기 함수 — Load · Sample · Gather · SampleCmp</h1>
+  <p class="lead">
+    HLSL에서 텍스처를 읽는 방법은 하나가 아닙니다. <code>Load</code>는 배열 인덱싱처럼 <strong>텍셀 하나를 그대로</strong> 꺼내고,
+    <code>Sample</code>은 하드웨어 샘플러로 <strong>주소 모드·필터·자동 LOD</strong>를 거쳐 재구성한 값을 줍니다. 그 사이에
+    LOD를 고정하는 <code>SampleLevel</code>, 미분을 직접 주는 <code>SampleGrad</code>, LOD를 미는 <code>SampleBias</code>,
+    섞지 않고 4개를 주는 <code>Gather</code>, 비교 후 섞는 <code>SampleCmp</code>가 있습니다. 이 페이지는 각 함수를
+    <strong>D3D11 리소스·뷰·샘플러 생성 → HLSL 호출 한 줄 → 실전 패턴(데이터 텍스처·업샘플·그림자) → 함정</strong> 순서로 구현합니다.
+  </p>
+
+  <div class="callout">
+    <span class="tag warn">규약</span>
+    D3D 규약으로 통일합니다: <strong>행벡터</strong> <code>mul(v, M)</code>, 왼손 좌표계, 클립 <code>z ∈ [0,1]</code>,
+    텍스처 <strong>V축 위→아래</strong>(좌상단이 <code>(0,0)</code>), 텍셀 <code>i</code>의 중심은 <code>(i + 0.5) / W</code>.
+    셰이더 모델은 <code>vs_5_0</code>/<code>ps_5_0</code>/<code>cs_5_0</code> 기준이고, SM 6.x 이후 달라지는 점은 따로 표시합니다.
+  </div>
+  <div class="callout">
+    <span class="tag">전제 · 함께 보기</span>
+    텍스처 업로드·SRV·UV 매핑의 큰 줄기는 <a class="btn-link" href="./03-texmap.html">03 텍스처 매핑</a>,
+    밉 체인·필터 이론은 <a class="btn-link" href="./07-mipmap.html">07 밉맵·필터링</a>, sRGB는 <a class="btn-link" href="./07-gamma.html">07 감마</a>,
+    그림자 전체 흐름은 <a class="btn-link" href="./06-shadowmap.html">06 Shadow Mapping</a>에서 다룹니다.
+    손으로 만지는 2D 해부와 3D A/B 비교 데모는 <a class="btn-link" href="../index.html#texsample">개념 트랙: 텍스처 읽기 함수</a>에 있습니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">0. 원리 — 배열 읽기와 신호 재구성</h2>
+  <p>
+    <strong>직관 한 문장:</strong> <code>Load</code>는 "몇 번 칸?"에 답하고, <code>Sample</code>은 "이 위치·이 크기의 영역은 평균적으로 무슨 색?"에 답합니다.
+    텍스처를 연속 신호 <i>f(u)</i>의 표본 <i>f<sub>i</sub> = f((i+0.5)/W)</i>로 보면, 임의 위치의 값은 재구성 필터 <i>h</i>로
+    <code>f(u) ≈ Σ f<sub>i</sub> · h(u·W − 0.5 − i)</code>입니다. bilinear는 <i>h</i>가 폭 2인 삼각형(tent)인 경우이고,
+    축소 시에는 발자국 크기만큼 저역 통과(밉 피라미드)를 먼저 거쳐야 앨리어싱이 없습니다. <code>Load</code>는 이 모든 단계를 건너뛴 <code>f<sub>i</sub></code> 그 자체입니다.
+  </p>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead><tr><th>단계</th><th>하드웨어가 하는 일</th><th>Load</th><th>Sample</th><th>SampleLevel</th><th>SampleGrad</th><th>Gather</th><th>SampleCmp(LevelZero)</th></tr></thead>
+    <tbody>
+      <tr><td>① LOD 계산</td><td>ddx/ddy → λ, bias·clamp</td><td>—(mip 인자)</td><td>자동</td><td>인자</td><td>인자 미분으로</td><td>밉 0</td><td>자동(0)</td></tr>
+      <tr><td>② 주소 변환</td><td>Wrap/Mirror/Clamp/Border</td><td>— (밖이면 0)</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td></tr>
+      <tr><td>③ 텍셀 fetch</td><td>캐시에서 1~N개</td><td>1</td><td>1~N×8</td><td>1~8</td><td>1~N×8</td><td>4</td><td>4(×밉)</td></tr>
+      <tr><td>④ 포맷 변환</td><td>UNORM→float, <strong>sRGB 디코드</strong>, BC 해제</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td></tr>
+      <tr><td>⑤ 비교</td><td>ref와 ComparisonFunc</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—(GatherCmp는 ✔)</td><td>✔</td></tr>
+      <tr><td>⑥ 필터(가중합)</td><td>bilinear/trilinear/aniso</td><td>—</td><td>✔</td><td>✔</td><td>✔</td><td>— (4값 그대로)</td><td>✔(비교 결과를)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    ④ 포맷 변환은 <strong>모든 함수에 공통</strong>입니다. <code>DXGI_FORMAT_R8G8B8A8_UNORM_SRGB</code> 뷰로 읽으면 <code>Load</code>도 선형으로 디코드된 값을 받습니다.
+    "Load는 sRGB 영향이 없다"는 말은 틀렸습니다. 데이터 텍스처는 <code>_TYPELESS</code> 리소스에 <code>_UNORM</code> 뷰를 만들거나, 처음부터 <code>_UNORM</code>/<code>_FLOAT</code>로 만드세요.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">1. 리소스 · 뷰 · 샘플러 준비 (C++)</h2>
+  <p>
+    함수를 고르기 전에 무엇을 바인딩할지 정합니다. <code>Load</code>/<code>Gather</code>의 텍셀 해석은 <strong>SRV 포맷</strong>이,
+    <code>Sample*</code>의 동작은 <strong>SamplerState</strong>가 정합니다. 시각용 텍스처는 <code>_TYPELESS</code>로 만들고 sRGB 뷰와 UNORM 뷰를 둘 다 만들 수 있게 해 두면,
+    같은 메모리를 디버그·데이터 읽기용으로 따로 해석할 수 있습니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>texture_views.cpp — 같은 텍스처에 sRGB/UNORM 두 뷰</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">using Microsoft::WRL::ComPtr;
+
+// 시각용 컬러 텍스처: TYPELESS로 만들어 두 가지 해석을 허용
+D3D11_TEXTURE2D_DESC td = {};
+td.Width = w; td.Height = h;
+td.MipLevels = 0;                                  // 전체 밉 체인
+td.ArraySize = 1;
+td.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;         // 뷰에서 SRGB / UNORM 선택
+td.SampleDesc.Count = 1;
+td.Usage = D3D11_USAGE_DEFAULT;
+td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+ComPtr&lt;ID3D11Texture2D&gt; tex;
+device-&gt;CreateTexture2D(&amp;td, nullptr, &amp;tex);
+
+D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+sd.Texture2D.MostDetailedMip = 0;
+sd.Texture2D.MipLevels = (UINT)-1;
+
+sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;       // 읽을 때 sRGB→선형 (Sample·Load 모두)
+ComPtr&lt;ID3D11ShaderResourceView&gt; srvSRGB;
+device-&gt;CreateShaderResourceView(tex.Get(), &amp;sd, &amp;srvSRGB);
+
+sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;            // 저장 바이트 그대로 /255
+ComPtr&lt;ID3D11ShaderResourceView&gt; srvRaw;
+device-&gt;CreateShaderResourceView(tex.Get(), &amp;sd, &amp;srvRaw);</code></pre>
+  </div>
+  <p>샘플러는 용도별로 몇 개를 미리 만들어 슬롯에 고정해 두는 것이 일반적입니다. 아래 다섯 개면 이 페이지의 모든 함수를 커버합니다.</p>
+  <div class="code">
+    <div class="code-head"><span>samplers.cpp — 용도별 SamplerState</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">ComPtr&lt;ID3D11SamplerState&gt; MakeSampler(ID3D11Device* dev, D3D11_FILTER filter,
+                                       D3D11_TEXTURE_ADDRESS_MODE addr,
+                                       UINT maxAniso = 1,
+                                       D3D11_COMPARISON_FUNC cmp = D3D11_COMPARISON_NEVER) {
+    D3D11_SAMPLER_DESC d = {};
+    d.Filter = filter;
+    d.AddressU = d.AddressV = d.AddressW = addr;
+    d.MipLODBias = 0.0f;                 // SampleBias와 별개로 샘플러 단에서 더해지는 bias
+    d.MaxAnisotropy = maxAniso;          // ANISOTROPIC 필터일 때만 의미(1~16)
+    d.ComparisonFunc = cmp;              // COMPARISON_* 필터일 때만 의미
+    d.BorderColor[0] = d.BorderColor[1] = d.BorderColor[2] = d.BorderColor[3] = 1.0f;
+    d.MinLOD = 0.0f;
+    d.MaxLOD = D3D11_FLOAT32_MAX;        // 0으로 두면 밉 0만 사용
+    ComPtr&lt;ID3D11SamplerState&gt; s;
+    dev-&gt;CreateSamplerState(&amp;d, &amp;s);
+    return s;
+}
+
+auto sPoint   = MakeSampler(dev, D3D11_FILTER_MIN_MAG_MIP_POINT,  D3D11_TEXTURE_ADDRESS_CLAMP);
+auto sLinear  = MakeSampler(dev, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_TEXTURE_ADDRESS_WRAP);   // trilinear
+auto sAniso   = MakeSampler(dev, D3D11_FILTER_ANISOTROPIC,        D3D11_TEXTURE_ADDRESS_WRAP, 16);
+auto sClamp   = MakeSampler(dev, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_TEXTURE_ADDRESS_CLAMP);  // 포스트·LUT
+// 그림자: 비교 + 선형 = 하드웨어 2×2 PCF. Border=1(빛 받음)로 맵 밖을 밝게
+auto sShadow  = MakeSampler(dev, D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT,
+                            D3D11_TEXTURE_ADDRESS_BORDER, 1, D3D11_COMPARISON_LESS_EQUAL);
+
+ID3D11SamplerState* all[] = { sPoint.Get(), sLinear.Get(), sAniso.Get(), sClamp.Get(), sShadow.Get() };
+ctx-&gt;PSSetSamplers(0, 5, all);   // s0~s4
+ctx-&gt;VSSetSamplers(0, 5, all);   // VS에서 SampleLevel을 쓸 때
+ctx-&gt;CSSetSamplers(0, 5, all);</code></pre>
+  </div>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    샘플러 객체는 드라이버가 해시로 중복 제거하지만, 매 드로우마다 <code>CreateSamplerState</code>를 부르는 것은 피하세요. D3D11은 스테이지당 16 슬롯, D3D12는 정적 샘플러(루트 시그니처)로 고정하는 것이 관례입니다.
+    <code>Load</code>만 쓰는 셰이더는 샘플러 슬롯이 아예 필요 없습니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">2. Load — 정수 좌표로 텍셀 하나</h2>
+  <p>
+    <code>Load</code>는 <strong>밉·배열 인덱스까지 포함한 정수 주소</strong>를 받습니다. 좌표 차원이 하나 더 붙는 이유는 마지막 성분이 mip이기 때문입니다.
+    <code>operator[]</code>는 밉 0 전용 단축형이고, <code>mips[m][xy]</code>로 다른 밉도 읽을 수 있습니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>load.hlsl — 형태별 Load</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D&lt;float4&gt;      gAlbedo   : register(t0);
+Texture2D&lt;float&gt;       gDepth    : register(t1);
+Texture2DArray&lt;float4&gt; gLayers   : register(t2);
+Texture2DMS&lt;float4, 4&gt; gMSAA     : register(t3);
+Buffer&lt;float4&gt;         gPoints   : register(t4);   // 1D 데이터는 버퍼도 후보
+
+float4 LoadExamples(float4 svPos : SV_Position) : SV_Target
+{
+    int2 p = int2(svPos.xy);                        // 화면과 1:1인 버퍼: 픽셀 중심(x+0.5)을 버림 → 정확한 텍셀
+
+    float4 a  = gAlbedo.Load(int3(p, 0));           // (x, y, mip)
+    float4 a2 = gAlbedo[p];                         // 위와 동일(밉 0)
+    float4 a3 = gAlbedo.mips[2][p &gt;&gt; 2];            // 밉 2: 해상도가 1/4이므로 좌표도 &gt;&gt; 2
+    float4 o  = gAlbedo.Load(int3(p, 0), int2(1, 0)); // 즉시 오프셋 [-8, 7]
+
+    float  z  = gDepth.Load(int3(p, 0));            // 깊이 SRV(R24_UNORM_X8_TYPELESS 등)는 .r 한 채널
+    float4 l  = gLayers.Load(int4(p, 3, 0));        // (x, y, 배열 슬라이스, mip)
+    float4 s2 = gMSAA.Load(p, 2);                   // 2번 MSAA 샘플(밉 없음)
+    float4 b  = gPoints.Load(17);                   // 버퍼: 요소 인덱스
+
+    // 크기 조회 — UV → 텍셀 변환에 필요
+    uint W, H, mipCount;
+    gAlbedo.GetDimensions(0, W, H, mipCount);
+    return a;
+}
+
+// UV를 이미 가진 경우의 Load: floor(uv * size) — round가 아니다
+float4 LoadAtUV(Texture2D&lt;float4&gt; t, float2 uv, uint mip)
+{
+    uint W, H, n; t.GetDimensions(mip, W, H, n);
+    int2 ip = int2(floor(uv * float2(W, H)));
+    ip = clamp(ip, int2(0, 0), int2(W - 1, H - 1));  // 범위 밖은 0이 오므로 필요하면 직접 clamp
+    return t.Load(int3(ip, mip));
+}</code></pre>
+  </div>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    ① <strong>범위 밖 Load는 0</strong>을 반환합니다(D3D10+ 정의된 동작). 주소 모드가 없으니 가장자리 커널(블러·Sobel)은 직접 <code>clamp</code>해야 합니다.
+    ② <code>int2(uv * W)</code>는 음수 uv에서 0 쪽으로 잘립니다(−0.3 → 0). 음수가 가능하면 <code>floor</code>를 먼저 쓰세요.
+    ③ 텍스처 크기를 상수버퍼에 하드코딩하지 말고 <code>GetDimensions</code>를 쓰세요. 해상도 스케일·밉 변경 시 바로 깨집니다.
+    ④ <code>Load</code>는 "필터가 없어서" 시각용 텍스처를 축소해 그리면 지글거립니다. 개념 트랙 3D 바닥 데모의 A 쪽이 그 모습입니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">3. Sample · SampleBias · SampleLevel · SampleGrad</h2>
+  <p>
+    네 함수는 같은 샘플러 경로를 타고 <strong>LOD를 어디서 얻느냐</strong>만 다릅니다. <code>Sample</code>/<code>SampleBias</code>는 쿼드(2×2 픽셀)의 이웃 차이로 미분을 구하므로
+    <strong>픽셀 셰이더 전용</strong>이고, <code>SampleLevel</code>과 <code>SampleGrad</code>는 호출자가 LOD 정보를 주므로 어느 단계에서나 됩니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>sample_family.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D    gTex    : register(t0);
+SamplerState sLinear : register(s1);
+SamplerState sAniso  : register(s2);
+
+float4 PS(float2 uv : TEXCOORD0) : SV_Target
+{
+    float4 c0 = gTex.Sample(sAniso, uv);                    // 자동 LOD(미분) + 샘플러 필터
+    float4 c1 = gTex.Sample(sAniso, uv, int2(1, 0));        // 텍셀 단위 즉시 오프셋
+    float4 c2 = gTex.SampleBias(sLinear, uv, -0.5);         // λ - 0.5 → 조금 더 선명(그리고 더 지글)
+    float4 c3 = gTex.SampleLevel(sLinear, uv, 3.0);         // λ = 3 고정(미분 무시)
+    float2 dx = ddx(uv), dy = ddy(uv);
+    float4 c4 = gTex.SampleGrad(sLinear, uv, dx, dy);       // = Sample과 같은 결과(미분을 직접 줬을 뿐)
+
+    float  lod  = gTex.CalculateLevelOfDetail(sLinear, uv);           // 하드웨어가 고를 λ(클램프 후)
+    float  lodU = gTex.CalculateLevelOfDetailUnclamped(sLinear, uv);  // 클램프 전 λ
+    return c0;
+}</code></pre>
+  </div>
+
+  <h3>3-1. 정점·컴퓨트 셰이더에서는 SampleLevel</h3>
+  <p>정점 셰이더에는 쿼드가 없으니 미분도 없습니다. 하이트맵 디스플레이스먼트처럼 VS에서 텍스처를 읽을 때는 LOD를 직접 줍니다.
+    컴퓨트에서 리샘플링(크기가 다른 버퍼로 옮기기)할 때도 마찬가지입니다.</p>
+  <div class="code">
+    <div class="code-head"><span>vs_displace.hlsl / cs_resample.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D&lt;float&gt; gHeight : register(t0);
+SamplerState     sClamp  : register(s3);
+cbuffer CB : register(b0) { float4x4 gWVP; float gScale; float2 gInvOut; }
+
+struct VSIn { float3 pos : POSITION; float2 uv : TEXCOORD0; };
+float4 VS(VSIn i) : SV_Position
+{
+    float h = gHeight.SampleLevel(sClamp, i.uv, 0);      // VS에서 Sample()은 컴파일 에러: 미분이 없다
+    float3 p = i.pos + float3(0, h * gScale, 0);
+    return mul(float4(p, 1), gWVP);
+}
+
+Texture2D&lt;float4&gt;   gSrc : register(t1);
+RWTexture2D&lt;float4&gt; gDst : register(u0);
+[numthreads(8, 8, 1)]
+void CSResample(uint3 id : SV_DispatchThreadID)
+{
+    float2 uv = (id.xy + 0.5) * gInvOut;                 // 출력 텍셀 중심 → 입력 UV
+    gDst[id.xy] = gSrc.SampleLevel(sClamp, uv, 0);       // bilinear 리샘플
+}</code></pre>
+  </div>
+
+  <h3>3-2. UV가 불연속일 때 SampleGrad — 아틀라스 이음새 없애기</h3>
+  <p>텍스처 아틀라스의 한 타일을 <code>frac()</code>로 반복하면 타일 경계에서 uv가 1→0으로 튑니다. 쿼드 이웃 차이가 거의 1(=텍스처 전체)이 되어
+    λ가 최상위 밉으로 치솟고, <strong>경계마다 1픽셀 두께의 선</strong>이 생깁니다. 미분은 <em>연속인 좌표</em>로 구해서 넘기면 됩니다.</p>
+  <div class="code">
+    <div class="code-head"><span>atlas_tile.hlsl</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">float4 SampleAtlasTile(Texture2D atlas, SamplerState s, float2 worldUV,
+                       float2 tileOrigin, float2 tileSize, float2 padTexels, float2 atlasSize)
+{
+    // 미분은 frac 전에, 아틀라스 스케일로: 연속 좌표 → 이음새 없음
+    float2 dx = ddx(worldUV) * tileSize;
+    float2 dy = ddy(worldUV) * tileSize;
+
+    // 패딩만큼 안쪽으로 줄여 이웃 타일이 bilinear로 번지지 않게
+    float2 pad   = padTexels / atlasSize;
+    float2 inner = tileSize - 2.0 * pad;
+    float2 uv    = tileOrigin + pad + frac(worldUV) * inner;
+
+    return atlas.SampleGrad(s, uv, dx, dy);
+}</code></pre>
+  </div>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    분기 안의 <code>Sample</code>: 쿼드의 일부 픽셀만 들어가는 <code>if</code> 안에서 <code>Sample</code>을 부르면 미분이 정의되지 않습니다(SM5에서는 컴파일러가 분기를 펼치거나 경고).
+    <code>ddx/ddy</code>는 <strong>분기 밖에서</strong> 구해 두고 안에서는 <code>SampleGrad</code>를 부르세요. <code>discard</code>된 픽셀도 이웃의 미분 계산을 위해 "헬퍼 픽셀"로 계속 실행될 수 있습니다(출력은 쓰지 않음).
+  </div>
+  <div class="callout">
+    <span class="tag warn">실무</span>
+    트라이플래너 매핑, 시차(parallax) 매핑, 구면 좌표(위경도 텍스처의 경도 이음새), 가상 텍스처의 페이지 경계가 모두 같은 문제를 같은 방식(<code>SampleGrad</code>)으로 풉니다.
+    TAA·DLSS·FSR 같은 업스케일러를 쓸 때는 내부 해상도가 낮으므로 엔진이 <code>MipLODBias = log2(내부/출력)</code>(음수)를 샘플러에 걸어 출력 해상도 기준의 선명도를 맞춥니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">4. Gather — 2×2를 섞지 않고</h2>
+  <p>
+    <code>Gather</code>는 bilinear가 쓸 4텍셀에서 <strong>한 채널</strong>을 받아옵니다. 반환 순서는 <strong>x = (u0, v1) 왼쪽아래, y = (u1, v1) 오른쪽아래, z = (u1, v0) 오른쪽위, w = (u0, v0) 왼쪽위</strong>이고,
+    여기서 v1은 V축이 아래로 커지는 D3D 관례에서 아래 행입니다. 항상 <strong>밉 0</strong>을 읽습니다(다른 밉이 필요하면 그 밉만 가리키는 SRV를 만듭니다).
+  </p>
+  <div class="code">
+    <div class="code-head"><span>gather.hlsl — 순서 확인 · 직접 bilinear · 깊이 인지 업샘플</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D&lt;float&gt;  gDepthHalf : register(t0);   // 하프 해상도 깊이
+Texture2D&lt;float4&gt; gAOHalf    : register(t1);   // 하프 해상도 AO(R 채널)
+Texture2D&lt;float&gt;  gDepthFull : register(t2);
+SamplerState      sPointClamp: register(s0);
+
+// Gather 4값으로 bilinear를 직접 재현 — Sample(Linear)과 같은 값
+float BilinearFromGather(Texture2D&lt;float&gt; t, SamplerState s, float2 uv, float2 size)
+{
+    float4 g = t.GatherRed(s, uv);              // x: 왼쪽아래 y: 오른쪽아래 z: 오른쪽위 w: 왼쪽위
+    float2 f = frac(uv * size - 0.5);           // 하드웨어와 같은 소수부
+    float top    = lerp(g.w, g.z, f.x);
+    float bottom = lerp(g.x, g.y, f.x);
+    return lerp(top, bottom, f.y);
+}
+
+// 깊이 인지(joint bilateral) 업샘플: 풀해상 깊이와 비슷한 저해상 텍셀에 가중치
+float UpsampleAO(float2 uv, int2 fullPix, float2 halfSize)
+{
+    float  zFull = gDepthFull.Load(int3(fullPix, 0));
+    float4 zLow  = gDepthHalf.GatherRed(sPointClamp, uv);
+    float4 ao    = gAOHalf.GatherRed(sPointClamp, uv);
+
+    float2 f = frac(uv * halfSize - 0.5);
+    float4 wb = float4((1 - f.x) * f.y, f.x * f.y, f.x * (1 - f.y), (1 - f.x) * (1 - f.y)); // x y z w 순
+    float4 wz = 1.0 / (abs(zLow - zFull) * 1000.0 + 1e-3);    // 깊이가 다르면 가중치↓
+    float4 w  = wb * wz;
+    return dot(ao, w) / dot(w, 1.0);
+}
+
+// Hi-Z: 2×2 최대 깊이(역 Z면 최소) 한 번에
+float HiZMax(Texture2D&lt;float&gt; t, SamplerState s, float2 uvCenterOf2x2)
+{
+    float4 g = t.GatherRed(s, uvCenterOf2x2);   // uv를 4텍셀의 공통 꼭짓점에 둔다
+    return max(max(g.x, g.y), max(g.z, g.w));
+}</code></pre>
+  </div>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    단일 채널 컨볼루션(깊이·AO·마스크)은 <code>Gather</code> 1회가 <code>Load</code> 4회를 대체합니다. 4×4 영역이면 Load 16회 → Gather 4회입니다. 오프셋 버전
+    <code>GatherRed(s, uv, int2 o0, o1, o2, o3)</code>(SM5)로 쿼드 4개를 각자 다른 오프셋에서 받을 수도 있습니다.
+    RGBA를 다 써야 하면 채널별 Gather 4회 = Load 4회로 이득이 없습니다.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">5. SampleCmp · SampleCmpLevelZero · GatherCmp — 그림자</h2>
+  <p>
+    비교 샘플러(<code>SamplerComparisonState</code>)는 4텍셀 각각에 <code>ref ComparisonFunc texel</code>을 적용해 0/1을 만든 다음, 그 결과를 필터합니다.
+    결과는 "4텍셀 중 빛을 받는 비율"이고, 이것이 하드웨어 2×2 PCF입니다. 그림자맵에는 밉이 없으므로 <code>SampleCmpLevelZero</code>가 표준입니다.
+    미분이 필요 없어 분기 안·VS·CS 어디서나 됩니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>shadow_pcf.hlsl — 1회 · N×N · GatherCmp 가중</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D&lt;float&gt;       gShadow : register(t5);   // R32_TYPELESS 리소스의 R32_FLOAT SRV
+SamplerComparisonState sShadow : register(s4);   // COMPARISON_MIN_MAG_LINEAR_MIP_POINT, LESS_EQUAL
+
+// (a) 하드웨어 2×2 PCF — 호출 1회
+float ShadowHW(float3 sh)                         // sh = (uv, 빛 공간 깊이 - bias)
+{
+    return gShadow.SampleCmpLevelZero(sShadow, sh.xy, sh.z);
+}
+
+// (b) N×N PCF — 각 탭이 이미 2×2 PCF라 경계가 부드럽다
+float ShadowPCF(float3 sh, float2 texel, int R)
+{
+    float sum = 0;
+    [unroll] for (int y = -R; y &lt;= R; ++y)
+    [unroll] for (int x = -R; x &lt;= R; ++x)
+        sum += gShadow.SampleCmpLevelZero(sShadow, sh.xy + float2(x, y) * texel, sh.z);
+    return sum / ((2 * R + 1) * (2 * R + 1));
+}
+
+// (c) GatherCmp — 비교 결과 4개를 받아 텐트 가중치를 직접 준다(넓은 커널을 적은 호출로)
+float ShadowGatherCmp(float3 sh, float2 size)
+{
+    float2 f = frac(sh.xy * size - 0.5);
+    float4 c = gShadow.GatherCmpRed(sShadow, sh.xy, sh.z);   // 각 성분 0 또는 1
+    float top = lerp(c.w, c.z, f.x), bottom = lerp(c.x, c.y, f.x);
+    return lerp(top, bottom, f.y);                            // = (a)와 같은 값. 여기에 원하는 가중을 더한다
+}
+
+// (d) 비교 샘플러 없이 Load로 — 계단이 남는다(개념 트랙 그림자 데모의 A)
+float ShadowLoad(float3 sh, float2 size)
+{
+    float z = gShadow.Load(int3(sh.xy * size, 0));
+    return sh.z &lt;= z ? 1.0 : 0.0;
+}</code></pre>
+  </div>
+  <div class="code">
+    <div class="code-head"><span>shadow_resources.cpp — 깊이 텍스처를 DSV와 SRV로 동시에</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">D3D11_TEXTURE2D_DESC td = {};
+td.Width = td.Height = 2048;
+td.MipLevels = 1; td.ArraySize = 1;
+td.Format = DXGI_FORMAT_R32_TYPELESS;                 // DSV: D32_FLOAT, SRV: R32_FLOAT
+td.SampleDesc.Count = 1;
+td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+device-&gt;CreateTexture2D(&amp;td, nullptr, &amp;shadowTex);
+
+D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+dd.Format = DXGI_FORMAT_D32_FLOAT;
+dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+device-&gt;CreateDepthStencilView(shadowTex.Get(), &amp;dd, &amp;shadowDSV);
+
+D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+sd.Format = DXGI_FORMAT_R32_FLOAT;                    // SampleCmp/Load/Gather 모두 이 뷰로
+sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+sd.Texture2D.MipLevels = 1;
+device-&gt;CreateShaderResourceView(shadowTex.Get(), &amp;sd, &amp;shadowSRV);
+
+// 그릴 때: 같은 리소스가 DSV로 묶인 채 SRV로 읽히면 D3D11이 SRV를 자동으로 null 처리한다.
+// 섀도 패스 후 OMSetRenderTargets로 DSV를 바꾼 뒤 PSSetShaderResources(5, 1, shadowSRV)</code></pre>
+  </div>
+  <div class="callout gotcha">
+    <span class="tag">함정</span>
+    ① <strong>비교 샘플러는 <code>SamplerComparisonState</code> 타입</strong>으로 선언해야 합니다. 일반 <code>SamplerState</code>로 선언하면 같은 슬롯이라도 비교가 일어나지 않습니다.
+    ② 지원 포맷은 단일 채널(<code>R32_FLOAT</code>, <code>R24_UNORM_X8_TYPELESS</code>, <code>R16_UNORM</code>)뿐입니다.
+    ③ PCF 커널이 넓을수록 오프셋 탭이 기울어진 수신면의 다른 깊이를 비교하므로 shadow acne가 늘어납니다. 기울기 바이어스(<code>SlopeScaledDepthBias</code>)나 수신면 기울기 기반 바이어스를 같이 키우세요.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">6. 실전: 데이터 텍스처로 수천 마리 물고기 — 왜 Load인가</h2>
+  <p>
+    군집 애니메이션은 경로(스플라인 제어점)를 텍스처에 넣고, 인스턴스마다 경로상의 위치 <code>t</code>를 정점 셰이더에서 평가합니다.
+    여기서 <code>Sample</code>을 쓰면 ① 하드웨어는 선형 보간뿐이라 꺾인 경로가 되고 ② 텍셀 중심(+0.5)을 놓치면 이웃 점이 평균되며
+    ③ 필터 가중치 정밀도 때문에 미세한 계단이 생기고 ④ 밉이 있으면 경로가 쪼그라듭니다. <code>Load</code>로 제어점 4개를 정확히 읽고 곡선은 셰이더가 계산합니다.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>fish_vs.hlsl — Load ×4 + Catmull-Rom</span><span class="lang">hlsl</span></div>
+<pre><code class="language-hlsl">Texture2D&lt;float4&gt; gPath : register(t0);      // 가로 = 제어점, 세로 = 경로 번호. R32G32B32A32_FLOAT, 밉 1개
+cbuffer CB : register(b0) { float4x4 gVP; float gTime; uint gNumPoints; }
+
+struct Inst { float phase; float speed; uint path; float scale; };
+StructuredBuffer&lt;Inst&gt; gInst : register(t1);
+
+float3 CatmullRom(float3 p0, float3 p1, float3 p2, float3 p3, float t)
+{
+    float t2 = t * t, t3 = t2 * t;
+    return 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+}
+
+float3 PathPos(uint path, float t)                  // t ∈ [0, N): 닫힌 경로
+{
+    int  N  = (int)gNumPoints;
+    int  i  = (int)floor(t);
+    float f = t - i;
+    int4 k  = (int4(i - 1, i, i + 1, i + 2) % N + N) % N;   // 수동 Wrap (Load엔 주소 모드가 없다)
+    float3 p0 = gPath.Load(int3(k.x, path, 0)).xyz;
+    float3 p1 = gPath.Load(int3(k.y, path, 0)).xyz;
+    float3 p2 = gPath.Load(int3(k.z, path, 0)).xyz;
+    float3 p3 = gPath.Load(int3(k.w, path, 0)).xyz;
+    return CatmullRom(p0, p1, p2, p3, f);
+}
+
+float4 VS(float3 local : POSITION, uint iid : SV_InstanceID) : SV_Position
+{
+    Inst in0 = gInst[iid];
+    float t  = fmod(in0.phase + gTime * in0.speed, (float)gNumPoints);
+    float3 p = PathPos(in0.path, t);
+    float3 fwd = normalize(PathPos(in0.path, t + 0.02) - p);
+    float3 side = normalize(cross(float3(0, 1, 0), fwd));
+    float3 up = cross(fwd, side);
+    float3 world = p + (local.x * side + local.y * up + local.z * fwd) * in0.scale;
+    return mul(float4(world, 1), gVP);
+}</code></pre>
+  </div>
+  <div class="code">
+    <div class="code-head"><span>path_texture.cpp — 데이터 텍스처 만들기</span><span class="lang">cpp</span></div>
+<pre><code class="language-cpp">// 제어점 numPoints × 경로 numPaths, float4(x, y, z, 예비)
+D3D11_TEXTURE2D_DESC td = {};
+td.Width = numPoints; td.Height = numPaths;
+td.MipLevels = 1;                                   // 데이터에 밉은 금물(평균되면 경로가 줄어든다)
+td.ArraySize = 1;
+td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;         // sRGB 아님, 압축(BC) 아님
+td.SampleDesc.Count = 1;
+td.Usage = D3D11_USAGE_IMMUTABLE;
+td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+D3D11_SUBRESOURCE_DATA init = { points.data(), numPoints * sizeof(XMFLOAT4), 0 };
+device-&gt;CreateTexture2D(&amp;td, &amp;init, &amp;pathTex);
+device-&gt;CreateShaderResourceView(pathTex.Get(), nullptr, &amp;pathSRV);
+ctx-&gt;VSSetShaderResources(0, 1, pathSRV.GetAddressOf());   // VS 단계에 바인딩</code></pre>
+  </div>
+
+  <h3>6-1. 직관 데모 — 하드웨어 선형 보간의 정밀도와 반 텍셀</h3>
+  <p>
+    1D 데이터 텍스처를 확대해 봅니다. 흰 선은 원래 신호, 청록은 <code>Load</code> 4회 + Catmull-Rom, 주황은 하드웨어 선형 보간(<code>Sample</code>)입니다.
+    가중치 정밀도를 낮추고 확대하면 주황 선에 계단이 보이고, 반 텍셀 보정을 끄면 곡선 전체가 반 칸 밀립니다. 수치는 시뮬레이션이며 실제 가중치 비트 수는 GPU마다 다릅니다.
+  </p>
+  <div class="gdemo">
+    <div class="gcanvas-wrap">
+      <canvas id="tsPrecCanvas" class="gcanvas" width="900" height="360"></canvas>
+      <div class="hud" id="tsPrecHud">…</div>
+    </div>
+    <div class="gctrls">
+      <div class="gctl">
+        <label>텍셀 수 N <span class="gval" id="tsPrecNVal">12</span></label>
+        <input type="range" id="tsPrecN" min="4" max="32" step="1" value="12" />
+      </div>
+      <div class="gctl">
+        <label>필터 가중치 정밀도 <span class="gval" id="tsPrecBitsVal">8bit</span></label>
+        <input type="range" id="tsPrecBits" min="2" max="16" step="1" value="8" />
+      </div>
+      <div class="gctl">
+        <label>확대 <span class="gval" id="tsPrecZoomVal">×1</span></label>
+        <input type="range" id="tsPrecZoom" min="0" max="7" step="0.01" value="0" />
+      </div>
+      <div class="gbtns">
+        <button id="tsPrecHalf" class="on">반 텍셀 보정 ON</button>
+      </div>
+    </div>
+    <p class="ghint">확대는 x = 0.37·N 근처를 중심으로 합니다. 점선 세로줄 = 텍셀 중심(i + 0.5). 텍셀 중심에서는 세 곡선이 모두 저장값을 지납니다.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">7. 비교표 — 비용 · 품질 · 적합 상황</h2>
+  <div style="overflow-x:auto;">
+  <table class="impl">
+    <thead><tr><th>함수</th><th>fetch 수</th><th>상대 비용(일반적 경향)</th><th>품질</th><th>쓸 수 있는 단계</th><th>적합 상황</th><th>부적합</th></tr></thead>
+    <tbody>
+      <tr><td><code>Load</code></td><td>1</td><td>최저</td><td>저장값 정확, 축소 시 앨리어싱</td><td>전부</td><td>1:1 버퍼, 데이터·인덱스, 컴퓨트</td><td>원근으로 축소되는 시각용 텍스처</td></tr>
+      <tr><td><code>Sample</code> Point</td><td>1</td><td>최저</td><td>블록, 밉으로 지글거림만 억제</td><td>PS</td><td>픽셀 아트, 정수 배율 UI</td><td>부드러워야 하는 표면</td></tr>
+      <tr><td><code>Sample</code> Bilinear</td><td>4</td><td>Point와 비슷(32bit 포맷)</td><td>확대 부드러움, 밉 없으면 축소 앨리어싱</td><td>PS</td><td>포스트프로세스, 다운샘플 트릭</td><td>데이터 텍스처</td></tr>
+      <tr><td><code>Sample</code> Trilinear</td><td>8</td><td>약 2배</td><td>앨리어싱 없음, 비스듬한 면은 흐림</td><td>PS</td><td>대부분의 시각용 텍스처</td><td>지면처럼 비스듬한 넓은 면(→Aniso)</td></tr>
+      <tr><td><code>Sample</code> Aniso N×</td><td>최대 8N</td><td>각도에 따라 1~N배</td><td>비스듬한 면도 선명</td><td>PS</td><td>지면·벽·도로</td><td>정면만 보는 2D·UI(비용 낭비)</td></tr>
+      <tr><td><code>SampleLevel</code></td><td>4~8</td><td>Bilinear~Trilinear</td><td>LOD 고정(거리 적응 없음)</td><td>전부</td><td>VS/CS, 분기 안, 프리필터 큐브맵</td><td>원근 축소가 큰 PS 표면</td></tr>
+      <tr><td><code>SampleGrad</code></td><td>Sample과 동일</td><td>Sample + 미분 2개 전달(레지스터·대역폭 약간↑)</td><td>Sample과 동일, 미분을 바로잡으면 이음새 제거</td><td>전부</td><td>아틀라스·frac·트라이플래너·시차</td><td>평범한 연속 UV(그냥 Sample)</td></tr>
+      <tr><td><code>Gather</code></td><td>4(1채널)</td><td>Load 1회 수준</td><td>원본 4값</td><td>전부</td><td>업샘플, Hi-Z, 1채널 커널</td><td>RGBA가 다 필요할 때</td></tr>
+      <tr><td><code>SampleCmpLevelZero</code></td><td>4</td><td>Bilinear 수준</td><td>2×2 PCF</td><td>전부</td><td>그림자</td><td>깊이 "값"이 필요할 때(→ Load)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout perf">
+    <span class="tag">성능</span>
+    위 "상대 비용"은 일반적 경향이고 GPU·포맷·캐시 상태에 따라 크게 달라집니다. 넓은 포맷(<code>R32G32B32A32_FLOAT</code>)은 bilinear 처리율이 절반 이하로 떨어지는 GPU가 많고,
+    BC 압축 텍스처는 대역폭이 줄어 오히려 빠릅니다. 수천~수만 인스턴스처럼 fetch가 누적되는 경우는 반드시 PIX·Nsight Graphics·Radeon GPU Profiler의 텍스처 유닛 지표(TEX 처리율, L1/L2 적중률)로 확인하세요.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">8. 실무 노트 — 엔진에서는 어떻게 하나</h2>
+  <ul>
+    <li><strong>Unreal Engine</strong> — 셰이더 코드에서는 <code>Texture2DSample</code>·<code>Texture2DSampleLevel</code>·<code>Texture2DSampleGrad</code>(<code>Common.ush</code>) 같은 래퍼를 쓰고, 머티리얼 노드는 "MipValueMode"(None/MipLevel/MipBias/Derivative)로 Sample/SampleLevel/SampleBias/SampleGrad를 고릅니다. 버텍스 단계(WPO)에서 읽는 텍스처는 미분이 없으므로 SampleLevel 계열로 컴파일됩니다. 해상도 스케일링·TSR 사용 시 엔진이 음의 MipBias를 자동으로 걸어 줍니다.</li>
+    <li><strong>Unity SRP</strong> — Core ShaderLibrary의 <code>LOAD_TEXTURE2D</code>, <code>SAMPLE_TEXTURE2D</code>, <code>SAMPLE_TEXTURE2D_LOD</code>, <code>SAMPLE_TEXTURE2D_GRAD</code>, <code>GATHER_RED_TEXTURE2D</code>, <code>SAMPLE_TEXTURE2D_SHADOW</code> 매크로가 각 API의 해당 함수로 내려갑니다.</li>
+    <li><strong>VAT(Vertex Animation Texture)</strong> — Houdini 등에서 구운 위치·노멀 텍스처는 sRGB 끄기, 압축 끄기, 밉 끄기, Point/Load로 읽기가 공통 지침입니다. 이 페이지 6장의 문제가 그대로 생기기 때문입니다.</li>
+    <li><strong>디퍼드 라이팅·포스트 체인</strong> — G-buffer는 화면과 1:1이라 <code>Load(int3(SV_Position.xy, 0))</code>가 표준이고, 해상도가 다른 버퍼(하프 해상도 SSAO·볼류메트릭)만 <code>Gather</code>/<code>SampleLevel</code>로 업샘플합니다.</li>
+    <li><strong>그림자</strong> — 거의 모든 엔진이 <code>SampleCmpLevelZero</code> 기반 PCF(또는 Gather 기반 가중 PCF)를 쓰고, 소프트 섀도는 PCSS처럼 블로커 탐색에 일반 <code>Gather</code>/<code>Load</code>, 필터에 비교 샘플을 섞습니다.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2 style="margin-top:44px;">9. 더 읽기</h2>
+  <p>
+    <a class="btn-link external" href="https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-object-texture2d" target="_blank" rel="noopener">Microsoft — Texture2D (SM5) 메서드 목록</a>
+    <a class="btn-link external" href="https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm" target="_blank" rel="noopener">D3D11.3 Functional Spec — 텍스처 샘플링·LOD·주소 규칙</a>
+    <a class="btn-link external" href="https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/converting-data-color-space" target="_blank" rel="noopener">Microsoft — sRGB 포맷과 색공간 변환</a>
+    <a class="btn-link external" href="https://fgiesen.wordpress.com/2011/07/04/a-trip-through-the-graphics-pipeline-2011-part-4/" target="_blank" rel="noopener">F. Giesen (2011) — A trip through the Graphics Pipeline, Part 4: Texture samplers</a>
+    <a class="btn-link external" href="https://iquilezles.org/articles/hwinterpolation/" target="_blank" rel="noopener">I. Quilez — Hardware interpolation precision</a>
+    <a class="btn-link external" href="https://www.w3.org/TR/WGSL/#texture-builtin-functions" target="_blank" rel="noopener">W3C — WGSL texture built-in functions</a>
+  </p>
+
+  <nav class="page-nav">
+    <a href="./04-shaderlang.html">← HLSL 요점</a>
+    <a href="./index.html">구현 허브 →</a>
+  </nav>
+</main>
+<script src="./highlight.js"></script>
+<script>
+/* ---------- 히어로 배너: 원근 바닥 위에서 Load(블록)↔Sample(보간) 경계가 오간다 ---------- */
+(function () {
+  try {
+    var hero = document.getElementById("tsHero"), cv = document.getElementById("tsHeroCanvas");
+    if (!hero || !cv) return;
+    var dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+    var gl = null;
+    try { gl = cv.getContext("webgl", { antialias: false, premultipliedAlpha: false }); } catch (e) { gl = null; }
+    function size() {
+      var r = hero.getBoundingClientRect();
+      cv.width = Math.max(1, Math.round(r.width * dpr));
+      cv.height = Math.max(1, Math.round(r.height * dpr));
+    }
+    size();
+    window.addEventListener("resize", size);
+    var visible = true;
+    if ("IntersectionObserver" in window) new IntersectionObserver(function (es) { visible = es[0].isIntersecting; }).observe(hero);
+
+    if (!gl) {   // Canvas 2D 폴백: 블록 격자 + 그라디언트
+      var c2 = cv.getContext("2d");
+      var draw2 = function () {
+        var w = cv.width, h = cv.height, s = 26 * dpr;
+        var g = c2.createLinearGradient(0, 0, w, 0); g.addColorStop(0, "#0e2a3a"); g.addColorStop(1, "#3a2410");
+        c2.fillStyle = g; c2.fillRect(0, 0, w, h);
+        for (var y = 0; y < h; y += s) for (var x = 0; x < w * 0.5; x += s) {
+          var v = Math.abs(Math.sin(x * 0.13 + y * 0.29)); c2.fillStyle = "rgba(86,212,221," + (0.08 + v * 0.22) + ")"; c2.fillRect(x + 1, y + 1, s - 2, s - 2);
+        }
+      };
+      draw2(); window.addEventListener("resize", draw2);
+      return;
+    }
+    var vs = "attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }";
+    var fs = [
+      "precision highp float;",
+      "uniform vec2 uRes; uniform float uT;",
+      "float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }",
+      "vec3 pal(float x){ return 0.5 + 0.5 * cos(6.2831 * (x + vec3(0.0, 0.33, 0.67))); }",
+      "vec3 texel(vec2 i){ return pal(h(i) * 0.55 + 0.52) * (0.35 + 0.65 * h(i + 7.31)); }",
+      "void main(){",
+      "  vec2 uv = gl_FragCoord.xy / uRes;",
+      "  vec2 p = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;",
+      "  vec3 col = mix(vec3(0.05, 0.07, 0.16), vec3(0.13, 0.10, 0.26), uv.y);",
+      "  float wipe = 0.5 + 0.33 * sin(uT * 0.55);",
+      "  float y = p.y - 0.30;",
+      "  if (y < -0.002) {",
+      "    float z = 0.42 / -y;",
+      "    vec2 w = vec2(p.x * z * 2.6 + sin(uT * 0.2) * 1.5, z * 2.6 + uT * 1.1);",
+      "    vec2 q = w - 0.5; vec2 i = floor(q); vec2 f = fract(q);",
+      "    vec3 bil = mix(mix(texel(i), texel(i + vec2(1.0, 0.0)), f.x), mix(texel(i + vec2(0.0, 1.0)), texel(i + vec2(1.0)), f.x), f.y);",
+      "    vec3 pnt = texel(floor(w));",
+      "    float side = smoothstep(wipe - 0.003, wipe + 0.003, uv.x);",
+      "    vec2 g = abs(fract(w) - 0.5);",
+      "    float grid = smoothstep(0.45, 0.5, max(g.x, g.y)) * (1.0 - side);",
+      "    vec3 c = mix(pnt + grid * 0.35, bil, side);",
+      "    vec2 cen = abs(fract(w) - 0.5);",
+      "    c += (1.0 - side) * vec3(0.35, 0.95, 1.0) * smoothstep(0.09, 0.0, length(cen)) * 0.6;",
+      "    float fog = exp(-z * 0.11);",
+      "    col = mix(col, c * 1.15, fog);",
+      "  }",
+      "  col += vec3(1.0, 0.8, 0.5) * exp(-abs(uv.x - wipe) * uRes.x * 0.06) * 0.9;",
+      "  col += vec3(0.4, 0.6, 1.0) * exp(-abs(p.y - 0.30) * 40.0) * 0.25;",
+      "  col *= 1.0 - 0.35 * dot(uv - 0.5, uv - 0.5);",
+      "  gl_FragColor = vec4(col, 1.0);",
+      "}"].join("\n");
+    function sh(t, s) { var o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; }
+    var pr = gl.createProgram();
+    gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error("link");
+    gl.useProgram(pr);
+    var b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    var loc = gl.getAttribLocation(pr, "p"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    var uRes = gl.getUniformLocation(pr, "uRes"), uT = gl.getUniformLocation(pr, "uT");
+    var t0 = performance.now();
+    (function frame(now) {
+      requestAnimationFrame(frame);
+      if (document.hidden || !visible) return;
+      gl.viewport(0, 0, cv.width, cv.height);
+      gl.uniform2f(uRes, cv.width, cv.height);
+      gl.uniform1f(uT, (now - t0) / 1000);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    })(t0);
+  } catch (e) { /* 배너 실패는 본문에 영향 없음 */ }
+})();
+
+/* ---------- 6-1 데모: 1D 데이터 텍스처 — Load+Catmull-Rom vs 하드웨어 선형(가중치 양자화·반 텍셀) ---------- */
+(function () {
+  try {
+    var cv = document.getElementById("tsPrecCanvas"), hud = document.getElementById("tsPrecHud");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    var N = 12, bits = 8, zoomLog = 0, half = true;
+    var $ = function (id) { return document.getElementById(id); };
+    function f(x) { return 0.5 + 0.28 * Math.sin(x * 0.9 + 0.4) + 0.12 * Math.sin(x * 2.3 + 1.1); }   // 원래 신호(텍셀 단위 x)
+    function tex(i) { i = Math.max(0, Math.min(N - 1, i)); return f(i + 0.5); }                     // 텍셀 i = 중심 표본, Clamp
+    function cr(a, b, c, d, t) { var t2 = t * t, t3 = t2 * t; return 0.5 * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3); }
+    function loadCR(x) { var s = x - 0.5, i = Math.floor(s), t = s - i; return cr(tex(i - 1), tex(i), tex(i + 1), tex(i + 2), t); }
+    function hwLin(x) {
+      var s = half ? x - 0.5 : x, i = Math.floor(s), t = s - i;
+      if (bits < 16) { var q = Math.pow(2, bits); t = Math.round(t * q) / q; }
+      return tex(i) + (tex(i + 1) - tex(i)) * t;
+    }
+    function draw() {
+      var r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
+      var W = Math.max(1, r.width), H = Math.max(1, r.height);
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      var zoom = Math.pow(2, zoomLog), cx = N * 0.37, span = N / zoom;
+      var x0 = Math.max(0, cx - span * 0.5), x1 = Math.min(N, x0 + span); x0 = Math.max(0, x1 - span);
+      var vals = []; for (var k = 0; k <= 400; k++) { var xx = x0 + (x1 - x0) * k / 400; vals.push(f(xx), loadCR(xx), hwLin(xx)); }
+      var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals), pad = (hi - lo) * 0.12 + 1e-4; lo -= pad; hi += pad;
+      var L = 20, R = W - 20, T = 20, B = H - 28;
+      var sx = function (x) { return L + (x - x0) / (x1 - x0) * (R - L); }, sy = function (v) { return B - (v - lo) / (hi - lo) * (B - T); };
+      ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.setLineDash([3, 4]);
+      for (var i = Math.floor(x0); i < x1; i++) { var c = i + 0.5; if (c < x0 || c > x1) continue; ctx.beginPath(); ctx.moveTo(sx(c), T); ctx.lineTo(sx(c), B); ctx.stroke(); }
+      ctx.setLineDash([]);
+      function curve(fn, col, wid) { ctx.strokeStyle = col; ctx.lineWidth = wid; ctx.beginPath(); for (var k = 0; k <= 900; k++) { var x = x0 + (x1 - x0) * k / 900, y = sy(fn(x)); k ? ctx.lineTo(sx(x), y) : ctx.moveTo(sx(x), y); } ctx.stroke(); }
+      curve(f, "rgba(255,255,255,0.75)", 1.5);
+      curve(hwLin, "#ffb454", 2.2);
+      curve(loadCR, "#56d4dd", 2.2);
+      ctx.fillStyle = "#fff";
+      for (i = Math.floor(x0); i < x1; i++) { c = i + 0.5; if (c < x0 || c > x1) continue; ctx.beginPath(); ctx.arc(sx(c), sy(tex(i)), 4, 0, 6.283); ctx.fill(); }
+      ctx.fillStyle = "rgba(200,210,230,0.7)"; ctx.font = "11px 'JetBrains Mono', monospace";
+      ctx.fillText("x (텍셀 단위) " + x0.toFixed(2) + " … " + x1.toFixed(2), L, H - 9);
+      var eC = 0, eH = 0;
+      for (k = 0; k <= 2000; k++) { var x = 0.5 + (N - 1) * k / 2000; eC = Math.max(eC, Math.abs(loadCR(x) - f(x))); eH = Math.max(eH, Math.abs(hwLin(x) - f(x))); }
+      hud.innerHTML = "<span style='color:#fff'>── 원래 신호</span><br><span style='color:#56d4dd'>── Load×4 + Catmull-Rom  최대오차 " + eC.toFixed(4) + "</span><br>" +
+        "<span style='color:#ffb454'>── Sample(Linear) " + (bits >= 16 ? "무한" : bits + "bit") + " 가중치" + (half ? "" : " · 반텍셀 실수") + "  최대오차 " + eH.toFixed(4) + "</span>";
+    }
+    function bind(id, fn) { var el = $(id); el.addEventListener("input", function () { fn(parseFloat(el.value)); draw(); }); }
+    bind("tsPrecN", function (v) { N = v; $("tsPrecNVal").textContent = v; });
+    bind("tsPrecBits", function (v) { bits = v; $("tsPrecBitsVal").textContent = v >= 16 ? "무한" : v + "bit"; });
+    bind("tsPrecZoom", function (v) { zoomLog = v; $("tsPrecZoomVal").textContent = "×" + Math.pow(2, v).toFixed(1); });
+    $("tsPrecHalf").addEventListener("click", function () {
+      half = !half; this.classList.toggle("on", half); this.textContent = half ? "반 텍셀 보정 ON" : "반 텍셀 보정 OFF (uv = x / N)"; draw();
+    });
+    window.addEventListener("resize", draw);
+    window.addEventListener("message", function (e) { if (e.data && e.data.t === "reflow") draw(); });
+    draw();
+  } catch (e) { /* 데모 실패는 본문에 영향 없음 */ }
+})();
+</script>
+</body>
+</html>

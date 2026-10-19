@@ -52,6 +52,7 @@
       <a href="#fragshader">Fragment Shader</a>
       <a href="#computeshader">Compute Shader</a>
       <a href="#shaderlang">GLSL · HLSL · WGSL</a>
+      <a href="#texsample">텍스처 읽기 함수 (Load · Sample)</a>
     </div>
     <div class="nav-group">
       <div class="nav-title">5. 그래픽스 API</div>
@@ -647,6 +648,215 @@ fn main(
         내장 함수, ③ "입력을 받아 색(vec4)을 반환". 하나를 익히면 나머지는 문법만 갈아끼우면 됩니다.</div>
     </section>
 
+    <section id="texsample">
+      <h2>텍스처 읽기 함수 — Load · Sample · Gather · SampleCmp</h2>
+      <p class="lead">같은 텍스처라도 <strong>"배열에서 칸 하나를 꺼낼지"(Load)</strong>, <strong>"연속 신호로 보고 재구성할지"(Sample)</strong>에 따라
+        결과·비용·쓸 수 있는 셰이더 단계가 모두 달라집니다. HLSL의 읽기 함수 10여 개를 2D 해부와 3D 실시간 비교로 하나씩 갈라 봅니다.</p>
+      <a class="impl-link" href="impl/04-texsample.html">텍스처 읽기 함수를 C++/DirectX 11 · HLSL로 직접 구현하기</a>
+
+      <h3>원리: 텍스처는 "데이터 배열"이면서 "연속 신호의 표본"이다</h3>
+      <p>텍스처는 메모리에 놓인 <strong>2차원 배열</strong>입니다. 배열로 보면 정수 인덱스 <code>(x, y, mip)</code>로 칸 하나를 꺼내면 끝이고,
+        이것이 <code>Load()</code>입니다. 반면 화면에 그릴 때는 텍스처를 <strong>연속적인 그림을 띄엄띄엄 찍어 둔 표본(sample)</strong>으로 봅니다.
+        그러면 표본 사이의 임의 위치 <code>uv</code>의 값은 주변 표본을 섞어 <strong>재구성(reconstruction)</strong>해야 하고,
+        화면 픽셀 하나가 텍셀 여러 개를 덮을 때는 그 영역을 <strong>평균(필터링)</strong>해야 깨끗합니다. 이 두 일을 하드웨어 <em>샘플러</em>가
+        해 주는 것이 <code>Sample()</code> 계열입니다.</p>
+      <p>정리하면 <strong>Load = 정수 인덱싱(값 보존)</strong>, <strong>Sample = 필터 + 주소 모드 + 자동 LOD(보기 좋음)</strong>입니다.
+        나머지 함수들은 이 둘 사이에서 한 가지씩을 바꾼 변형입니다 — LOD를 고정(<code>SampleLevel</code>)하거나, 미분을 직접 주거나(<code>SampleGrad</code>),
+        섞지 않고 4개를 그대로 받거나(<code>Gather</code>), 섞기 전에 비교부터 하거나(<code>SampleCmp</code>).</p>
+
+      <div class="demo">
+        <div class="demo-title">텍셀 해부: Load 1칸 vs Sample 4탭 가중합</div>
+        <canvas id="c-ts-anatomy" height="500"></canvas>
+        <div class="controls" id="ctl-ts-anatomy"></div>
+        <p class="hint">캔버스를 드래그해 uv를 옮겨 보세요. 초록 테두리 = <code>Load</code>가 읽는 텍셀, 주황 = <code>Sample</code>이 섞는 탭(두께 = 가중치).
+          uv를 0~1 바깥으로 빼면 Load는 0을, Sample은 AddressMode(Wrap·Mirror·Clamp·Border)가 정한 값을 돌려줍니다. 필터를 Point로 바꾸면 범위 안에서는 두 결과가 같아집니다.</p>
+      </div>
+
+      <div class="tip"><strong>텍셀 중심 규칙:</strong> D3D10 이후(그리고 GL·Vulkan·Metal 모두) 텍셀 <code>i</code>의 중심은
+        <code>u = (i + 0.5) / W</code>입니다. 그래서 하드웨어 bilinear는 <code>x = u·W − 0.5</code>로 바꾼 뒤 <code>floor</code>와 소수부로 4탭과 가중치를 정합니다.
+        <code>Load</code>로 같은 텍셀을 고르려면 <code>int2(uv · W)</code>(= floor)를 쓰고, 픽셀 셰이더에서 화면과 1:1인 버퍼라면 <code>SV_Position.xy</code>를 그대로 정수화하면 됩니다.</div>
+
+      <h3>Load() vs Sample() 한눈에</h3>
+      <div style="overflow-x:auto">
+      <table class="impl">
+        <thead><tr><th>항목</th><th>Load()</th><th>Sample()</th></tr></thead>
+        <tbody>
+          <tr><td>읽는 방식</td><td>정확한 텍셀 1개를 그대로</td><td>주변 텍셀을 여러 개 읽어 보간(필터링)</td></tr>
+          <tr><td>좌표 입력</td><td>정수 텍셀 좌표 <code>int3(x, y, mip)</code> (배열은 <code>int4</code>)</td><td>정규화 UV(float). 0~1 밖은 AddressMode가 처리</td></tr>
+          <tr><td>필터링(보간)</td><td>없음</td><td>Point · Linear · Trilinear · Anisotropic (샘플러 Filter)</td></tr>
+          <tr><td>LOD(밉) 선택</td><td>호출자가 mip을 직접 지정. 자동 선택 없음</td><td>화면 공간 미분(ddx/ddy)으로 자동 계산 + MipLODBias·Min/MaxLOD</td></tr>
+          <tr><td>샘플러 상태</td><td>사용 안 함(바인딩도 필요 없음)</td><td>필터·AddressMode·BorderColor·LOD 범위·비교 함수가 모두 적용</td></tr>
+          <tr><td>범위 밖 좌표</td><td><strong>0 반환</strong>(D3D10+ 정의된 동작)</td><td>Wrap · Mirror · Clamp · Border · MirrorOnce</td></tr>
+          <tr><td>sRGB 변환</td><td colspan="2"><strong>둘 다 같다.</strong> sRGB→선형 변환은 함수가 아니라 <strong>SRV 포맷(<code>*_SRGB</code>)</strong>이 결정합니다.
+            <code>_SRGB</code> 뷰로 읽으면 Load도 변환된 값을 받습니다. 데이터 텍스처는 <code>_UNORM</code>/<code>_FLOAT</code> 뷰로 만드세요.</td></tr>
+          <tr><td>값의 정확도</td><td>저장값 그대로 — "데이터 보존"에 최적</td><td>필터가 섞고, 가중치는 하드웨어 고정소수(흔히 8bit 수준)라 값이 미세하게 왜곡될 수 있음</td></tr>
+          <tr><td>읽는 텍셀 수</td><td>1</td><td>Point 1 · Bilinear 4 · Trilinear 8 · Aniso N×8 (N ≤ MaxAnisotropy)</td></tr>
+          <tr><td>쓸 수 있는 단계</td><td>모든 단계(VS·HS·DS·GS·PS·CS)</td><td><strong>PS 전용</strong>(암시적 미분이 필요). 다른 단계는 SampleLevel/SampleGrad</td></tr>
+          <tr><td>비용 감각</td><td>샘플러 연산이 없어 가장 단순</td><td>Bilinear는 대개 Load와 비슷한 처리율, Trilinear·Aniso·넓은 포맷(RGBA32F)에서 느려짐</td></tr>
+          <tr><td>캐시 거동</td><td>인덱스가 규칙적이면 예측 쉬움(타일 단위 순회에 유리)</td><td>알맞은 밉을 읽으면 이웃 픽셀이 같은 캐시 라인을 공유. 밉 없이 축소하면 캐시 미스 폭증</td></tr>
+          <tr><td>장점</td><td>정확·단순·어디서나 사용</td><td>확대·축소 모두 부드러움, 앨리어싱 억제</td></tr>
+          <tr><td>단점</td><td>필터 없음 → 시각용 텍스처를 축소하면 지글거림</td><td>데이터 텍스처(ID·위치·인덱스)를 망가뜨림</td></tr>
+          <tr><td>대표 용도</td><td>G-buffer/깊이 1:1 읽기 · 컴퓨트 · 버퍼형 데이터 · 인덱스형 LUT · 스플라인/VAT</td><td>알베도·노멀·러프니스 등 시각용 텍스처, 연속 함수 LUT(3D 컬러 LUT·BRDF LUT)</td></tr>
+          <tr><td>스플라인·애니메이션 데이터</td><td>최적: 제어점을 정확히 읽고 곡선 보간은 셰이더가 직접</td><td>부적합: 선형 보간만 되고, 텍셀 중심·sRGB·밉 실수에 그대로 오차</td></tr>
+          <tr><td>엔진 쪽 요구</td><td>텍셀 좌표 계산 필요(<code>GetDimensions</code>로 크기 조회)</td><td>UV만 있으면 됨</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="tip"><strong>"Load가 항상 빠르다"는 과장입니다.</strong> 두 함수 모두 같은 텍스처 유닛과 캐시를 거칩니다. 대부분의 GPU에서 32bit 포맷의 bilinear는
+        point와 같은 처리율이고, 차이는 <em>Trilinear(밉 2장)·Aniso(여러 프로브)·RGBA32F 같은 넓은 포맷</em>, 그리고 <em>밉 없는 축소로 인한 캐시 미스</em>에서 생깁니다.
+        수천~수만 인스턴스가 정점 셰이더에서 데이터를 읽는 경우처럼 fetch가 매우 많을 때 차이가 누적되므로, 확정 수치는 대상 GPU에서 프로파일러(PIX·Nsight·RGP)로 재야 합니다.</div>
+
+      <h3>자동 LOD: 픽셀 하나가 덮는 텍셀 수로 밉을 고른다</h3>
+      <p><code>Sample()</code>은 이웃 픽셀과의 uv 차이(<code>ddx(uv)</code>, <code>ddy(uv)</code>)로 <strong>픽셀 발자국(footprint)</strong>의 크기를 알아냅니다.
+        픽셀 셰이더가 2×2 쿼드 단위로 함께 실행되기 때문에 가능한 일입니다. 직관은 "발자국 한 변이 텍셀 2<sup>λ</sup>개면 밉 λ를 읽는다"입니다.</p>
+      <p style="text-align:center"><code>ρ = max(|ddx(uv)·W|, |ddy(uv)·H|)</code> &nbsp;·&nbsp; <code>λ = log₂ ρ + MipLODBias</code> &nbsp;·&nbsp; 이방성: <code>N = min(⌈ρmax/ρmin⌉, MaxAnisotropy)</code>, <code>λ = log₂(ρmax / N)</code></p>
+      <p>비스듬한 면은 발자국이 한 방향으로 길쭉해집니다. 등방성(Trilinear)은 긴 변에 맞춰 밉을 골라 <strong>짧은 방향까지 뭉개고</strong>,
+        이방성은 긴 축을 따라 N개 프로브를 찍어 <strong>짧은 변 기준의 선명한 밉</strong>을 유지합니다. 그 대가가 텍셀 N배입니다.
+        (실제 하드웨어의 프로브 배치·근사식은 벤더마다 다르며, 위 식은 스펙이 허용하는 대표적인 형태입니다.)</p>
+
+      <div class="demo">
+        <div class="demo-title">픽셀 발자국 · LOD 계산 · 필터별 읽는 텍셀 수</div>
+        <canvas id="c-ts-footprint" height="500"></canvas>
+        <div class="controls" id="ctl-ts-footprint"></div>
+        <p class="hint">"축소 정도"를 올리면 발자국(청록)이 커지고 λ가 올라갑니다. Load는 LOD를 계산하지 않으므로 발자국이 아무리 커도 밉 0의 한 칸만 읽어 언더샘플링(빨강 판정)이 됩니다.
+          "면 기울기"를 80° 이상으로 올린 뒤 Trilinear와 Aniso를 번갈아 보세요. Trilinear는 오버블러, Aniso는 적정이 되고 막대가 텍셀 비용을 보여 줍니다.</p>
+      </div>
+
+      <h3>3D에서 직접 비교: 바닥 하나, 왼쪽·오른쪽 다른 함수</h3>
+      <p>아래는 실제 GPU(WebGL2) 셰이더입니다. 같은 바닥을 분할선 왼쪽(A)과 오른쪽(B)에서 서로 다른 읽기 함수로 그립니다. GLSL의 <code>texelFetch</code>·<code>texture</code>·<code>textureLod</code>·<code>textureGrad</code>가
+        각각 HLSL의 <code>Load</code>·<code>Sample</code>·<code>SampleLevel</code>·<code>SampleGrad</code>와 같은 하드웨어 경로이고, 필터는 샘플러 객체(D3D의 <code>SamplerState</code>)로 바꿉니다.</p>
+      <div class="feature-grid">
+        <div class="feature"><span class="ft-name">Load (mip 지정)</span>밉 0이면 먼 바닥이 지글거리고 모아레가 생깁니다. mip을 올리면 가까운 곳까지 한꺼번에 흐려집니다. 거리에 맞춰 밉을 골라 주는 장치가 없기 때문입니다.</div>
+        <div class="feature"><span class="ft-name">Sample · Point / Bilinear</span>Point는 밉을 고르지만 블록이 보이고, 밉 없는 Bilinear는 가까이선 부드럽지만 먼 곳은 Load와 똑같이 지글거립니다.</div>
+        <div class="feature"><span class="ft-name">Sample · Trilinear / Aniso</span>Trilinear는 지글거림이 사라지지만 지평선 쪽이 뭉개집니다. Aniso는 비스듬한 먼 곳까지 선명합니다.</div>
+        <div class="feature"><span class="ft-name">SampleLevel(lod)</span>화면 전체에 같은 밉을 씁니다. 미분이 필요 없어 정점·컴퓨트 셰이더에서도 쓰는 형태입니다.</div>
+        <div class="feature"><span class="ft-name">SampleGrad(ddx, ddy)</span>미분을 직접 넘깁니다. 배율을 키우면 흐려지고 줄이면 날카로워져, "LOD = 미분"임을 손으로 확인할 수 있습니다.</div>
+        <div class="feature"><span class="ft-name">SampleBias(bias)</span>자동 LOD에 상수를 더합니다. 음수는 선명하지만 지글거리고, 양수는 흐립니다. TAA·업스케일러가 내부 해상도에 맞춰 음의 bias를 주는 이유입니다.</div>
+      </div>
+
+      <div class="demo">
+        <div class="demo-title">3D 바닥 A/B 분할 비교 (WebGL2 실시간)</div>
+        <canvas id="c-ts-floor" height="540"></canvas>
+        <div class="controls" id="ctl-ts-floor"></div>
+        <p class="hint">흰 분할선을 좌우로 끌어 비교하고, 다른 곳을 끌면 시선이 돌아갑니다. "밉 레벨 색으로 보기"를 켜면 픽셀마다 고른 밉이 색으로 보입니다(빨강 0 → 주황 1 → 노랑 2 …).
+          <strong>"아틀라스 frac 타일링"을 켜고 A = Sample·Trilinear, B = SampleGrad로 두면</strong> Sample 쪽에만 타일 경계마다 가는 선이 보입니다.
+          <code>frac()</code> 때문에 uv가 1→0으로 튀는 곳에서 미분이 폭증해 최상위 밉을 읽기 때문입니다. SampleGrad에 연속 좌표의 미분을 주면 회색 이음새가 사라집니다. 그래도 남는 얇은 붉은 선은 이웃 타일이 bilinear·밉 단계에서 번져 들어온 것으로, 아틀라스 타일에 패딩(가장자리 복제)이 필요한 이유입니다.</p>
+      </div>
+
+      <h3>데이터 텍스처: 보간하면 안 되는 값</h3>
+      <p>텍스처에 색이 아닌 <strong>데이터</strong>(위치·인덱스·ID·뼈 행렬·스플라인 제어점)를 담는 일이 많습니다. 수천~수만 마리 물고기가 같은 경로를 따라 헤엄치는 군집 애니메이션이 전형적입니다.
+        경로 제어점을 텍스처에 넣고 정점 셰이더에서 읽죠. 여기서 Sample을 쓰면 아래 오차들이 겹칩니다.</p>
+      <ul>
+        <li><strong>선형 보간뿐</strong> — 하드웨어는 1차 보간만 하므로 곡선이 꺾인 직선(폴리라인)이 됩니다. Load로 4점을 읽어 Catmull-Rom을 직접 계산해야 매끈합니다.</li>
+        <li><strong>반 텍셀 오프셋</strong> — <code>uv = i/N</code>로 읽으면 텍셀 경계를 찍어 이웃 두 점의 평균이 나옵니다. 정답은 <code>(i+0.5)/N</code>입니다.</li>
+        <li><strong>가중치 정밀도</strong> — 필터 가중치는 고정소수점(흔히 8bit 수준)이라 미세한 계단이 생깁니다. 위치처럼 확대돼 보이는 값에서 드러납니다.</li>
+        <li><strong>밉·LOD</strong> — 데이터 텍스처에 밉이 있으면 제어점들이 평균돼 경로가 안쪽으로 쪼그라듭니다.</li>
+        <li><strong>sRGB 포맷</strong> — <code>_SRGB</code>로 만들면 Load·Sample 모두 감마 디코딩된 값을 받아 경로가 휘어집니다. 함수가 아니라 포맷 문제입니다.</li>
+        <li><strong>ID·인덱스 보간</strong> — 재질 ID 2와 5 사이를 보간하면 3.5 → 3·4가 되어 존재하지 않는 재질이 경계에 끼어듭니다(오른쪽 패널).</li>
+      </ul>
+
+      <div class="demo">
+        <div class="demo-title">스플라인 경로를 따라가는 물고기 떼 · 재질 ID 맵</div>
+        <canvas id="c-ts-data" height="540"></canvas>
+        <div class="controls" id="ctl-ts-data"></div>
+        <p class="hint">청록 물고기 = Load 4회 + 셰이더 Catmull-Rom, 주황 = Sample 1회(하드웨어 선형). 점선이 원래 곡선입니다. 반 텍셀 실수·가중치 정밀도(2~4bit로 극단화)·SampleLevel LOD·저장 포맷을 바꾸며 최대 오차(px)를 보세요.
+          sRGB 포맷은 Load 쪽도 함께 망가집니다. 제어점 수를 줄이면 폴리라인 오차가 커집니다.</p>
+      </div>
+
+      <h3>Gather: 2×2 쿼드를 섞지 않고 한 번에</h3>
+      <p><code>Gather()</code>(=<code>GatherRed</code>)는 bilinear가 쓸 <strong>바로 그 4텍셀</strong>에서 <strong>한 채널</strong>만 골라 섞지 않고 <code>float4</code>로 돌려줍니다.
+        반환 순서는 <strong>왼쪽아래(x) → 오른쪽아래(y) → 오른쪽위(z) → 왼쪽위(w)</strong>의 반시계 방향입니다. 항상 <strong>밉 0</strong>을 읽고, 주소 모드는 샘플러를 따릅니다.
+        가중치를 셰이더가 정할 수 있어 깊이 인지 업샘플링, 2×2 최솟값/최댓값(Hi-Z), 엣지 검출, PCF(<code>GatherCmp</code>)에 쓰고,
+        단일 채널 이미지 처리에서는 fetch 수를 1/4로 줄입니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">Gather 반환 순서 · 직접 bilinear · 엣지 검출</div>
+        <canvas id="c-ts-gather" height="460"></canvas>
+        <div class="controls" id="ctl-ts-gather"></div>
+        <p class="hint">격자를 드래그해 쿼드를 옮기세요. 채널을 바꾸면 같은 4텍셀에서 다른 채널 값이 나옵니다. Gather 4값을 소수부로 직접 섞은 값이 <code>Sample(Linear)</code>와 일치하는 것을 확인할 수 있습니다.
+          오른쪽은 GatherRed 한 번으로 2×2의 깊이 차를 재는 엣지 검출입니다.</p>
+      </div>
+
+      <h3>SampleCmp: 섞기 전에 비교부터 — 하드웨어 PCF</h3>
+      <p>그림자맵의 깊이값을 그냥 bilinear로 섞으면 "물체 깊이와 바닥 깊이의 평균"이라는 의미 없는 값이 됩니다. <code>SampleCmp(s, uv, ref)</code>는
+        4텍셀 각각을 먼저 <code>ref</code>와 <strong>비교(0/1)</strong>하고, 그 <strong>비교 결과</strong>를 bilinear로 섞습니다. 이것이 하드웨어 2×2 PCF(Percentage-Closer Filtering)입니다.
+        <code>SampleCmpLevelZero</code>는 밉 0 고정이라 미분이 필요 없고, 픽셀 셰이더 밖이나 분기 안에서도 쓸 수 있어 그림자에서 사실상 표준입니다.</p>
+
+      <div class="demo">
+        <div class="demo-title">그림자 A/B 비교: Load 비교 · SampleCmp · N×N PCF (WebGL2 실시간)</div>
+        <canvas id="c-ts-shadow" height="540"></canvas>
+        <div class="controls" id="ctl-ts-shadow"></div>
+        <p class="hint">해상도를 64·128로 낮추면 차이가 극명합니다. Load 비교와 SampleCmp·Point는 계단이고, SampleCmp·Linear는 같은 1회 호출로 경계가 부드러워집니다.
+          N×N PCF는 그 위에 더 넓은 반그림자를 만듭니다. Load N×N(수동 PCF)은 같은 호출 수로도 0/1 단계가 보이는 띠가 남습니다.
+          바이어스 두 개를 0으로 내리면 표면에 줄무늬(shadow acne)가 생깁니다. 공중 판자와 기둥의 얇은 그림자를 보세요.</p>
+      </div>
+
+      <h3>읽기 함수 전체 비교</h3>
+      <div style="overflow-x:auto">
+      <table class="impl">
+        <thead><tr><th>함수</th><th>주요 목적</th><th>보간</th><th>LOD</th><th>입력 좌표</th><th>샘플러</th><th>데이터 정확도</th><th>대표 용도</th></tr></thead>
+        <tbody>
+          <tr><td><code>Load</code> / <code>tex[int2]</code></td><td>텍셀을 정확히 읽기</td><td>없음</td><td>직접 지정(mip)</td><td>정수 <code>int3</code></td><td>없음</td><td>최고(저장값 그대로)</td><td>G-buffer·깊이, 위치맵, 스플라인·VAT, 인덱스형 LUT</td></tr>
+          <tr><td><code>Sample</code></td><td>일반 텍스처 샘플링</td><td>Point · Linear · Aniso</td><td>자동(미분)</td><td>UV</td><td>모두 적용</td><td>낮음(보간)</td><td>컬러·노멀·러프니스</td></tr>
+          <tr><td><code>SampleBias</code></td><td>자동 LOD에 오프셋</td><td>있음</td><td>자동 + bias</td><td>UV</td><td>적용</td><td>낮음</td><td>TAA/업스케일러의 음수 bias, 디테일 조절</td></tr>
+          <tr><td><code>SampleLevel</code></td><td>특정 LOD 강제</td><td>있음</td><td>명시(float)</td><td>UV</td><td>적용</td><td>중간</td><td>VS 디스플레이스먼트, CS, 분기 안 샘플, 프리필터 큐브맵</td></tr>
+          <tr><td><code>SampleGrad</code></td><td>미분을 직접 전달</td><td>있음(이방성 포함)</td><td>ddx/ddy로 계산</td><td>UV + 미분 2개</td><td>적용</td><td>중간</td><td>아틀라스·frac·트라이플래너·시차 매핑 등 UV 불연속</td></tr>
+          <tr><td><code>SampleCmp</code></td><td>깊이 비교 후 필터</td><td>비교 결과를 보간</td><td>자동</td><td>UV + ref</td><td>비교 샘플러</td><td>—</td><td>그림자맵 PCF(PS)</td></tr>
+          <tr><td><code>SampleCmpLevelZero</code></td><td>비교 + 밉 0 고정</td><td>비교 결과를 보간</td><td>0</td><td>UV + ref</td><td>비교 샘플러</td><td>—</td><td>그림자(가장 흔한 형태, 분기·모든 단계)</td></tr>
+          <tr><td><code>Gather</code> / <code>GatherRed·Green·Blue·Alpha</code></td><td>2×2 한 채널을 한 번에</td><td>없음</td><td>밉 0 고정</td><td>UV (+ offset)</td><td>주소 모드만</td><td>높음(원본 4값)</td><td>깊이 인지 업샘플, Hi-Z, 엣지 검출, 단일 채널 컨볼루션</td></tr>
+          <tr><td><code>GatherCmp</code>(Red…)</td><td>2×2 비교 결과 4개</td><td>없음</td><td>밉 0</td><td>UV + ref</td><td>비교 샘플러</td><td>—</td><td>가중치를 직접 주는 넓은 PCF</td></tr>
+          <tr><td><code>CalculateLevelOfDetail</code></td><td>하드웨어가 고를 LOD 조회</td><td>—</td><td>반환값</td><td>UV</td><td>적용</td><td>—</td><td>가상 텍스처 피드백, 스트리밍, 디버그</td></tr>
+          <tr><td><code>Texture2DMS.Load</code></td><td>MSAA 샘플 하나 읽기</td><td>없음</td><td>없음</td><td><code>int2</code> + sampleIndex</td><td>없음</td><td>최고</td><td>MSAA 리졸브 직접 구현, 디퍼드 MSAA</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <h3>셰이더 단계별로 쓸 수 있는가</h3>
+      <div style="overflow-x:auto">
+      <table class="impl">
+        <thead><tr><th>함수</th><th>Vertex / Hull / Domain / Geometry</th><th>Pixel</th><th>Compute</th><th>이유</th></tr></thead>
+        <tbody>
+          <tr><td><code>Load</code> · <code>SampleLevel</code> · <code>SampleGrad</code> · <code>SampleCmpLevelZero</code> · <code>Gather</code></td><td>가능</td><td>가능</td><td>가능</td><td>암시적 미분이 필요 없음</td></tr>
+          <tr><td><code>Sample</code> · <code>SampleBias</code> · <code>SampleCmp</code> · <code>CalculateLevelOfDetail</code></td><td>불가</td><td>가능(균일 흐름 권장)</td><td>SM 6.6 이상에서 쿼드 미분 지원 시 가능</td><td>2×2 쿼드의 이웃 값으로 ddx/ddy를 계산하기 때문</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="tip"><strong>분기 안의 Sample 주의:</strong> 쿼드 안 일부 픽셀만 들어가는 <code>if</code>(비균일 흐름) 안에서 <code>Sample</code>을 부르면 미분이 정의되지 않아 엉뚱한 밉을 읽습니다.
+        컴파일러가 경고를 내거나 분기를 펼칩니다. 해법은 uv의 <code>ddx/ddy</code>를 분기 <em>밖에서</em> 미리 구해 <code>SampleGrad</code>로 넘기거나, LOD를 알면 <code>SampleLevel</code>을 쓰는 것입니다.</div>
+
+      <h3>API별 같은 함수</h3>
+      <div style="overflow-x:auto">
+      <table class="impl">
+        <thead><tr><th>HLSL (D3D11/12)</th><th>GLSL (GL/Vulkan/WebGL2)</th><th>WGSL (WebGPU)</th><th>MSL (Metal)</th></tr></thead>
+        <tbody>
+          <tr><td><code>t.Load(int3(p, mip))</code></td><td><code>texelFetch(t, p, mip)</code></td><td><code>textureLoad(t, p, mip)</code></td><td><code>t.read(uint2(p), mip)</code></td></tr>
+          <tr><td><code>t.Sample(s, uv)</code></td><td><code>texture(t, uv)</code></td><td><code>textureSample(t, s, uv)</code></td><td><code>t.sample(s, uv)</code></td></tr>
+          <tr><td><code>t.SampleBias(s, uv, b)</code></td><td><code>texture(t, uv, b)</code></td><td><code>textureSampleBias(t, s, uv, b)</code></td><td><code>t.sample(s, uv, bias(b))</code></td></tr>
+          <tr><td><code>t.SampleLevel(s, uv, l)</code></td><td><code>textureLod(t, uv, l)</code></td><td><code>textureSampleLevel(t, s, uv, l)</code></td><td><code>t.sample(s, uv, level(l))</code></td></tr>
+          <tr><td><code>t.SampleGrad(s, uv, dx, dy)</code></td><td><code>textureGrad(t, uv, dx, dy)</code></td><td><code>textureSampleGrad(t, s, uv, dx, dy)</code></td><td><code>t.sample(s, uv, gradient2d(dx, dy))</code></td></tr>
+          <tr><td><code>t.SampleCmpLevelZero(sc, uv, ref)</code></td><td><code>texture(sampler2DShadow, vec3(uv, ref))</code></td><td><code>textureSampleCompareLevel(t, sc, uv, ref)</code></td><td><code>t.sample_compare(sc, uv, ref, level(0))</code></td></tr>
+          <tr><td><code>t.GatherRed(s, uv)</code></td><td><code>textureGather(t, uv, 0)</code> (GLSL 4.0+ / ES 3.1+)</td><td><code>textureGather(0, t, s, uv)</code></td><td><code>t.gather(s, uv, int2(0), component::x)</code></td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <h3>상황별 선택 가이드</h3>
+      <div class="feature-grid">
+        <div class="feature"><span class="ft-name">시각용 텍스처(알베도·노멀·러프니스)</span><code>Sample</code> + Trilinear/Aniso. 바닥·벽처럼 비스듬히 보이는 면은 Aniso 8~16×.</div>
+        <div class="feature"><span class="ft-name">G-buffer·깊이·풀스크린 1:1</span><code>Load(int3(SV_Position.xy, 0))</code>. 화면과 1:1이면 보간할 게 없고, 샘플러 바인딩도 필요 없습니다.</div>
+        <div class="feature"><span class="ft-name">하프 해상도 버퍼 업샘플</span><code>Gather</code>로 저해상 깊이 4개를 받아 깊이 차로 가중치를 직접 줍니다(경계 번짐 방지).</div>
+        <div class="feature"><span class="ft-name">다운샘플·블러</span><code>Sample</code> Bilinear를 텍셀 경계에 찍어 fetch 1회로 4텍셀 평균을 얻습니다(듀얼 필터·가우시안 탭 절약).</div>
+        <div class="feature"><span class="ft-name">정점 셰이더 디스플레이스먼트·지형</span><code>SampleLevel(s, uv, 0)</code>. VS엔 미분이 없으니 LOD를 직접 줍니다.</div>
+        <div class="feature"><span class="ft-name">스플라인·VAT·뼈 행렬·인스턴스 데이터</span><code>Load</code> + 셰이더 보간. 포맷은 <code>R32G32B32A32_FLOAT</code>/<code>R16G16B16A16_FLOAT</code>, 밉 없음, sRGB 아님.</div>
+        <div class="feature"><span class="ft-name">재질 ID·마스크 인덱스</span><code>Load</code>(또는 Point). 정수 포맷(<code>R8_UINT</code>)은 애초에 필터 샘플링이 불가능해 실수를 막아 줍니다.</div>
+        <div class="feature"><span class="ft-name">컬러 그레이딩 3D LUT · BRDF LUT</span>연속 함수라 <code>Sample</code> Linear가 맞습니다. 단 <code>uv = (c·(N−1) + 0.5)/N</code> 반텍셀 보정은 필수입니다.</div>
+        <div class="feature"><span class="ft-name">그림자맵</span><code>SampleCmpLevelZero</code> + <code>COMPARISON_MIN_MAG_LINEAR_MIP_POINT</code>. 더 넓게는 N×N 루프나 <code>GatherCmp</code> 가중 PCF.</div>
+        <div class="feature"><span class="ft-name">아틀라스·frac 타일·트라이플래너</span><code>SampleGrad</code>에 연속 좌표의 미분을 넘겨 이음새를 없앱니다. 아틀라스는 타일 경계 패딩도 필요합니다.</div>
+        <div class="feature"><span class="ft-name">컴퓨트 이미지 처리</span>픽셀 1:1이면 <code>Load</code>나 <code>RWTexture</code>, 리샘플링이면 <code>SampleLevel</code>. 그룹 공유 메모리 타일링과 함께 씁니다.</div>
+        <div class="feature"><span class="ft-name">UI·픽셀 아트</span>정수 배율이면 Point <code>Sample</code>이나 <code>Load</code>. 비정수 배율이면 경계만 부드럽게 하는 "sharp bilinear" 트릭을 씁니다.</div>
+      </div>
+    </section>
+
     <!-- ========================================================= -->
     <!-- 5. 그래픽스 API -->
     <!-- ========================================================= -->
@@ -1136,6 +1346,7 @@ fn main(
 <script src="js/demos-adv3.js"></script>
 <script src="js/demos-adv4.js"></script>
 <script src="js/demos-pipeline.js"></script>
+<script src="js/demos-texsample.js"></script>
 <script src="js/main.js"></script>
 <script>
 /* 임베드된 구현 사례연구 iframe 제어(오른쪽 화면 병합용, 여러 개 지원):

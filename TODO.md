@@ -52,3 +52,14 @@ RenderDoc 스타일 타임라인 스크러버 — 한 프레임이 패스 순서
 - [x] `docs/CURRICULUM.md` PART 9 캡스톤 상태 추가.
 
 > 후속(선택): 데모를 실제 브라우저에서 열어 육안 확인(현재 헤드리스 환경이라 문법·구조·규칙만 검증). WebGL 실패 시 Canvas2D 폴백으로 안전.
+
+---
+
+## 텍스처 읽기 함수: Load · Sample 계열 (완료)
+
+- [x] `js/demos-texsample.js` — 2D 해부 4종(텍셀 해부·주소 모드 / 픽셀 발자국·LOD·텍셀 수 / 스플라인 물고기·ID 맵 데이터 텍스처 / Gather 순서·엣지) + WebGL2 A/B 분할 2종(3D 바닥 Load·Sample·SampleLevel·SampleGrad·SampleBias·아틀라스 frac 이음새·밉 색 시각화 / 그림자 Load 비교·SampleCmp·N×N PCF).
+- [x] 개념 트랙 `index.html` 4장 `#texsample` 섹션 + 사이드바 + 비교표(Load vs Sample, 전체 함수, 셰이더 단계, API 대응) + 상황별 선택 카드.
+- [x] 구현 트랙 `impl/04-texsample.html`(WebGL 히어로, D3D11 뷰·샘플러, 함수별 HLSL, 데이터 텍스처·업샘플·PCF 실전, 1D 정밀도 gdemo) + 허브 카드 7/7 + 04-shaderlang page-nav 연결.
+- [x] `docs/CURRICULUM.md` PART 4 행 추가.
+
+> 후속(선택): 실제 GPU 브라우저에서 WebGL2 데모 육안 확인(헤드리스 SwiftShader로만 검증). 03-texmap·07-mipmap 페이지에서 04-texsample로 교차 링크 추가 검토.
